@@ -19,7 +19,7 @@ from __future__ import annotations
 import uuid
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 from pydantic import BaseModel, Field
 
 from app.adapters import adapter_for
@@ -29,7 +29,7 @@ from app.core.logging import get_logger
 from app.core.rbac import Permission, require_permission
 from app.core.security import TokenError, create_stream_token, decode_token
 from app.core.urls import redact
-from app.services import audit
+from app.services import audit, focus
 from app.services import camera as camera_service
 
 log = get_logger("api.streams")
@@ -143,6 +143,34 @@ async def open_stream(
         hls_url=hls_url,
         rtsp_url=rtsp_url,
     )
+
+
+@router.post(
+    "/cameras/{camera_id}/focus",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Say a camera is on screen, so ANPR analyses it first",
+)
+async def focus_camera(
+    camera_id: uuid.UUID,
+    session: DbSession,
+    user: Annotated[CurrentUser, Depends(require_permission(Permission.STREAM_VIEW))],
+) -> Response:
+    """A heartbeat from the live page while it shows a camera.
+
+    The workers cannot analyse every camera at once and rotate the rest; a
+    watched camera goes first, so the one an operator is looking at is the one
+    with boxes on it. Sent every 15 seconds and lapsing after 45, so a closed
+    tab needs no clean-up. Same permission as watching: whoever may open the
+    stream may ask for it to be analysed. See `app.services.focus`.
+    """
+    camera = await camera_service.get_camera(session, camera_id)
+    if camera is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Camera not found")
+    # A camera outside the ANPR fleet is on no worker's roster, so asking
+    # for it would be noted and then ignored. Say nothing instead.
+    if camera.anpr_enabled:
+        await focus.watch(camera.camera_code)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @router.get(

@@ -416,6 +416,12 @@ services:
       # cannot be reached it is the feed on screen, and a camera mid-handover
       # when it is opened shows no boxes until it next gets a slot.
       AI_WORKER_PINNED: ${AI_WORKER_PINNED:-CAM-DEMO-01}
+      # Cameras kept open and analysed whenever owned; empty means every
+      # camera a worker owns. Every other camera is opened only while someone
+      # has it on the Live ANPR screen, which puts it first in line (focus,
+      # app/services/focus.py), and stays open five minutes after, unanalysed,
+      # so clicking back costs the grid no new session.
+      AI_WORKER_ALWAYS_ON: ${AI_WORKER_ALWAYS_ON:-}
       # ── CPU budget ──
       #
       # Total intra-op inference threads for the whole worker, divided evenly

@@ -19,7 +19,7 @@ from app.core.config import Settings, get_settings
 from app.core.config import settings as app_settings
 from app.db.session import engine
 from app.main import app
-from app.services import token_store
+from app.services import focus, token_store
 
 
 @pytest.fixture(autouse=True)
@@ -37,6 +37,7 @@ async def _reset_pooled_clients() -> AsyncGenerator[None, None]:
     yield
     await engine.dispose()
     await token_store.close()
+    await focus.close()
 
 
 @pytest.fixture(autouse=True)

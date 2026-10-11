@@ -186,3 +186,66 @@ class TestCoverageIsStated:
         r = rotation(slots=1, slice_seconds=0.0)
         r.update_assignment(streams("A", "B", "C"))
         assert r.sweep_seconds == 0.0
+
+
+class TestWatchedCamerasGoFirst:
+    """A camera on someone's screen is the one where a missing box is seen.
+
+    With a few slots shared among many cameras, rotation alone left a camera
+    an operator had just opened waiting minutes for its turn, showing video
+    with nothing on it.
+    """
+
+    def test_a_watched_camera_is_started_first(self) -> None:
+        r = rotation(slots=1)
+        r.update_assignment(streams("A", "B", "C"))
+        r.focused = frozenset({"C"})
+        assert [s.camera_code for s in r.next_up()] == ["C"]
+
+    def test_it_does_not_wait_for_a_slice_to_end(self) -> None:
+        r = rotation(slots=1, slice_seconds=30.0)
+        r.update_assignment(streams("A", "C"))
+        r.take_slot("A", now=100.0)
+        r.focused = frozenset({"C"})
+        assert r.expired(now=101.0) == ["A"]
+
+    def test_it_takes_a_free_slot_before_anyone_else_s(self) -> None:
+        r = rotation(slots=2, slice_seconds=30.0)
+        r.update_assignment(streams("A", "C"))
+        r.take_slot("A", now=100.0)
+        r.focused = frozenset({"C"})
+        assert r.expired(now=101.0) == []
+        assert [s.camera_code for s in r.next_up()] == ["C"]
+
+    def test_it_never_takes_a_pinned_camera_s_slot(self) -> None:
+        r = rotation(slots=2, slice_seconds=30.0, pinned=("P",))
+        r.update_assignment(streams("P", "A", "C"))
+        r.take_slot("P", now=50.0)
+        r.take_slot("A", now=100.0)
+        r.focused = frozenset({"C"})
+        assert r.expired(now=101.0) == ["A"]
+
+    def test_it_yields_only_to_another_watched_camera(self) -> None:
+        r = rotation(slots=1, slice_seconds=30.0)
+        r.update_assignment(streams("A", "C"))
+        r.take_slot("C", now=100.0)
+        r.focused = frozenset({"C"})
+        assert r.expired(now=200.0) == [], "gave a watched camera's slot to an unwatched one"
+
+        r.update_assignment(streams("A", "C", "D"))
+        r.focused = frozenset({"C", "D"})
+        assert r.expired(now=200.0) == ["C"], "two watched cameras must take turns"
+
+    def test_a_watched_camera_runs_without_a_deadline(self) -> None:
+        r = rotation(slots=1, slice_seconds=30.0)
+        r.update_assignment(streams("A", "B", "C"))
+        r.focused = frozenset({"C"})
+        assert r.slice_for("C") is None
+        assert r.slice_for("A") == 30.0
+
+    def test_with_nobody_watching_rotation_is_unchanged(self) -> None:
+        r = rotation(slots=1, slice_seconds=30.0)
+        r.update_assignment(streams("A", "B"))
+        r.take_slot("A", now=100.0)
+        assert r.expired(now=110.0) == []
+        assert r.expired(now=131.0) == ["A"]

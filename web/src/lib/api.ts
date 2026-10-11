@@ -274,6 +274,13 @@ export const probeCamera = (id: string) =>
 export const openStream = (id: string) =>
   request<StreamGrant>(`/api/v1/cameras/${id}/stream`)
 
+/**
+ * Heartbeat: this camera is on screen, so the ANPR workers analyse it first.
+ * Lapses 45 s after the last one, so a closed tab needs no clean-up.
+ */
+export const focusCamera = (id: string) =>
+  request<void>(`/api/v1/cameras/${id}/focus`, { method: 'POST' })
+
 export const getDepartments = () => request<Department[]>('/api/v1/departments')
 
 export const getVmsInstances = () => request<VmsInstance[]>('/api/v1/vms')

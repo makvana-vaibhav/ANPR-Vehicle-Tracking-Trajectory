@@ -41,19 +41,16 @@
  * its video comes from rather than left to be guessed at — a judge is entitled
  * to know whether they are looking at a live camera or a replayed clip, and a
  * platform that blurred the two would be misrepresenting the capability being
- * demonstrated. The demonstration fleet is three cameras on one corridor, all
- * replaying the same recorded footage, and each says so.
+ * demonstrated. The fleet is the organisers' live grid plus one recorded
+ * fallback camera, which says so.
  *
- * Analysis does not depend on this screen. Opening a camera shows what it
- * found; it does not cause it to look.
- *
- * ANPR runs on the cameras a worker is assigned to, which by default is **one**
- * — every worker decodes its camera's full frame rate, so three of them sharing
- * a laptop tripled capture-to-event latency (measured 266 ms with one, 507 ms
- * with three, and 8.5 s when the footage was heavier still). A late reading
- * describes a car that has already moved on, and no amount of synchronisation
- * can put its box in the right place. `make ai-multi` starts all three when the
- * demo needs cross-camera linking.
+ * **Opening a camera causes it to be analysed.** One laptop cannot read plates
+ * on the whole grid at once — each analysed camera costs about a core — so the
+ * workers run a short always-on list and rotate the rest. While a camera is
+ * open here the page sends a heartbeat (`api.focusCamera`), and the worker that
+ * owns the camera puts it first: opened if need be, analysed within a few
+ * seconds, and kept analysed until the page moves on. See
+ * `services/api/app/services/focus.py` and `ai_worker.rotation`.
  */
 
 import { useEffect, useMemo, useRef, useState } from 'react'
@@ -71,6 +68,7 @@ import {
   SectionLabel,
   StatusDot,
 } from '@/components/ui'
+import { useCameraFocus } from '@/hooks/useCameraFocus'
 import { useCameraBoxes, useCameraEvents } from '@/hooks/useEventStream'
 import * as api from '@/lib/api'
 import { isPositionRefresh } from '@/lib/events'
@@ -215,6 +213,9 @@ export default function LiveAnpr() {
     }
   }, [selected])
 
+  // The camera on screen is analysed first, for as long as it is on screen.
+  useCameraFocus(selected?.id ?? null)
+
   const isSandbox = selected?.vms_name?.toLowerCase().includes('sandbox') ?? false
 
   return (
@@ -223,9 +224,8 @@ export default function LiveAnpr() {
     // from under the operator is worse than one that clips.
     <div className="flex h-full flex-col gap-4 overflow-hidden p-6">
       {/* Says which cameras are *being read*, not just which exist. Every
-          camera streams, but ANPR runs on the ones a worker is assigned to —
-          one by default, so a reading lands within a few hundred milliseconds
-          of the frame it came from and its box sits on the right vehicle. */}
+          camera streams, but ANPR runs on a short always-on list plus the
+          camera open here, which goes first. */}
       <PageHeader
         title="Live ANPR"
         subtitle={
@@ -236,13 +236,11 @@ export default function LiveAnpr() {
               {activeCodes.size} being read
             </span>
             <InfoHint label="How analysis is assigned">
-              Every camera streams; ANPR runs only on the cameras a worker is
-              assigned to, which is one by default. A worker decodes its
-              camera&rsquo;s full frame rate, so three sharing a laptop tripled
-              capture-to-event latency — and a late reading describes a car that
-              has already moved on. <code className="font-mono">make ai-multi</code>{' '}
-              starts all three when the demo needs cross-camera linking.
-              Opening a camera shows what it found; it does not cause it to look.
+              Every camera streams to this screen, but one machine cannot read
+              plates on all of them at once: each analysed camera costs about a
+              core. ANPR runs continuously on a short always-on list, and the
+              camera open here is analysed first for as long as it is open —
+              its boxes start within a few seconds of opening it.
             </InfoHint>
           </>
         }

@@ -66,9 +66,16 @@ _RESOURCE_TYPES = {
 }
 
 
+#: Never audited, by suffix. `/focus` is the live page's heartbeat, sent every
+#: 15 seconds while a camera is on screen (app.services.focus). The viewing it
+#: belongs to is audited explicitly when the stream is opened (`camera.view`);
+#: a row per heartbeat would add four a minute per viewer and say nothing new.
+_EXCLUDED_SUFFIXES = ("/focus",)
+
+
 def _should_audit(request: Request) -> bool:
     path = request.url.path
-    if path in _EXCLUDED_PATHS:
+    if path in _EXCLUDED_PATHS or path.endswith(_EXCLUDED_SUFFIXES):
         return False
     if request.method in _MUTATING_METHODS:
         return True

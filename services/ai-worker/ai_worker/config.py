@@ -69,6 +69,27 @@ class WorkerSettings(BaseSettings):
     # Cameras that never yield their slot — the demonstration feed, or a
     # junction under active investigation. Comma-separated codes.
     ai_worker_pinned: str = ""
+    # Cameras whose streams are kept open and analysed whenever this worker
+    # owns them. Empty means every camera it owns. On a machine that cannot
+    # decode a whole grid — every open 1080p stream costs about a fifth of a
+    # core — this is the short list that always reads plates; any other camera
+    # is opened only while someone has it on screen (focus, below). Pinned
+    # cameras are always on. Comma-separated codes, the same for every worker.
+    ai_worker_always_on: str = ""
+
+    # ── focus: what is on someone's screen ──
+    # Where the API records the live page's heartbeat (app.services.focus),
+    # and how often to read it. A watched camera this worker owns is opened if
+    # need be and analysed ahead of everything but pinned cameras.
+    focus_key: str = "nagarnetra:focus"
+    focus_poll_s: float = 2.0
+    # How long a camera's stream stays open, unanalysed, after it was last on
+    # screen, so that clicking back to it does not open a new grid session —
+    # the grid refuses our login when sessions come and go too often.
+    focus_linger_s: float = 300.0
+    # At most this many streams per worker opened for viewers rather than for
+    # the always-on list; past it the least recently watched closes first.
+    focus_max_streams: int = Field(default=3, ge=0)
 
     # ── pipeline ──
     ai_config: str = "stream"

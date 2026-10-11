@@ -21,8 +21,10 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
+import redis.asyncio as aioredis
 from ailab import runtime
 from ailab.config import RunConfig
+from redis.exceptions import RedisError
 from ailab.stream import SourceIdentity, StreamRunner, StreamUnavailable
 from ailab.stream.reader import redact
 
@@ -111,8 +113,17 @@ class AiWorker:
         self.sink = RedisEventSink(
             settings.redis_url, settings.event_stream_key, settings.event_stream_maxlen
         )
-        #: Every camera this worker owns. Each gets a stream, kept open.
+        #: Every camera this worker owns, whether or not its stream is open.
         self._assigned: dict[str, CameraStream] = {}
+        #: Opened and analysed whenever owned; empty means every owned camera.
+        self._always_on = frozenset(
+            c.strip() for c in settings.ai_worker_always_on.split(",") if c.strip()
+        )
+        #: Cameras on someone's screen now, as the API last recorded them.
+        self._focus: frozenset[str] = frozenset()
+        #: When each owned camera was last on someone's screen (monotonic).
+        self._last_watched: dict[str, float] = {}
+        self._focus_redis: aioredis.Redis | None = None
         #: Open (or opening) streams, by camera.
         self.tasks: dict[str, CameraTask] = {}
         #: Which open streams are analysed now. Inference slots are what the
@@ -155,21 +166,86 @@ class AiWorker:
             self.settings.ai_worker_max_cameras,
         )
         try:
+            next_pass = 0.0
             while not self._shutdown.is_set():
-                await self._reconcile()
+                # Focus is read every couple of seconds and a change acts at
+                # once, so a camera someone opens is analysed in seconds rather
+                # than at the next full pass.
+                focus = await self._read_focus()
+                # So is a stream that has just opened: a camera opened because
+                # someone is watching it should start analysing now, not at
+                # the next full pass twenty seconds away.
+                newly_open = any(t.opened and not t.open_seen for t in self.tasks.values())
+                if time.monotonic() >= next_pass or focus != self._focus or newly_open:
+                    self._focus = focus
+                    await self._reconcile()
+                    next_pass = time.monotonic() + self.settings.discovery_interval_s
                 try:
                     await asyncio.wait_for(
-                        self._shutdown.wait(),
-                        timeout=self.settings.discovery_interval_s,
+                        self._shutdown.wait(), timeout=self.settings.focus_poll_s
                     )
                 except TimeoutError:
                     continue
         finally:
             await self._stop_all()
+            if self._focus_redis is not None:
+                await self._focus_redis.aclose()
             # Drain queued crops before the sink closes, so a clean shutdown
             # does not throw away evidence that was already encoded.
             self._crops.close()
             self.sink.close()
+
+    async def _read_focus(self) -> frozenset[str]:
+        """Cameras this worker owns that are on someone's screen now.
+
+        Only owned ones, so a camera another worker owns being opened does not
+        set this one reconciling. On a Redis failure the last answer stands:
+        focus is a priority, and losing it for a moment must not close streams.
+        """
+        if self._focus_redis is None:
+            self._focus_redis = aioredis.from_url(
+                self.settings.redis_url,
+                decode_responses=True,
+                socket_connect_timeout=3,
+                socket_timeout=3,
+            )
+        try:
+            codes = await self._focus_redis.zrangebyscore(
+                self.settings.focus_key, f"({time.time()}", "+inf"
+            )
+        except (RedisError, OSError) as exc:
+            log.debug("could not read focus: %s", exc)
+            return self._focus
+        return frozenset(code for code in codes if code in self._assigned)
+
+    def _wanted(self, now: float) -> tuple[set[str], set[str]]:
+        """Which owned cameras should have a stream open, and which be analysed.
+
+        Always-on cameras are both. A camera on someone's screen is both, and
+        stays open — unanalysed — for `focus_linger_s` after it leaves the
+        screen, so clicking back to it costs the grid no new session.
+        """
+        owned = set(self._assigned)
+        for code in self._focus:
+            self._last_watched[code] = now
+        for code in [c for c in self._last_watched if c not in owned]:
+            del self._last_watched[code]
+
+        base = (
+            owned
+            if not self._always_on
+            else {c for c in owned if c in self._always_on or c in self.rotation.pinned}
+        )
+        recent = sorted(
+            (
+                code
+                for code, seen in self._last_watched.items()
+                if code not in base and now - seen < self.settings.focus_linger_s
+            ),
+            key=lambda code: -self._last_watched[code],
+        )[: self.settings.focus_max_streams]
+        open_set = base | set(recent)
+        return open_set, base | (set(self._focus) & open_set)
 
     async def _discover(self) -> list[CameraStream]:
         """Every camera this worker owns — not just the ones it can run now."""
@@ -236,11 +312,20 @@ class AiWorker:
         self._assigned = {s.camera_code: s for s in await self._discover()}
         self._backoff.retain(frozenset(self._assigned))
         now = time.monotonic()
+        open_set, analysable = self._wanted(now)
 
-        # Cameras that left the fleet, or moved to another worker.
+        # Cameras that left the fleet, moved to another worker, or were only
+        # open because someone was watching them, a while ago now.
         for code in list(self.tasks):
             if code not in self._assigned:
                 log.info("camera %s no longer assigned; stopping", code)
+                self._stop(code)
+            elif code not in open_set:
+                log.info(
+                    "closing %s; it has not been on anyone's screen for %.0f min",
+                    code,
+                    self.settings.focus_linger_s / 60,
+                )
                 self._stop(code)
 
         # Streams that opened since the last pass. Before the deaths below, so
@@ -281,12 +366,21 @@ class AiWorker:
                 )
             self._stop(code)
 
-        # Open what is not open, pinned cameras first, one at a time: a worker
-        # opening a dozen grid streams in the same instant is a burst to the
-        # far end, which is what a per-account limiter is there to stop.
+        # Open what is not open — pinned cameras first, then watched ones — one
+        # at a time: a worker opening a dozen grid streams in the same instant
+        # is a burst to the far end, which is what a per-account limiter is
+        # there to stop.
         unopened = sorted(
-            (s for code, s in self._assigned.items() if code not in self.tasks),
-            key=lambda s: (s.camera_code not in self.rotation.pinned, s.camera_code),
+            (
+                s
+                for code, s in self._assigned.items()
+                if code in open_set and code not in self.tasks
+            ),
+            key=lambda s: (
+                s.camera_code not in self.rotation.pinned,
+                s.camera_code not in self._focus,
+                s.camera_code,
+            ),
         )
         opened_now = 0
         for stream in unopened:
@@ -303,14 +397,26 @@ class AiWorker:
             self._start(stream, 0)
             opened_now += 1
 
-        # Share the inference slots among the streams that are actually up.
+        # Share the inference slots among the streams that are up and wanted
+        # analysed; one kept open only because it was watched recently waits.
+        self.rotation.focused = self._focus
         self.rotation.update_assignment(
-            [t.stream for t in self.tasks.values() if t.opened and t.alive]
+            [
+                t.stream
+                for code, t in self.tasks.items()
+                if t.opened and t.alive and code in analysable
+            ]
         )
         for code in self.rotation.expired():
             self._pause(code)
         for stream in self.rotation.next_up():
             self._analyse(stream.camera_code)
+        # A camera can also lose its slot without its turn ending: nobody is
+        # watching it any more, or it left the rotation with its stream.
+        for code, task in self.tasks.items():
+            if task.analyse.is_set() and code not in self.rotation.started_at:
+                task.analyse.clear()
+                log.info("pausing analysis of %s; it is no longer on anyone's screen", code)
 
         self._log_coverage()
 
@@ -324,7 +430,9 @@ class AiWorker:
         log.info(
             "analysing %s %s",
             code,
-            f"for {turn:.0f}s" if turn else "continuously",
+            "while it is on screen"
+            if code in self._focus
+            else f"for {turn:.0f}s" if turn else "continuously",
         )
 
     def _pause(self, code: str) -> None:
@@ -332,7 +440,7 @@ class AiWorker:
         task = self.tasks.get(code)
         if task is not None:
             task.analyse.clear()
-        log.info("pausing analysis of %s; its turn is up and cameras are waiting", code)
+        log.info("pausing analysis of %s; its slot is wanted elsewhere", code)
 
     def _log_coverage(self) -> None:
         """Say what is running and, honestly, what is not."""
@@ -352,6 +460,8 @@ class AiWorker:
             if sweep > 0
             else f"; {open_streams} streams open, every one analysed continuously"
         )
+        if self._focus:
+            coverage += f"; on screen: {', '.join(sorted(self._focus))}"
         now = time.monotonic()
         for host, left in self._backoff.paused_hosts(now).items():
             coverage += (

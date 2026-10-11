@@ -32,11 +32,18 @@ different one.
 
 ## Pinning
 
-Some cameras should never yield: the one an operator is watching, a junction
-under active investigation, the demonstration feed. Those are pinned and hold a
-slot permanently. Pinning more cameras than there are slots is a configuration
-error and is reported as one, because the alternative is silently starving
-every rotating camera.
+Some cameras should never yield: a junction under active investigation, the
+demonstration feed. Those are pinned and hold a slot permanently. Pinning more
+cameras than there are slots is a configuration error and is reported as one,
+because the alternative is silently starving every rotating camera.
+
+## Focus
+
+A camera on someone's screen (`focused`, from the live page's heartbeat) goes
+first. It does not wait for another camera's slice to end — it takes the slot
+of the longest-running camera nobody is watching — and it yields only to
+another watched camera. The one camera where a missing box is noticed is the
+one that always has its boxes.
 """
 
 from __future__ import annotations
@@ -63,6 +70,8 @@ class Rotation:
     slots: int
     slice_seconds: float
     pinned: frozenset[str] = frozenset()
+    #: Cameras on someone's screen right now. Replaced every pass.
+    focused: frozenset[str] = frozenset()
 
     #: Every camera this worker owns, whether or not it currently holds a slot.
     assigned: dict[str, CameraStream] = field(default_factory=dict)
@@ -92,13 +101,11 @@ class Rotation:
             )
 
     def expired(self, now: float | None = None) -> list[str]:
-        """Running cameras whose slice is up and which should yield.
+        """Running cameras which should yield their slot now.
 
         A camera only yields if somebody is actually waiting. Rotating a camera
-        out to replace it with nothing would cost a reconnect and buy nothing.
+        out to replace it with nothing would cost a scene cut and buy nothing.
         """
-        if self.slice_seconds <= 0:
-            return []
         now = time.monotonic() if now is None else now
 
         waiting = [
@@ -109,15 +116,35 @@ class Rotation:
         if not waiting:
             return []
 
-        candidates = [
+        running = sorted(
             (started, code)
             for code, started in self.started_at.items()
-            if code not in self.pinned and now - started >= self.slice_seconds
-        ]
-        candidates.sort()
-        # Yield no more slots than there are cameras to fill them, oldest
-        # first, so the longest-running camera is the first to step aside.
-        return [code for _started, code in candidates[: len(waiting)]]
+            if code not in self.pinned
+        )
+        yielding: list[str] = []
+
+        # A watched camera does not wait for a slice to end: someone is
+        # looking at it. It takes the slot of the longest-running camera that
+        # nobody is watching.
+        watched_waiting = [code for code in waiting if code in self.focused]
+        short = len(watched_waiting) - max(0, self.slots - len(self.started_at))
+        if short > 0:
+            unwatched = [code for _started, code in running if code not in self.focused]
+            yielding += unwatched[:short]
+
+        if self.slice_seconds > 0:
+            due = [
+                code
+                for started, code in running
+                if code not in yielding
+                and now - started >= self.slice_seconds
+                # A watched camera yields only to another watched camera.
+                and (code not in self.focused or watched_waiting)
+            ]
+            # Yield no more slots than there are cameras to fill them, oldest
+            # first, so the longest-running camera is the first to step aside.
+            yielding += due[: max(0, len(waiting) - len(yielding))]
+        return yielding
 
     def next_up(
         self, admit: Callable[[CameraStream], bool] | None = None
@@ -125,9 +152,9 @@ class Rotation:
         """Cameras that should be started now, to fill free slots.
 
         Pinned cameras first — they are pinned because they matter — then the
-        cameras that have had the fewest slices, so a fleet larger than the
-        slot count is swept evenly rather than favouring whichever codes sort
-        first.
+        ones on someone's screen, then the cameras that have had the fewest
+        slices, so a fleet larger than the slot count is swept evenly rather
+        than favouring whichever codes sort first.
 
         `admit` is asked in that order and only until the slots are full, so a
         camera it turns away — one backing off — leaves its place to the next
@@ -145,6 +172,7 @@ class Rotation:
         idle.sort(
             key=lambda s: (
                 0 if s.camera_code in self.pinned else 1,
+                0 if s.camera_code in self.focused else 1,
                 self.served.get(s.camera_code, 0),
                 s.camera_code,
             )
@@ -166,7 +194,7 @@ class Rotation:
 
     def slice_for(self, code: str) -> float | None:
         """How long this camera may hold its slot. None means indefinitely."""
-        if code in self.pinned or self.slice_seconds <= 0:
+        if code in self.pinned or code in self.focused or self.slice_seconds <= 0:
             return None
         # Rotation is pointless when the whole fleet fits: cycling a camera out
         # only to start it again costs a reconnect and loses the vehicles in
