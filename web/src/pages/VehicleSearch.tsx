@@ -402,7 +402,7 @@ export default function VehicleSearch() {
             )}
           </section>
 
-          {unplaced.length > 0 && <UnplacedSightings sightings={unplaced} note={route.unplaced_note} />}
+          {unplaced.length > 0 && <UnplacedSightings sightings={unplaced} />}
 
           {route.hop_count === 0 && unplaced.length > 0 ? null : route.hop_count === 0 ? (
             <>

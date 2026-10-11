@@ -210,6 +210,17 @@ export default function VehicleReport() {
     () => [...new Set((route?.hops ?? []).flatMap((h) => h.flags))],
     [route],
   )
+  // Every read in the report, placed or not, in time order: first and last
+  // seen are about the vehicle, not only about the part of it on a map.
+  const seen = useMemo(
+    () =>
+      [
+        ...(route?.hops ?? []).flatMap((h) => [h.arrived_at, h.departed_at]),
+        ...(route?.unplaced_sightings ?? []).map((s) => s.seen_at),
+      ].sort((a, b) => new Date(a).getTime() - new Date(b).getTime()),
+    [route],
+  )
+  const hasRoute = (route?.camera_count ?? 0) >= 2
 
   async function downloadCsv() {
     try {
@@ -275,32 +286,59 @@ export default function VehicleReport() {
             <h2 className="mb-2 text-[11px] font-semibold uppercase tracking-[0.14em] text-zinc-600">
               Summary
             </h2>
-            {route.hop_count === 0 && route.unplaced_sightings.length === 0 ? (
+            {seen.length === 0 ? (
               <p>This plate was not read in the window.</p>
             ) : (
-              <dl className="grid grid-cols-2 gap-x-6 gap-y-1 sm:grid-cols-3 print:grid-cols-3">
-                <Fact label="First seen" value={route.first_seen ? istStamp(route.first_seen) : '—'} />
-                <Fact label="Last seen" value={route.last_seen ? istStamp(route.last_seen) : '—'} />
-                <Fact
-                  label="Cameras on the route"
-                  value={`${route.camera_count} (${route.hop_count} visit${route.hop_count === 1 ? '' : 's'})`}
-                />
-                <Fact label="Straight-line distance" value={`at least ${route.distance_km} km`} />
-                <Fact label="Elapsed" value={minutes(route.duration_s)} />
-                <Fact
-                  label="Average speed"
-                  value={route.average_kmph !== null ? `at least ${route.average_kmph} km/h` : '—'}
-                />
-                <Fact label="Weakest read" value={route.confidence.toFixed(2)} />
-                <Fact
-                  label="Legs needing explanation"
-                  value={route.is_plausible ? 'none' : String(route.flagged_hop_count)}
-                />
-                <Fact
-                  label="Seen where position unknown"
-                  value={String(route.unplaced_sightings.length)}
-                />
-              </dl>
+              <>
+                {route.hop_count === 0 && (
+                  <p className="mb-2">
+                    Read only where the camera&rsquo;s position is unknown, so no route can be
+                    drawn. The reads are listed below.
+                  </p>
+                )}
+                <dl className="grid grid-cols-2 gap-x-6 gap-y-1 sm:grid-cols-3 print:grid-cols-3">
+                  <Fact label="First seen" value={istStamp(seen[0]!)} />
+                  <Fact label="Last seen" value={istStamp(seen[seen.length - 1]!)} />
+                  <Fact
+                    label="Cameras on the route"
+                    value={`${route.camera_count} (${route.hop_count} visit${route.hop_count === 1 ? '' : 's'})`}
+                  />
+                  {/* A distance, a speed and a leg need two placed cameras;
+                      with fewer there is nothing to measure, and a zero would
+                      read as a measurement. */}
+                  <Fact
+                    label="Straight-line distance"
+                    value={hasRoute ? `at least ${route.distance_km} km` : '—'}
+                  />
+                  <Fact
+                    label="First to last seen"
+                    value={minutes(
+                      (new Date(seen[seen.length - 1]!).getTime() - new Date(seen[0]!).getTime()) /
+                        1000,
+                    )}
+                  />
+                  <Fact
+                    label="Average speed"
+                    value={
+                      hasRoute && route.average_kmph !== null
+                        ? `at least ${route.average_kmph} km/h`
+                        : '—'
+                    }
+                  />
+                  <Fact
+                    label="Weakest read on the route"
+                    value={route.hop_count > 0 ? route.confidence.toFixed(2) : '—'}
+                  />
+                  <Fact
+                    label="Legs needing explanation"
+                    value={hasRoute ? (route.is_plausible ? 'none' : String(route.flagged_hop_count)) : '—'}
+                  />
+                  <Fact
+                    label="Seen where position unknown"
+                    value={String(route.unplaced_sightings.length)}
+                  />
+                </dl>
+              </>
             )}
           </section>
 
@@ -450,7 +488,13 @@ export default function VehicleReport() {
               between cameras, so every distance and speed here is a lower bound on what was
               driven.
             </p>
-            {route.unplaced_sightings.length > 0 && <p>{route.unplaced_note}</p>}
+            {route.unplaced_sightings.length > 0 && (
+              <p>
+                Reads at cameras whose position is not known are listed separately. They are real
+                reads, but no distance or speed can be measured to them, so they are not on the
+                route.
+              </p>
+            )}
             <p>
               The platform reads plates only on cameras it is analysing at the time, and on this
               deployment that is a few at a time. A camera that was not being analysed could not

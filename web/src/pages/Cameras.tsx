@@ -287,7 +287,7 @@ export default function Cameras() {
           <>
             <span>{cameras.length} registered</span>
             <span className="text-muted-foreground/40">·</span>
-            <span>{cameras.filter((c) => c.anpr_enabled).length} analysed for plates</span>
+            <span>{cameras.filter((c) => c.anpr_enabled).length} enabled for plate reading</span>
             <InfoHint label="What onboarding a camera does">
               A camera appears on the map, starts being health-probed, and joins
               the ANPR fleet if it has a stream and analysis is enabled. Every
@@ -303,17 +303,21 @@ export default function Cameras() {
             <Input
               value={filter}
               onChange={(e) => setFilter(e.target.value)}
-              placeholder="Filter by code, name or district"
+              placeholder="Code, name or district"
               aria-label="Filter cameras"
               className="h-8 w-64 py-0"
             />
             {mayCreate && (
               <>
-                <Button variant="outline" className="h-8" onClick={() => setDrawer('import')}>
+                <Button
+                  variant="outline"
+                  className="h-8 shrink-0 whitespace-nowrap"
+                  onClick={() => setDrawer('import')}
+                >
                   Import CSV
                 </Button>
                 <Button
-                  className="flex h-8 items-center gap-1.5"
+                  className="flex h-8 shrink-0 items-center gap-1.5 whitespace-nowrap"
                   onClick={() => {
                     setEditing(null)
                     setForm({ ...EMPTY })

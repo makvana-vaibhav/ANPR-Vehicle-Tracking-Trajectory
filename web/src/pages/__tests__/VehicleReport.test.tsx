@@ -143,6 +143,31 @@ describe('VehicleReport', () => {
     renderReport()
     expect(await screen.findByText(/by A\. Analyst \(analyst\)/)).toBeTruthy()
   })
+
+  it('does not print a zero as a measurement for a plate read only where position is unknown', async () => {
+    vi.mocked(api.getVehicleRoute).mockResolvedValue({
+      ...ROUTE,
+      hops: [],
+      hop_count: 0,
+      camera_count: 0,
+      distance_km: 0,
+      duration_s: 0,
+      average_kmph: null,
+      confidence: 0,
+      is_plausible: true,
+      flagged_hop_count: 0,
+      first_seen: null,
+      last_seen: null,
+    })
+    renderReport()
+    expect(await screen.findByText(/Read only where the camera’s position is unknown/)).toBeTruthy()
+    // First seen comes from the reads that were made, not from the route.
+    const firstSeen = screen.getByText('First seen').nextElementSibling
+    expect(firstSeen?.textContent).not.toBe('—')
+    expect(screen.getByText('Straight-line distance').nextElementSibling?.textContent).toBe('—')
+    expect(screen.getByText('Weakest read on the route').nextElementSibling?.textContent).toBe('—')
+    expect(screen.queryByText(/at least 0 km/)).toBeNull()
+  })
 })
 
 describe('spacedPlate', () => {

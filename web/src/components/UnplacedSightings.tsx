@@ -12,18 +12,15 @@ import { SectionLabel, InfoHint } from '@/components/ui'
 import * as api from '@/lib/api'
 import type { UnplacedSighting } from '@/lib/types'
 
-export default function UnplacedSightings({
-  sightings,
-  note,
-}: {
-  sightings: UnplacedSighting[]
-  note: string
-}) {
+export default function UnplacedSightings({ sightings }: { sightings: UnplacedSighting[] }) {
   return (
     <section>
       <SectionLabel>
         Seen where the camera&rsquo;s position is unknown
-        <InfoHint>{note}</InfoHint>
+        <InfoHint>
+          Real reads of this plate, at cameras whose location has not been confirmed. They are
+          listed here rather than drawn on the map, and no distance or speed is measured to them.
+        </InfoHint>
       </SectionLabel>
       <ul className="mt-1.5 space-y-1.5">
         {sightings.map((sighting) => (

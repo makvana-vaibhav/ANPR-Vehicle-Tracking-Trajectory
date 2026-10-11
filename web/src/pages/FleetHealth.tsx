@@ -77,7 +77,7 @@ export default function FleetHealthPage() {
        * because they were never anything. With those gone, the honest summary
        * is one figure and a breakdown.
        *
-       * "Not yet probed" only appears when it is non-zero. A card permanently
+       * "State unknown" only appears when it is non-zero. A card permanently
        * reading 0, explaining a state that no longer normally occurs, is how
        * a screen stops being read. */}
       {/* The column count follows the number of tiles actually rendered. A
@@ -115,10 +115,10 @@ export default function FleetHealthPage() {
         {health != null && health.unknown > 0 && (
           <StatTile
             variant="strip"
-            label="Not yet probed"
+            label="State unknown"
             value={health.unknown}
-            detail="state unknown, not offline"
-            info="Normally a camera onboarded in the last minute. Availability counts these as not reachable, which is the cautious reading — never-probed and offline are different facts and this keeps them apart."
+            detail="not answering through their integration, or not probed yet"
+            info="Probed, but behind an integration that did not answer — so their own state cannot be told — or onboarded too recently to have been probed. On 11 Oct this was the organisers' grid refusing our login. Availability counts these as not reachable, the cautious reading; unknown and offline are different facts and this keeps them apart."
           />
         )}
       </section>

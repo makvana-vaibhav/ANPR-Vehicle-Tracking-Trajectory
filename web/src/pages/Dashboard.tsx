@@ -160,20 +160,21 @@ export default function Dashboard() {
           </>
         ) : (
           <>
-            {/* "1 / 281" reads as a fleet that is down. It is not: 280 of
-                those have never been probed, and never-probed is a different
-                fact from offline. The tile counts what has actually been
-                answered and says separately how much is unknown. */}
+            {/* "1 / 31" reads as a fleet that is down. It may not be: a
+                camera whose state cannot be told — never probed yet, or
+                behind an integration that is not answering — is unknown, and
+                unknown is a different fact from offline. The tile counts what
+                has actually answered and says separately how much is unknown. */}
             <StatTile
               variant="strip"
               label="Feeds answering"
               value={`${health.online} / ${answering}`}
               detail={
                 health.unknown > 0
-                  ? `${health.unknown} of ${health.total} never probed`
+                  ? `${health.unknown} of ${health.total} state unknown`
                   : `${health.availability_pct.toFixed(1)}% of the registry`
               }
-              info="Counts only cameras that have actually been probed. One that has never been reached is unknown rather than offline — a different fact, and one the availability figure treats cautiously by counting it as not reachable."
+              info="Counts only cameras whose state is known. A camera not probed yet, or behind an integration that is not answering — the organisers' grid refusing our login, say — is unknown rather than offline: its own state cannot be told. Availability counts it as not reachable, the cautious reading."
               tone={
                 answering === 0
                   ? 'warn'
@@ -185,10 +186,10 @@ export default function Dashboard() {
             />
             <StatTile
               variant="strip"
-              label="Analysed for plates"
+              label="Enabled for plates"
               value={String(anprFleet ?? '—')}
               detail={`of ${health.total} registered cameras`}
-              info="How many cameras are enabled for analysis — not how many are being read this second. Every camera streams; ANPR runs only on the ones a worker is assigned to."
+              info="How many cameras may be analysed for plates — not how many are being read this second. One machine cannot read them all at once: ANPR runs continuously on a short always-on list, and on whichever camera is open in Live ANPR."
               to="/anpr"
             />
             <StatTile

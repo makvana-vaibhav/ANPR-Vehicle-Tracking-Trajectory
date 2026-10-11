@@ -525,8 +525,22 @@ export const downloadPlatesReport = (
   query: RouteQuery & { camera_id?: string; plate?: string } = {},
 ) => downloadExport('/api/v1/reports/plates.csv', { ...query })
 
+/**
+ * Query parameters from an object, without the ones that are not set.
+ * `new URLSearchParams({ until: undefined })` sends the word "undefined",
+ * which the API rightly refuses as a timestamp — it broke the printable
+ * report, whose window has no end unless one is chosen.
+ */
+function searchOf(query: Record<string, string | number | boolean | null | undefined>): URLSearchParams {
+  const params = new URLSearchParams()
+  for (const [key, value] of Object.entries(query)) {
+    if (value !== undefined && value !== null && value !== '') params.set(key, String(value))
+  }
+  return params
+}
+
 export const getVehicleRoute = (plate: string, query: RouteQuery = {}) => {
-  const params = new URLSearchParams(query as Record<string, string>)
+  const params = searchOf({ ...query })
   return request<VehicleRoute>(
     `/api/v1/vehicles/${encodeURIComponent(plate)}/route?${params}`,
   )
@@ -534,10 +548,7 @@ export const getVehicleRoute = (plate: string, query: RouteQuery = {}) => {
 
 /** The same route as GeoJSON, for drawing. */
 export const getVehicleRouteGeoJSON = (plate: string, query: RouteQuery = {}) => {
-  const params = new URLSearchParams({ ...query, format: 'geojson' } as Record<
-    string,
-    string
-  >)
+  const params = searchOf({ ...query, format: 'geojson' })
   return request<GeoJSON.FeatureCollection>(
     `/api/v1/vehicles/${encodeURIComponent(plate)}/route?${params}`,
   )
