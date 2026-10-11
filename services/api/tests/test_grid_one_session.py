@@ -168,3 +168,44 @@ class TestTheProxyRetriesOnce:
             )
         assert response.status_code == 403
         assert (await response.aread()).decode() == "one session per IP"
+
+
+class TestARefusedCatalogueIsNotAskedAgainAtOnce:
+    """While the grid refused us, the health monitor asked for the catalogue
+    once per camera — thirty refused requests a sweep, from an address the
+    grid had just told to wait for its cooldown."""
+
+    async def test_a_sweep_makes_one_refused_request_not_thirty(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from app.adapters.sandbox import HostedGridAdapter
+        from app.services.grid_session import CatalogueCache
+
+        requests: list[str] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            requests.append(request.url.path)
+            return httpx.Response(
+                403,
+                text="watch time limit reached — please wait for your cooldown, then watch again",
+            )
+
+        async def headers() -> dict[str, str]:
+            return {"User-Agent": "test", "Cookie": "sentinel=test"}
+
+        real_client = httpx.AsyncClient
+        monkeypatch.setattr(
+            grid_session_module.httpx,
+            "AsyncClient",
+            partial(real_client, transport=httpx.MockTransport(handler)),
+        )
+        monkeypatch.setattr(grid_session_module.session, "headers", headers)
+        monkeypatch.setattr(grid_session_module, "catalogue", CatalogueCache())
+
+        adapter = HostedGridAdapter(name="grid", base_url="https://grid.example")
+        results = [await adapter._fetch_catalogue(5.0) for _ in range(30)]
+
+        assert len(requests) == 1, "every camera in the sweep asked the grid again"
+        assert all(payload is None for payload, _url, _error in results)
+        # Each camera is told what the grid said, not merely that it failed.
+        assert all("watch time limit reached" in error for _p, _u, error in results)

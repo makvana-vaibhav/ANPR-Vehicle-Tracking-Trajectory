@@ -98,9 +98,16 @@ class HostedGridAdapter(CameraAdapter):
         cached = grid_session.catalogue.get()
         if cached is not None:
             return cached, f"{self.base_url.rstrip('/')}{CATALOGUE_PATHS[0]} (cached)", ""
+        # A failure stands for a while too, so a sweep of thirty cameras makes
+        # one failed request rather than thirty — and none at all while the
+        # grid has asked us to wait out a cooldown.
+        failed = grid_session.catalogue.failure()
+        if failed is not None:
+            return None, f"{self.base_url.rstrip('/')}{CATALOGUE_PATHS[0]} (recent failure)", failed
 
         last_error = "no catalogue path configured"
         attempted = ""
+        refused = False
         # The catalogue is behind the CDN's login. `grid_session` holds that
         # session; without credentials this returns bare headers and the
         # request lands on the login page, which is reported as such below.
@@ -122,7 +129,15 @@ class HostedGridAdapter(CameraAdapter):
                         )
                         await grid_session.session.refused(headers.get("Cookie"))
                         headers = await grid_session.session.headers()
+                        refused = True
                         continue
+                    if response.status_code == 403:
+                        # The grid's own refusal — on 11 Oct, "watch time
+                        # limit reached — please wait for your cooldown". The
+                        # whole CDN answers it, so no other path will differ.
+                        last_error = f"the grid refused us: {response.text.strip()[:160]}"
+                        refused = True
+                        break
                     response.raise_for_status()
                     if "json" not in response.headers.get("content-type", ""):
                         last_error = (
@@ -142,6 +157,7 @@ class HostedGridAdapter(CameraAdapter):
                     return payload, attempted, ""
             except (httpx.HTTPError, ValueError) as exc:
                 last_error = str(exc)
+        grid_session.catalogue.put_failure(last_error, refused=refused)
         return None, attempted, last_error
 
     def _credentials(self) -> str:

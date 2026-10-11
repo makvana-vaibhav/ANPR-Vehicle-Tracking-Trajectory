@@ -365,10 +365,19 @@ class CatalogueCache:
     snapshot and the next sweep sees fresh data.
     """
 
+    #: How long a refusal stands before the catalogue is asked again. Only
+    #: successes used to be cached, so while the grid refused us every camera
+    #: probe asked again — thirty refused requests a sweep, from an address the
+    #: grid had just told to wait for its cooldown.
+    REFUSED_TTL = timedelta(minutes=2)
+
     def __init__(self, ttl: timedelta = timedelta(seconds=20)) -> None:
         self._ttl = ttl
         self._payload: object | None = None
         self._fetched_at: datetime | None = None
+        self._failure: str | None = None
+        self._failed_at: datetime | None = None
+        self._failure_ttl = ttl
         self._lock = asyncio.Lock()
 
     def get(self) -> object | None:
@@ -381,6 +390,23 @@ class CatalogueCache:
     def put(self, payload: object) -> None:
         self._payload = payload
         self._fetched_at = datetime.now(UTC)
+        self._failure = None
+        self._failed_at = None
+
+    def failure(self) -> str | None:
+        """The last failure, while it still stands; None once it is time to ask again."""
+        if self._failure is None or self._failed_at is None:
+            return None
+        if datetime.now(UTC) - self._failed_at > self._failure_ttl:
+            return None
+        return self._failure
+
+    def put_failure(self, error: str, refused: bool = False) -> None:
+        """Remember a failed fetch, so a sweep makes one failed request, not
+        thirty. A refusal by the grid stands longer than a network blip."""
+        self._failure = error
+        self._failed_at = datetime.now(UTC)
+        self._failure_ttl = self.REFUSED_TTL if refused else self._ttl
 
     def clear(self) -> None:
         self._payload = None
