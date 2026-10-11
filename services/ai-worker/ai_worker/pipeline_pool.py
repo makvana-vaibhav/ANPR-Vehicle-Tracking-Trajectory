@@ -1,4 +1,10 @@
-"""Loaded inference models, lent to cameras one at a time.
+"""Pipelines, lent to cameras one at a time.
+
+A pipeline is one camera's tracker and bookkeeping wrapped around the models.
+The models themselves are loaded once per process and shared by every
+pipeline (`ailab.pipeline._shared`), so a slot costs its per-camera state
+rather than five ONNX sessions; the pool still matters because the
+per-camera state must have exactly one user at a time.
 
 ## The leak this closes
 

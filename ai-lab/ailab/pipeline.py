@@ -15,6 +15,7 @@ Timing is recorded per stage. "The pipeline runs at 6 fps" is not actionable;
 
 from __future__ import annotations
 
+import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -77,6 +78,37 @@ class RunResult:
     stats: dict[str, Any] = field(default_factory=dict)
 
 
+#: Loaded models, shared by every Pipeline in the process that asks for the
+#: same model with the same settings.
+#:
+#: A Pipeline holds per-camera state (its tracker, scheduler and per-track
+#: bookkeeping) and must stay one camera's alone. The models do not: they set
+#: their state once, at load, and an ONNX Runtime session accepts concurrent
+#: `run` calls. Loading them once per process rather than once per camera is
+#: what lets a worker watch dozens of cameras at once: a slot used to cost the
+#: five sessions' arenas and thread pools, and the grid has thirty cameras.
+_SHARED_MODELS: dict[tuple[str, str, str, str | None], Any] = {}
+_SHARED_LOCK = threading.Lock()
+
+
+def _shared(kind: str, engine: str, section: Any, weights: str | None = None) -> Any:
+    """One instance per model and settings, built on first request."""
+    key = (kind, engine, repr(section), weights)
+    with _SHARED_LOCK:
+        model = _SHARED_MODELS.get(key)
+        if model is None:
+            args = (section, weights) if kind != "ocr" else (section,)
+            model = create(kind, engine, *args)
+            _SHARED_MODELS[key] = model
+        return model
+
+
+def shared_model_count() -> int:
+    """How many distinct models this process has loaded, for health logging."""
+    with _SHARED_LOCK:
+        return len(_SHARED_MODELS)
+
+
 class Pipeline:
     """Builds the components a config asks for and runs footage through them."""
 
@@ -85,15 +117,17 @@ class Pipeline:
         self.timer = StageTimer()
 
         detector_weights = str(config.resolve_path(config.detector.weights))
-        self.detector = create("detector", config.detector.engine, config.detector, detector_weights)
+        self.detector = _shared(
+            "detector", config.detector.engine, config.detector, detector_weights
+        )
 
         plate_weights = (
             str(config.resolve_path(config.plate.weights)) if config.plate.weights else None
         )
-        self.plate_detector = create(
+        self.plate_detector = _shared(
             "plate_detector", config.plate.engine, config.plate, plate_weights
         )
-        self.ocr = create("ocr", config.ocr.engine, config.ocr)
+        self.ocr = _shared("ocr", config.ocr.engine, config.ocr)
 
         self.plate_bearing = {c.lower() for c in config.detector.plate_bearing_classes}
         self._duplicate_plates = 0

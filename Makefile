@@ -229,12 +229,13 @@ ai: ## Start with the AI worker profile
 	@$(MAKE) --no-print-directory wait-healthy
 
 .PHONY: ai-multi
-ai-multi: ## Start all three ANPR workers (one per demo camera)
-	@# Cross-camera linking needs a vehicle seen by more than one camera, so the
-	@# journey demo needs all three. They share the machine, so the per-worker
-	@# thread budget drops to match — otherwise each sizes as if it were alone
-	@# and latency climbs until plate boxes no longer land on the right car.
-	@AILAB_INFERENCE_BUDGET=2 $(COMPOSE) --profile ai --profile ai-multi up -d
+ai-multi: ## Start three ANPR workers that split the camera grid between them
+	@# Each worker owns a hash shard of the roster (AI_WORKER_COUNT=3), so the
+	@# organisers' thirty cameras are watched by three processes instead of one,
+	@# which matters because one process is capped by Python's GIL. They share
+	@# the machine, so the per-worker thread budget drops to match — otherwise
+	@# each sizes as if it were alone and latency climbs.
+	@AILAB_INFERENCE_BUDGET=2 AI_WORKER_COUNT=3 $(COMPOSE) --profile ai --profile ai-multi up -d
 	@$(MAKE) --no-print-directory wait-healthy
 
 .PHONY: scale

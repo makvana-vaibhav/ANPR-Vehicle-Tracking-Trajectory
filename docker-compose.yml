@@ -349,11 +349,14 @@ services:
   #
   # Separate processes rather than threads in one worker because the pipeline's
   # Python-side work (letterbox, NMS, tracker, scheduler, OCR pre/post) holds
-  # the GIL; one process is capped on that whatever the budget. AI_WORKER_
-  # CAMERAS names each process's camera explicitly rather than sharding by
-  # hash, because blake2b puts CAM-DEMO-02 and -03 on the same shard of three.
-  # The list narrows the registry roster, so the camera keeps its resolved URL
-  # and plate regions. The three are one definition, anchored below.
+  # the GIL; one process is capped on that whatever the budget.
+  #
+  # Ownership is a hash shard of the registry roster: `make ai` runs one worker
+  # owning every camera, `make ai-multi` runs three (AI_WORKER_COUNT=3) that
+  # split the organisers' grid between them. AI_WORKER_CAMERAS_<n> can still
+  # name a process's cameras explicitly; it narrows the roster, so each camera
+  # keeps its resolved URL and plate regions. The three share one definition,
+  # anchored below.
   ai-worker: &ai-worker
     build:
       context: .
@@ -364,8 +367,8 @@ services:
     profiles: ["ai"]
     env_file: [.env]
     environment: &ai-worker-env
-      # Which camera this process owns. Overrides discovery entirely.
-      AI_WORKER_CAMERAS: ${AI_WORKER_CAMERAS_1:-CAM-DEMO-01}
+      # An explicit camera list for this process; empty means its hash shard.
+      AI_WORKER_CAMERAS: ${AI_WORKER_CAMERAS_1:-}
       REDIS_URL: redis://redis:6379/0
       EVENT_STREAM_KEY: nagarnetra:events:detections
       MEDIAMTX_API_URL: http://mediamtx:9997
@@ -383,27 +386,24 @@ services:
       SANDBOX_RTSP_USERNAME: ${SANDBOX_RTSP_USERNAME:-}
       SANDBOX_RTSP_PASSWORD: ${SANDBOX_RTSP_PASSWORD:-}
       AI_WORKER_INDEX: "0"
-      AI_WORKER_COUNT: "1"
+      AI_WORKER_COUNT: ${AI_WORKER_COUNT:-1}
       # Concurrent inference slots. Cameras beyond this are rotated through
       # the slots, not dropped.
       #
       # Slots no longer cost CPU: they divide the budget above rather than
-      # each claiming the machine, and CPU measured flat at 574/647/589% for
-      # 3/4/6 slots. What they cost is **memory** — ~1.4 GB each, since every
-      # slot holds its own five models. Four keeps the worker near 4.1 GB with
-      # the rest of the stack at ~2.7 GB, comfortably inside the 11.67 GB VM;
-      # six reaches 6.8 GB and is where the exit-137 kills start. Raise
-      # Docker's memory allocation before raising this. See docs/PERFORMANCE.md.
-      AI_WORKER_MAX_CAMERAS: ${AI_WORKER_MAX_CAMERAS:-1}
+      # each claiming the machine. They used to cost ~1.4 GB of memory each,
+      # because every slot loaded its own five models, which capped a worker
+      # at four cameras. The models are now loaded once per process and
+      # shared (ailab.pipeline._shared), so a slot costs its tracker and a
+      # frame buffer, and twelve cover a third of the organisers' grid with
+      # nothing waiting to rotate in. See docs/PERFORMANCE.md.
+      AI_WORKER_MAX_CAMERAS: ${AI_WORKER_MAX_CAMERAS:-12}
       # How long a camera holds a slot before yielding to one that is waiting.
       AI_WORKER_SLICE_SECONDS: ${AI_WORKER_SLICE_SECONDS:-45}
-      # The demonstration feeds never yield their slots: they are the cameras a
-      # judge is most likely to be watching, and the only ones guaranteed to
-      # have legible plates. All three fit inside AI_WORKER_MAX_CAMERAS, so
-      # nothing rotates and no camera is ever mid-handover when it is opened —
-      # which is what makes a plate box appear promptly rather than whenever
-      # the camera next gets a slot.
-      AI_WORKER_PINNED: ${AI_WORKER_PINNED:-CAM-DEMO-01,CAM-DEMO-02,CAM-DEMO-03}
+      # The recorded fallback camera never yields its slot: when the grid
+      # cannot be reached it is the feed on screen, and a camera mid-handover
+      # when it is opened shows no boxes until it next gets a slot.
+      AI_WORKER_PINNED: ${AI_WORKER_PINNED:-CAM-DEMO-01}
       # ── CPU budget ──
       #
       # Total intra-op inference threads for the whole worker, divided evenly
@@ -481,7 +481,8 @@ services:
     profiles: ["ai-multi"]
     environment:
       <<: *ai-worker-env
-      AI_WORKER_CAMERAS: ${AI_WORKER_CAMERAS_2:-CAM-DEMO-02}
+      AI_WORKER_CAMERAS: ${AI_WORKER_CAMERAS_2:-}
+      AI_WORKER_INDEX: "1"
 
   ai-worker-3:
     <<: *ai-worker
@@ -489,7 +490,8 @@ services:
     profiles: ["ai-multi"]
     environment:
       <<: *ai-worker-env
-      AI_WORKER_CAMERAS: ${AI_WORKER_CAMERAS_3:-CAM-DEMO-03}
+      AI_WORKER_CAMERAS: ${AI_WORKER_CAMERAS_3:-}
+      AI_WORKER_INDEX: "2"
 
   # ── Simulator — synthetic camera fleet ──────────────────────────────
   # Replays footage into MediaMTX as real RTSP, so the platform has live
