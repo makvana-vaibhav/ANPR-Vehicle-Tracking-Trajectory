@@ -24,7 +24,7 @@ from pathlib import Path
 # The script runs from /app inside the container; make the API package importable.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "services" / "api"))
 
-from sqlalchemy import delete, func, select  # noqa: E402
+from sqlalchemy import delete, func, select, text  # noqa: E402
 
 from app.core.config import settings  # noqa: E402
 from app.core.security import hash_password  # noqa: E402
@@ -282,52 +282,79 @@ async def seed_vms(department_ids: dict[str, object]) -> None:
     )
 
 
-#: The standalone demonstration camera, from when exactly one camera in the
-#: registry carried recorded footage. The demonstration fleet in
-#: `data/seed/cameras.csv` replaces it, so this exists only to remove it from
-#: databases seeded before that change.
-LEGACY_DEMO_CODE = "CAM-DEMO"
+#: Cameras this registry no longer carries, removed from databases seeded
+#: before they were dropped.
+#:
+#: `CAM-DEMO` is the original single demonstration camera. The rest are the
+#: simulated Ahmedabad fleet built for SIH26127. The platform now competes in
+#: the Gujarat Police CCTV hackathon, whose live test runs on the organisers'
+#: own camera grid (onboarded by scripts/sync_sandbox.py), so the simulated
+#: fleet shrinks to one recorded camera, CAM-DEMO-01, kept as the fallback
+#: that still plays when the grid cannot be reached.
+RETIRED_CAMERA_CODES = (
+    "CAM-DEMO",
+    "CAM-DEMO-02",
+    "CAM-DEMO-03",
+    "CAM-NRD-01",
+    "CAM-NRD-02",
+    "CAM-NRD-03",
+    "CAM-SGH-01",
+    "CAM-SGH-02",
+    "CAM-SGH-03",
+    "CAM-SPR-01",
+    "CAM-SPR-02",
+    "CAM-SPR-03",
+)
 LEGACY_DEMO_VMS = "NagarNetra ANPR Demonstration"
 
 
-async def retire_legacy_demo_camera() -> None:
-    """Remove the old single `CAM-DEMO` row, if this database still has one.
+async def retire_cameras() -> None:
+    """Remove every camera in `RETIRED_CAMERA_CODES` this database still has.
 
-    The demonstration fleet is now three cameras on the Ashram Road corridor,
-    seeded from `data/seed/cameras.csv` like every other camera, carrying the
-    same `demo` tags this row used to carry alone. Leaving the old row in place
-    would put a fourth camera in a fleet that is supposed to be three, sitting
-    at a position no simulator publishes — which is exactly the kind of
-    unwatchable registry entry commit 4d0346f deleted 251 of.
+    A retired camera sits at a position no simulator publishes, which is the
+    kind of unwatchable registry entry commit 4d0346f deleted 251 of.
 
-    Children go first and explicitly. `detections.camera_id` is ON DELETE SET
-    NULL, so deleting the camera alone would orphan its sightings rather than
-    remove them, and they would then appear in search attached to no camera at
-    all — worse than either keeping or deleting them.
+    Children go first and explicitly. `detections.camera_id` and
+    `alerts.camera_id` are ON DELETE SET NULL, so deleting the camera alone
+    would orphan its sightings rather than remove them, and they would then
+    appear in search attached to no camera at all — worse than either keeping
+    or deleting them. Route history has no foreign key at all: a journey is
+    stored as JSON naming its cameras, so journeys through a retired camera
+    are matched by code. They are what anomaly baselines are learned from, and
+    a baseline over cameras that no longer exist describes nothing.
     """
+    retired = 0
     async with SessionLocal() as session:
-        camera = (
-            await session.execute(
-                select(Camera).where(Camera.camera_code == LEGACY_DEMO_CODE)
+        cameras = (
+            await session.scalars(
+                select(Camera).where(Camera.camera_code.in_(RETIRED_CAMERA_CODES))
             )
-        ).scalar_one_or_none()
+        ).all()
 
-        if camera is None:
-            print(f"  demo camera: no legacy {LEGACY_DEMO_CODE} to retire")
-            return
+        for camera in cameras:
+            # Alerts reference detections *and* cameras, so they go before both.
+            await session.execute(delete(Alert).where(Alert.camera_id == camera.id))
+            await session.execute(
+                delete(Detection).where(Detection.camera_id == camera.id)
+            )
+            await session.execute(
+                delete(CameraHealth).where(CameraHealth.camera_id == camera.id)
+            )
+            await session.execute(
+                text(
+                    "DELETE FROM vehicle_tracks WHERE EXISTS ("
+                    " SELECT 1 FROM jsonb_array_elements(hops->'hops') AS hop"
+                    " WHERE hop->>'camera_code' = :code)"
+                ),
+                {"code": camera.camera_code},
+            )
+            await session.execute(delete(Camera).where(Camera.id == camera.id))
+            retired += 1
 
-        # Alerts reference detections *and* cameras, so they go before both.
-        await session.execute(delete(Alert).where(Alert.camera_id == camera.id))
-        await session.execute(delete(Detection).where(Detection.camera_id == camera.id))
-        await session.execute(
-            delete(CameraHealth).where(CameraHealth.camera_id == camera.id)
-        )
-        await session.execute(delete(Camera).where(Camera.id == camera.id))
-
-        # Its private VMS existed only to keep recorded footage from looking
-        # like a department's live feed. With the camera gone it describes
-        # nothing, and an empty integration on the fleet screen is its own
-        # small piece of fiction.
+        # The original demo camera had a private VMS whose only purpose was to
+        # keep recorded footage from looking like a department's live feed.
+        # With its camera gone it describes nothing, and an empty integration
+        # on the fleet screen is its own small piece of fiction.
         vms = (
             await session.execute(
                 select(VmsInstance).where(VmsInstance.name == LEGACY_DEMO_VMS)
@@ -336,7 +363,9 @@ async def retire_legacy_demo_camera() -> None:
         if vms is not None:
             orphaned = (
                 await session.execute(
-                    select(func.count()).select_from(Camera).where(Camera.vms_id == vms.id)
+                    select(func.count())
+                    .select_from(Camera)
+                    .where(Camera.vms_id == vms.id)
                 )
             ).scalar_one()
             if orphaned == 0:
@@ -346,24 +375,26 @@ async def retire_legacy_demo_camera() -> None:
 
         await session.commit()
 
-    print(f"  demo camera: retired legacy {LEGACY_DEMO_CODE}")
+    if retired:
+        print(f"  retired cameras: removed {retired}")
+    else:
+        print("  retired cameras: none left to remove")
 
 
 async def seed_fleet() -> None:
     """Load the ANPR fleet from data/seed/cameras.csv.
 
-    The committed CSV is the **demonstration fleet**: three cameras on the
-    Ashram Road corridor, each on a real OpenStreetMap road vertex of a real
-    named arterial in a real taluka, all replaying the same clip so that a
-    vehicle genuinely appears on more than one of them and cross-camera linking
-    has something real to link.
+    The committed CSV is one **recorded camera**, CAM-DEMO-01, replaying a
+    clip on a real OpenStreetMap road vertex. The live test runs on the
+    organisers' grid, which scripts/sync_sandbox.py onboards; this camera is
+    the fallback that still plays when the grid cannot be reached, and it is
+    tagged as recorded footage so nobody mistakes it for a live feed.
 
-    Three, rather than the fifty-odd the generator can produce, because the
-    worker divides a single CPU budget across the cameras it is watching. Three
-    cameras get roughly seventeen times the inference budget each, which is what
-    takes capture-to-event latency low enough for a plate box to be drawn on the
-    vehicle rather than behind it. A larger fleet is a `generate_ahmedabad_cameras.py`
-    run away, and costs latency in exactly that proportion.
+    It was three cameras on the Ashram Road corridor, and before that a
+    simulated city fleet; `RETIRED_CAMERA_CODES` removes those from databases
+    seeded before the change. A larger simulated fleet is a
+    `generate_ahmedabad_cameras.py` run away, and the worker divides one CPU
+    budget across every camera it watches, so it costs latency in proportion.
 
     Whatever its size, the CSV is generated by
     `scripts/generate_ahmedabad_cameras.py`, which thins the committed
@@ -594,14 +625,14 @@ async def main() -> int:
         if args.only in ("vms", "all"):
             await seed_vms(department_ids)
         if args.only in ("demo-camera", "all"):
-            await retire_legacy_demo_camera()
+            await retire_cameras()
         if args.only in ("fleet", "all"):
             await seed_fleet()
         # `--only watchlist` is someone asking for it by name; `all` is not.
         # See `seed_watchlist`'s docstring for why the default is off.
         if args.only == "watchlist" or (
-            args.only == "all" and os.environ.get("SEED_WATCHLIST", "").lower()
-            in ("1", "true", "yes")
+            args.only == "all"
+            and os.environ.get("SEED_WATCHLIST", "").lower() in ("1", "true", "yes")
         ):
             await seed_watchlist()
         elif args.only == "all":
