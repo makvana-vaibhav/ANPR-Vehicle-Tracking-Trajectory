@@ -64,7 +64,8 @@ class TestSessionCookie:
             "AsyncClient",
             partial(real_client, transport=httpx.MockTransport(handler)),
         )
-        return GridSession(), responses
+        # Local only: the shared key is the live platform's session.
+        return GridSession(key=None), responses
 
     async def test_a_redirect_with_the_grids_cookie_is_a_session(self, grid) -> None:
         session, responses = grid

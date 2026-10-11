@@ -137,6 +137,29 @@ interface Props {
   overlay?: (videoClock: () => number | null) => ReactNode
 }
 
+/**
+ * The platform's reason for refusing a playlist, from a failed HLS request.
+ *
+ * A 404 is a path nothing is publishing yet, and says nothing worth showing.
+ * Anything else the API refuses carries a JSON `detail` — for a grid camera,
+ * what the grid itself said, such as `one session per IP` — and that is the
+ * sentence an operator needs instead of "nothing is publishing".
+ */
+export function refusalOf(code: number | undefined, request: unknown): string | null {
+  if (!code || code < 400 || code === 404) return null
+  const body =
+    request instanceof XMLHttpRequest && (request.responseType === '' || request.responseType === 'text')
+      ? request.responseText
+      : null
+  if (!body) return null
+  try {
+    const detail: unknown = JSON.parse(body)?.detail
+    return typeof detail === 'string' && detail.trim() ? detail.trim() : null
+  } catch {
+    return null
+  }
+}
+
 /** Wait for ICE gathering, with a ceiling so a stalled gather cannot hang the UI. */
 function waitForIceGathering(pc: RTCPeerConnection, timeoutMs = 2000): Promise<void> {
   if (pc.iceGatheringState === 'complete') return Promise.resolve()
@@ -495,6 +518,12 @@ export default function StreamPlayer({
           },
     )
     hlsRef.current = hls
+    // What the platform said when it last refused the playlist. A camera
+    // nobody is publishing and a grid refusing our session both end with no
+    // video, but only one of them is "nothing is publishing" — and saying
+    // that about the other sends an operator looking at the camera when the
+    // fix is a session (the grid allows one per IP).
+    let refusal: string | null = null
 
     hls.on(Hls.Events.MANIFEST_PARSED, () => {
       if (generationRef.current !== gen) return
@@ -544,11 +573,15 @@ export default function StreamPlayer({
       // the deadline must not overwrite a codec message with a vaguer one.
       if (hlsRef.current !== hls) return
       setState('failed')
-      setError('No video arrived within 15 seconds — nothing is publishing this camera')
+      setError(
+        refusal ?? 'No video arrived within 15 seconds — nothing is publishing this camera',
+      )
     })
 
     hls.on(Hls.Events.ERROR, (_event, data) => {
       if (generationRef.current !== gen) return
+      const said = refusalOf(data.response?.code, data.networkDetails)
+      if (said) refusal = said
       if (!data.fatal) return
 
       // A path that is not being published yet answers 404. That is a normal

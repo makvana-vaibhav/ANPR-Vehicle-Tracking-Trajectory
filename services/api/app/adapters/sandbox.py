@@ -110,6 +110,19 @@ class HostedGridAdapter(CameraAdapter):
             try:
                 async with httpx.AsyncClient(timeout=http_timeout, follow_redirects=True) as client:
                     response = await client.get(attempted, headers=headers)
+                    if grid_session.is_one_session_refusal(
+                        response.status_code, response.text
+                    ):
+                        # Another session holds our address; the grid allows
+                        # one. Ours is shared by every process, so this is
+                        # someone else's — replaced at most once a minute.
+                        last_error = (
+                            "the grid refused our session: one session per IP. "
+                            "Is the grid portal open in a browser on this network?"
+                        )
+                        await grid_session.session.refused(headers.get("Cookie"))
+                        headers = await grid_session.session.headers()
+                        continue
                     response.raise_for_status()
                     if "json" not in response.headers.get("content-type", ""):
                         last_error = (
@@ -118,9 +131,10 @@ class HostedGridAdapter(CameraAdapter):
                             "valid session for it. Set SANDBOX_RTSP_USERNAME and "
                             "SANDBOX_RTSP_PASSWORD."
                         )
-                        # The cookie may simply have expired; drop it so the
-                        # next attempt logs in rather than reusing a dead one.
-                        grid_session.session.invalidate()
+                        # The cookie may simply have expired: replace it, so the
+                        # next attempt is made with a session rather than none.
+                        await grid_session.session.refused(headers.get("Cookie"))
+                        headers = await grid_session.session.headers()
                         grid_session.catalogue.clear()
                         continue
                     payload = response.json()

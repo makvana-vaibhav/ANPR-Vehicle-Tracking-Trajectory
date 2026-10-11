@@ -76,20 +76,37 @@ MEDIA_TYPES = {
 
 
 async def _fetch(client: httpx.AsyncClient, url: str, headers: dict[str, str]) -> httpx.Response:
-    """One GET, retried once if the session turns out to have lapsed.
+    """One GET, retried once if the grid turns our session away.
 
-    A redirect here means the login expired. Following it would hand the
-    operator an HTML login page with a 200 status, which a video element
-    reports as a decode failure — a confusing way to say "log in again".
+    Turned away is either of two things. A redirect means the login expired;
+    following it would hand the operator an HTML login page with a 200
+    status, which a video element reports as a decode failure. A 403 reading
+    `one session per IP` means another session is using our address — the
+    grid allows one, and every process here shares ours (`grid_session`).
+
+    Either way the session is replaced and the request made once more. A
+    refusal that survives that is returned as it is, so the caller can say
+    what the grid said rather than "no video".
     """
-    response = await client.send(client.build_request("GET", url, headers=headers), stream=True)
-    if response.status_code not in (301, 302, 303, 307, 308):
-        return response
+    for attempt in (1, 2):
+        response = await client.send(
+            client.build_request("GET", url, headers=headers), stream=True
+        )
+        turned_away = response.status_code in (301, 302, 303, 307, 308)
+        if response.status_code == 403:
+            body = (await response.aread()).decode("utf-8", "replace")
+            turned_away = grid_session.is_one_session_refusal(403, body)
+        if not turned_away or attempt == 2:
+            return response
 
-    await response.aclose()
-    grid_session.session.invalidate()
-    fresh = await grid_session.session.headers(force=True)
-    return await client.send(client.build_request("GET", url, headers=fresh), stream=True)
+        # Read before closing, so a response handed back below still has a body.
+        await response.aread()
+        await response.aclose()
+        replacement = await grid_session.session.refused(headers.get("Cookie"))
+        if replacement is None:
+            return response
+        headers = {**headers, "Cookie": replacement}
+    return response
 
 
 async def _camera_for_token(session: DbSession, token: str) -> Camera:

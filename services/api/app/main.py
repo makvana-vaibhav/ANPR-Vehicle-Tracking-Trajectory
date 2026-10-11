@@ -48,6 +48,7 @@ from app.services import (
     fleet_roster,
     focus,
     gateway,
+    grid_session,
     retention,
     token_store,
 )
@@ -118,6 +119,7 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     await event_tailer.tailer.stop()
     await token_store.close()
     await focus.close()
+    await grid_session.session.close()
     await dispose_engine()
     log.info("api.stopped")
 
