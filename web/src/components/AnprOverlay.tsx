@@ -16,8 +16,18 @@
  * for one that means "we have identified this vehicle":
  *
  *   located   dashed, faint, no text. A plate is there and this is where.
- *   reading   dashed, firmer. OCR has a candidate it is not yet sure of.
- *   read      solid, with the plate and its confidence printed.
+ *   reading   dashed, firmer, marked "reading…". OCR has a candidate it is
+ *             not yet sure of, and the candidate itself is not printed.
+ *   read      solid, with the plate drawn as a plate and its confidence.
+ *
+ * ## Colour
+ *
+ * Grey when normal, colour means a person is needed — the rule of the whole
+ * product, applied to the picture. The vehicle brackets are a light neutral;
+ * the plate the detector found is the trail colour, because "being read" is
+ * exactly what the trail means everywhere else; and a vehicle whose plate has
+ * raised a watchlist alarm turns red, brackets, plate and label alike. Nothing
+ * else on this layer is red.
  *
  * ## The timing problem, and what is done about it
  *
@@ -67,8 +77,24 @@
 
 import { useEffect, useRef, useState, type CSSProperties } from 'react'
 
+import { PlateChip } from '@/components/ui'
 import { liveTrackKey, trackBoxKey } from '@/lib/events'
 import type { BBox, LiveTrackBatchEvent, LiveVehicleEvent } from '@/lib/types'
+
+/*
+  Inks for the boxes. Every box is placed by the pixel, so its colour travels
+  as an inline style rather than a class. The two that are theme tokens are
+  read through their CSS variables, so retuning the palette retunes the
+  picture; the vehicle neutral has no token of its own — it is the design's
+  camera-marker grey, light enough to read over any road surface without
+  competing with the plate.
+*/
+/** Vehicle brackets: neutral. A vehicle being framed is not news. */
+const VEHICLE_INK = '#C9D3DD'
+/** The plate the detector found: the trail colour — what is being read. */
+const PLATE_INK = 'hsl(var(--primary))'
+/** A vehicle whose plate raised a watchlist alarm: critical, now. */
+const WATCHED_INK = 'hsl(var(--priority-critical))'
 
 /**
  * How long a box survives its last update when the picture has a clock.
@@ -225,6 +251,13 @@ interface Props {
    * transport cannot say. Read on every update, so it must be cheap.
    */
   videoClock?: () => number | null
+  /**
+   * Plates, as stored (`GJ03AB1234`), that have raised a watchlist alarm. A
+   * vehicle read as one of these is drawn in red. Consulted when drawing
+   * rather than when measuring, so an alarm that arrives while the car is
+   * still in frame turns its box red at once.
+   */
+  watchedPlates?: ReadonlySet<string>
 }
 
 /** Corner velocities, in source pixels per millisecond. */
@@ -602,6 +635,7 @@ export default function AnprOverlay({
   camera = null,
   enabled = true,
   videoClock,
+  watchedPlates,
 }: Props) {
   const hostRef = useRef<HTMLDivElement>(null)
   const [size, setSize] = useState({ width: 0, height: 0 })
@@ -998,16 +1032,16 @@ export default function AnprOverlay({
           const plate = item.drawnPlate ? place(item.drawnPlate) : null
 
           const read = item.tier === 'read'
-          // Amber for a reading the system is less sure of, green otherwise.
-          const uncertain = item.ambiguous || item.correctedFrom !== null
-          const colour = uncertain
-            ? 'hsl(var(--priority-high))'
-            : 'hsl(var(--status-online))'
-          // The plate marker is red whatever the vehicle brackets say. It marks
-          // where the plate *is*, which is a different statement from how sure
-          // the reading is, and giving it its own colour stops the two signals
-          // competing for the same rectangle.
-          const plateColour = 'hsl(var(--priority-critical))'
+          // Only a reading the pipeline would print can match the watchlist
+          // on screen — a candidate still moving between strings must not turn
+          // a car red on the strength of a guess.
+          const watched = read && (watchedPlates?.has(item.plate) ?? false)
+          const colour = watched ? WATCHED_INK : VEHICLE_INK
+          // The plate marker has its own colour, apart from the brackets. It
+          // marks where the plate *is* — what is being read — which is a
+          // different statement from what the vehicle is, and giving it its
+          // own colour stops the two signals competing for one rectangle.
+          const plateColour = watched ? WATCHED_INK : PLATE_INK
 
           // Four corner brackets rather than a closed rectangle. With eight
           // vehicles in frame a continuous outline per car is the clutter, not
@@ -1042,7 +1076,9 @@ export default function AnprOverlay({
           // vehicle — and never *over* the plate, which is the one part of the
           // picture a viewer may want to read for themselves.
           const anchor = plate ?? vehicle
-          const labelBelow = anchor.top < 30
+          const labelBelow = anchor.top < 34
+          const labelTop = (height: number) =>
+            labelBelow ? anchor.top + anchor.height + 5 : anchor.top - height - 5
 
           return (
             <div
@@ -1054,6 +1090,7 @@ export default function AnprOverlay({
               data-anpr-track={item.key}
               data-anpr-tier={item.tier}
               data-anpr-box={item.plate || undefined}
+              data-anpr-watched={watched || undefined}
               // The pipeline's own capture-to-publish figure, carried but not
               // painted. It used to be printed on every box, which is exactly
               // the clutter that made the picture unreadable — the aggregate
@@ -1107,27 +1144,35 @@ export default function AnprOverlay({
                 />
               )}
 
-              {/* The reading, only once it has settled. An unconfirmed plate is
-                  still in the feed beside the video with its full evidence; it
-                  just does not get text drawn over live traffic while it is
-                  still moving between candidates. */}
+              {/* The reading, only once it has settled — drawn as a plate, so
+                  it is recognised before it is read, with the pipeline's own
+                  confidence beside it. An unconfirmed plate is still in the
+                  feed beside the video with its full evidence; it just does
+                  not get text drawn over live traffic while it is still moving
+                  between candidates. */}
               {read && !item.retired && (
                 <div
-                  className="absolute flex items-baseline gap-2 whitespace-nowrap rounded-[3px] bg-white px-2 py-1 font-mono text-[15px] font-bold leading-none tracking-wide text-black shadow-[0_2px_10px_rgba(0,0,0,0.45)]"
-                  style={{
-                    left: anchor.left,
-                    top: labelBelow ? anchor.top + anchor.height + 4 : anchor.top - 28,
-                    // The card is white so the plate reads like a plate. The
-                    // confidence colour moves to an underline rather than the
-                    // background, which keeps amber-means-unsure visible without
-                    // tinting the characters themselves.
-                    borderBottom: `3px solid ${colour}`,
-                  }}
+                  className="absolute flex items-center gap-1.5 whitespace-nowrap drop-shadow-[0_2px_6px_hsl(var(--background)/0.7)]"
+                  style={{ left: anchor.left, top: labelTop(24) }}
                 >
-                  <span>{item.plate}</span>
-                  <span className="font-sans text-[11px] font-medium tracking-normal text-black/55">
-                    {Math.round(item.confidence * 100)}%
+                  <PlateChip plate={item.plate} size="sm" watched={watched} />
+                  <span className="rounded bg-background/80 px-1 py-px font-mono text-[11px] leading-4 text-foreground">
+                    {item.confidence.toFixed(2)}
                   </span>
+                </div>
+              )}
+
+              {/* A candidate OCR is still working on says so, and no more: the
+                  word, never the string. Only once there is a candidate at all
+                  — a bare localisation stays unlabelled, because two-thirds of
+                  vehicles never get further than that, and a label on each
+                  would bury the picture. */}
+              {item.tier === 'reading' && !item.retired && (
+                <div
+                  className="absolute whitespace-nowrap rounded border border-dashed bg-background/70 px-1.5 font-mono text-[11px] leading-[18px] text-primary"
+                  style={{ left: anchor.left, top: labelTop(20), borderColor: PLATE_INK }}
+                >
+                  reading…
                 </div>
               )}
             </div>

@@ -1035,6 +1035,68 @@ profile it before adding cameras. Runbook: `docs/PANIC.md` §2a.
 
 ---
 
+## The interface, redesigned ✅
+
+12 Oct, branch `sentinel-gj`. Every screen rebuilt to one design language, with
+every feature the old screens had still working.
+
+**The shell.** A top bar replaces the left rail: seven workspaces — Command
+(`/dashboard`), Live (`/anpr`), Investigate (`/vehicles`), Alarms (`/alerts`,
+`/watchlist`), Network (`/map`, `/cameras`, `/health`), Insights (`/traffic`),
+Admin (`/users`, `/audit`) — defined once in `web/src/lib/nav.ts`, shown only
+to a role that can open one of their screens. ⌘K / Ctrl K / `/` opens
+`CommandPalette`: an Indian-shaped plate opens its journey, a camera code opens
+it in Live (or the registry for a role without video), a word finds a screen.
+The Alarms tab counts open alarms from the API (`useOpenAlarms`), not alerts seen
+since page load.
+
+**The language.** Tokens in `web/src/styles/index.css`: blue-black ground, the
+trail (#5CC8FF) as the one accent, red/amber/blue for severity only and always
+with a shape and a word (`SeverityGlyph`). IBM Plex Sans/Mono and Barlow
+Condensed are bundled through `@fontsource` — no font CDN, the offline promise
+holds. Plates are drawn as plates (`PlateChip`); the IND strip appears only on a
+reading with the Indian shape, because the demo clip's plates are British.
+
+**Command** (`pages/Dashboard.tsx`, `components/CommandMap.tsx`). Gujarat as
+district outlines with no tiles at all; cameras grouped into towns
+(`lib/places.ts`) with labels that move out of each other's way; a trail-coloured
+ring on towns whose cameras read a plate in the last 10 minutes (from
+`/analytics/flow` in 5-minute buckets plus the live feed) and a ripple per plate
+read live; vehicles seen at two or more cameras drawn as contrails (last hour,
+else last 24 h, labelled; implausible journeys dashed red). The five cameras
+with no position are never drawn, and the legend links to them.
+
+**Per workspace,** each with its own tests: Alarms is a triage queue with a
+detail pane, `?alert=` deep links (a closed alarm opens on the list that holds
+it); Live keeps one camera on the stage and the rest as a rail (the grid's watch
+quota and the CPU both rule out a wall of grid video), `?camera=` is strict and
+the default never opens a grid camera; Investigate is search · map · sightings
+with `?plate=`/`?since=`/`?until=`; Network clusters co-located cameras and has
+`?camera=` and `?filter=unplaced`; Insights draws real time with gaps labelled.
+
+**Bugs found on the way, fixed:** false-positive transitions always failed (no
+reason sent; the API requires one); keyboard triage could act on the wrong alarm
+when a live one arrived; retired watchlist entries never listed; editing a camera
+silently dropped its department; the traffic page showed 20,000 vehicles for both
+24 h and 7 d (the backend reads at most 20,000 rows); "Stream opens" in the audit
+filter matched nothing (`camera.view` is the action); changing your own password
+never cleared `must_change_password` (`routers/auth.py`, now tested); a role with
+no usable screen looped on `/no-access`; map markers drifted down one by one
+(a `relative` class overriding MapLibre's positioning); Tailwind purged the map
+control styles (now outside `@layer`).
+
+**Verified:** `npm run build` clean, 34 test files / 333+ tests, every route
+screenshotted at 1440×900 and 1280×800 against the live API with no console
+errors, then the rebuilt `contrail-web` image on :8080 (WebRTC video, overlay,
+MinIO crops under the CSP).
+
+**Open:** the traffic endpoint's 20,000-row read is oldest-first and unflagged;
+a plate search writes four audit rows; `_anchored_plate` in
+`ai-lab/ailab/stream/runner.py` can scale a plate box to a whole car when one
+detection merges two vehicles.
+
+---
+
 ## Phase 10 — Scale profile & the 80,000-camera proof ✅
 
 - [x] `docker-compose.scale.yml` — API stops ingesting (`INGEST_ENABLED=false`),

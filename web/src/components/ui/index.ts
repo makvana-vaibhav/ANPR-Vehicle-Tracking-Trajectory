@@ -1,4 +1,12 @@
-export { Badge, StatusDot, StatusBadge, PriorityDot, PriorityBadge, RoleBadge } from './Badge'
+export {
+  Badge,
+  StatusDot,
+  StatusBadge,
+  PriorityDot,
+  PriorityBadge,
+  RoleBadge,
+  SeverityGlyph,
+} from './Badge'
 export type { BadgeTone } from './Badge'
 export { StatTile } from './StatTile'
 export type { StatTone } from './StatTile'
@@ -18,3 +26,4 @@ export { SegmentedControl } from './SegmentedControl'
 export { Table, Thead, Th, Td, Tr } from './Table'
 export { Spinner } from './Spinner'
 export { ConnectionBadge } from './ConnectionBadge'
+export { PlateChip } from './PlateChip'

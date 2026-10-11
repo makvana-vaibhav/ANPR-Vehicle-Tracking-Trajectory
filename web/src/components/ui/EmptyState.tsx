@@ -15,9 +15,9 @@ export function EmptyState({
   className?: string
 }) {
   return (
-    <div className={`rounded-md border border-dashed border-border p-8 text-center ${className}`}>
-      <p className="text-sm text-muted-foreground">{title}</p>
-      {hint && <p className="mt-1 text-xs text-muted-foreground">{hint}</p>}
+    <div className={`rounded-lg border border-dashed border-border px-6 py-8 text-center ${className}`}>
+      <p className="text-[13px] text-muted-foreground">{title}</p>
+      {hint && <p className="mt-1 text-xs text-faint">{hint}</p>}
     </div>
   )
 }

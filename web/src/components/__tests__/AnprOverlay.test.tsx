@@ -16,7 +16,15 @@ import AnprOverlay, {
   HOLD_SYNCED_MS,
 } from '@/components/AnprOverlay'
 import { trackBoxKey } from '@/lib/events'
+import { spacedPlate } from '@/lib/plates'
 import type { LiveTrackBatchEvent, LiveTrackBox, LiveVehicleEvent } from '@/lib/types'
+
+/**
+ * A plate as the overlay prints it. It is drawn as a plate — state, district,
+ * series, number — so a test looking for the stored string would find nothing,
+ * and an assertion that it is *absent* would pass without testing anything.
+ */
+const drawn = (plate: string) => spacedPlate(plate)
 
 // jsdom has no ResizeObserver, and the overlay needs one to learn its own size.
 // A stub that reports a fixed box is enough, and it is what makes the geometry
@@ -223,7 +231,7 @@ describe('AnprOverlay', () => {
       await tick(20)
 
       expect(tierOf(container)).toBe('reading')
-      expect(screen.queryByText('GJ03AB1234')).toBeNull()
+      expect(screen.queryByText(drawn('GJ03AB1234'))).toBeNull()
     })
 
     it('prints the plate once the reading has settled', async () => {
@@ -233,7 +241,7 @@ describe('AnprOverlay', () => {
       await tick(20)
 
       expect(tierOf(container)).toBe('read')
-      expect(screen.getByText('GJ03AB1234')).toBeDefined()
+      expect(screen.getByText(drawn('GJ03AB1234'))).toBeDefined()
     })
 
     it('frames the vehicle with four corner brackets, not a closed rectangle', async () => {
@@ -270,10 +278,12 @@ describe('AnprOverlay', () => {
       expect(covered.size).toBe(4)
     })
 
-    it('marks the plate in red, apart from the vehicle brackets', async () => {
-      // "Where the plate is" and "how sure the reading is" are different
-      // statements. The plate marker keeps its own colour so the two signals do
-      // not compete for the same rectangle.
+    it('marks the plate in the trail colour, apart from the vehicle brackets', async () => {
+      // "Where the plate is" and "what the vehicle is" are different
+      // statements. The plate marker keeps its own colour — the trail, which
+      // means "being read" everywhere in the product — so the two signals do
+      // not compete for the same rectangle, and neither is red: red on this
+      // layer is kept for a watched vehicle.
       const { container } = render(
         <AnprOverlay batch={batch([box({ plate: 'GJ03AB1234' })])} camera={CAMERA} />,
       )
@@ -281,7 +291,69 @@ describe('AnprOverlay', () => {
 
       const layers = container.querySelectorAll('[data-anpr-track] > div')
       const plateLayer = layers[1] as HTMLElement
-      expect(plateLayer.style.borderColor).toContain('--priority-critical')
+      expect(plateLayer.style.borderColor).toContain('--primary')
+      const bracket = layers[0]?.querySelector(':scope > div') as HTMLElement
+      expect(bracket.style.borderTop).not.toContain('--primary')
+      expect(bracket.style.borderTop).not.toContain('--priority-critical')
+    })
+
+    it('draws a vehicle whose plate raised a watchlist alarm in red', async () => {
+      const { container } = render(
+        <AnprOverlay
+          batch={batch([box({ plate: 'GJ03AB1234' })])}
+          camera={CAMERA}
+          watchedPlates={new Set(['GJ03AB1234'])}
+        />,
+      )
+      await tick(20)
+
+      const track = container.querySelector('[data-anpr-track]')
+      expect(track?.getAttribute('data-anpr-watched')).toBe('true')
+      const layers = container.querySelectorAll('[data-anpr-track] > div')
+      const bracket = layers[0]?.querySelector(':scope > div') as HTMLElement
+      expect(bracket.style.borderTop).toContain('--priority-critical')
+      expect((layers[1] as HTMLElement).style.borderColor).toContain('--priority-critical')
+      // And the label carries the watchlist ring, not just the colour.
+      expect(screen.getByText(drawn('GJ03AB1234')).closest('.plate-chip')?.className).toContain(
+        'is-watched',
+      )
+    })
+
+    it('does not turn a car red on a candidate it has not settled', async () => {
+      // An alarm says the plate is watched; a candidate still moving between
+      // strings is not yet that plate. Red on a guess is a false alarm drawn
+      // over live traffic.
+      const unsettled = box({ plate: 'GJ03AB1234', confidence: 0.42 })
+      const { container } = render(
+        <AnprOverlay
+          batch={batch([unsettled])}
+          camera={CAMERA}
+          watchedPlates={new Set(['GJ03AB1234'])}
+        />,
+      )
+      await tick(20)
+
+      expect(container.querySelector('[data-anpr-watched]')).toBeNull()
+      const layers = container.querySelectorAll('[data-anpr-track] > div')
+      expect((layers[1] as HTMLElement).style.borderColor).not.toContain('--priority-critical')
+    })
+
+    it('says a candidate is being read, without printing it', async () => {
+      const unsettled = box({ plate: 'GJ03AB1234', confidence: 0.42 })
+      render(<AnprOverlay batch={batch([unsettled])} camera={CAMERA} />)
+      await tick(20)
+
+      expect(screen.getByText('reading…')).toBeDefined()
+      expect(screen.queryByText(drawn('GJ03AB1234'))).toBeNull()
+    })
+
+    it('labels nothing that has only been located', async () => {
+      // Two-thirds of vehicles never get further than a located plate; a label
+      // on each would bury the picture.
+      render(<AnprOverlay batch={batch([box()])} camera={CAMERA} />)
+      await tick(20)
+
+      expect(screen.queryByText('reading…')).toBeNull()
     })
 
     it('does not second-guess the detector about what is a plate', async () => {
@@ -353,7 +425,7 @@ describe('AnprOverlay', () => {
         <AnprOverlay batch={batch([box({ plate: 'GJ03AB1234' })])} camera={CAMERA} />,
       )
       await tick(20)
-      expect(screen.getByText('GJ03AB1234')).toBeDefined()
+      expect(screen.getByText(drawn('GJ03AB1234'))).toBeDefined()
 
       const lost = { ...box({ plate: 'GJ03AB1234' }), seen_ago_s: 0.9 }
       rerender(
@@ -361,7 +433,7 @@ describe('AnprOverlay', () => {
       )
       await tick(20)
 
-      expect(screen.queryByText('GJ03AB1234')).toBeNull()
+      expect(screen.queryByText(drawn('GJ03AB1234'))).toBeNull()
     })
 
     it('keeps drawing a vehicle the detector missed for only a moment', async () => {
@@ -369,7 +441,7 @@ describe('AnprOverlay', () => {
       render(<AnprOverlay batch={batch([glimpse])} camera={CAMERA} />)
       await tick(20)
 
-      expect(screen.getByText('GJ03AB1234')).toBeDefined()
+      expect(screen.getByText(drawn('GJ03AB1234'))).toBeDefined()
     })
 
     it("does not give a new tracker run's car an old run's box", async () => {
@@ -396,7 +468,7 @@ describe('AnprOverlay', () => {
         `[data-anpr-track="${trackBoxKey(CAMERA, 'cam.bbbbbb', 7)}"]`,
       )
       expect(fresh?.getAttribute('data-anpr-tier')).toBe('located')
-      expect(screen.queryByText('GJ03AB1234')).toBeNull()
+      expect(screen.queryByText(drawn('GJ03AB1234'))).toBeNull()
     })
 
     it('draws one box per track, not one per batch', async () => {
@@ -428,8 +500,8 @@ describe('AnprOverlay', () => {
       await tick(20)
 
       expect(container.querySelectorAll('[data-anpr-track]')).toHaveLength(2)
-      expect(screen.getByText('GJ03AB1234')).toBeDefined()
-      expect(screen.getByText('GJ01CD5678')).toBeDefined()
+      expect(screen.getByText(drawn('GJ03AB1234'))).toBeDefined()
+      expect(screen.getByText(drawn('GJ01CD5678'))).toBeDefined()
     })
 
     it('keeps the settled reading when two tracks cover one vehicle', async () => {
@@ -449,7 +521,7 @@ describe('AnprOverlay', () => {
       await tick(20)
 
       expect(container.querySelectorAll('[data-anpr-track]')).toHaveLength(1)
-      expect(screen.getByText('GJ03AB1234')).toBeDefined()
+      expect(screen.getByText(drawn('GJ03AB1234'))).toBeDefined()
     })
 
     it('expires a box when the batches stop arriving altogether', async () => {
@@ -511,7 +583,7 @@ describe('AnprOverlay', () => {
       render(<AnprOverlay events={[event()]} camera={CAMERA} />)
       await tick(20)
 
-      expect(screen.getByText('GJ03AB1234')).toBeDefined()
+      expect(screen.getByText(drawn('GJ03AB1234'))).toBeDefined()
     })
 
     it('stops drawing from events once a batch has been seen', async () => {
@@ -532,7 +604,7 @@ describe('AnprOverlay', () => {
       await tick(20)
 
       expect(container.querySelectorAll('[data-anpr-track]')).toHaveLength(1)
-      expect(screen.queryByText('GJ09ZZ9999')).toBeNull()
+      expect(screen.queryByText(drawn('GJ09ZZ9999'))).toBeNull()
     })
 
     it('clears a box promptly once the vehicle has been retired', async () => {
@@ -543,14 +615,14 @@ describe('AnprOverlay', () => {
       // clearing when the car left.
       const { rerender } = render(<AnprOverlay events={[event()]} camera={CAMERA} />)
       await tick(20)
-      expect(screen.queryByText('GJ03AB1234')).not.toBeNull()
+      expect(screen.queryByText(drawn('GJ03AB1234'))).not.toBeNull()
 
       rerender(
         <AnprOverlay events={[event({ kind: 'vehicle.completed' })]} camera={CAMERA} />,
       )
       await tick(1_000)
 
-      expect(screen.queryByText('GJ03AB1234')).toBeNull()
+      expect(screen.queryByText(drawn('GJ03AB1234'))).toBeNull()
     })
   })
 

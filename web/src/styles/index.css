@@ -6,11 +6,18 @@
   until now `tailwind.config.js` named Inter and JetBrains Mono without either
   ever being loaded, so the whole product silently rendered in system-ui.
 
-  Only the upright axis is imported. Nothing in this interface is set in
-  italic, and `wght-italic.css` would double the font payload to serve it.
+  Only the weights in use are imported, upright only. IBM Plex Sans for the
+  interface, IBM Plex Mono for times, codes and figures, and Barlow Condensed
+  for number plates and nothing else — the plate is the object this product
+  is about, so it is drawn like one.
 */
-@import '@fontsource-variable/geist/wght.css';
-@import '@fontsource-variable/jetbrains-mono/wght.css';
+@import '@fontsource/ibm-plex-sans/400.css';
+@import '@fontsource/ibm-plex-sans/500.css';
+@import '@fontsource/ibm-plex-sans/600.css';
+@import '@fontsource/ibm-plex-mono/400.css';
+@import '@fontsource/ibm-plex-mono/500.css';
+@import '@fontsource/barlow-condensed/600.css';
+@import '@fontsource/barlow-condensed/700.css';
 
 @tailwind base;
 @tailwind components;
@@ -22,58 +29,91 @@
   Dark is the default and the only theme: this renders on control-room displays
   that stay on for eight-hour shifts. Values are raw HSL triples so Tailwind can
   compose them with opacity modifiers (bg-status-online/20).
+
+  The rule the palette serves: grey when normal, colour means a person is
+  needed. One accent — the trail — marks selection, links and what is being
+  read; red, amber and blue are reserved for severity and always come with an
+  icon and a word.
 */
 
 @layer base {
   :root {
-    /* Surfaces — near-black slate, not pure black; pure black on an LCD
-       crushes the shadow detail in video thumbnails. */
-    --background: 222 47% 6%;
-    --foreground: 210 40% 96%;
+    /* Surfaces — a blue-black ground, panels a step up, raised a step more.
+       Not pure black: pure black on an LCD crushes the shadow detail in
+       video. */
+    --background: 213 31% 6%;
+    --foreground: 208 37% 93%;
 
-    --card: 222 44% 9%;
-    --card-foreground: 210 40% 96%;
+    --card: 212 30% 8%;
+    --card-foreground: 208 37% 93%;
 
-    --popover: 222 47% 8%;
-    --popover-foreground: 210 40% 96%;
+    --popover: 214 29% 11%;
+    --popover-foreground: 208 37% 93%;
 
-    /* Primary — a khaki-gold that stays legible against the slate surfaces
-       without competing with the red and amber the status palette reserves. */
-    --primary: 43 74% 52%;
-    --primary-foreground: 222 47% 8%;
+    /* Primary is the trail: a vehicle's contrail on the map, the camera that
+       is reading plates, the selected row, a link. Buttons that commit an
+       action are near-white instead (components/ui/Button). */
+    --primary: 200 100% 68%;
+    --primary-foreground: 202 75% 6%;
 
-    --secondary: 217 33% 17%;
-    --secondary-foreground: 210 40% 96%;
+    --secondary: 215 30% 15%;
+    --secondary-foreground: 208 37% 93%;
 
-    --muted: 217 33% 15%;
-    --muted-foreground: 215 20% 65%;
+    --muted: 214 29% 11%;
+    --muted-foreground: 210 17% 66%;
+    /* Tertiary text: captions, units, the quiet half of a label. 5:1 on
+       --card. */
+    --faint: 211 11% 53%;
 
-    --accent: 199 89% 48%;
-    --accent-foreground: 222 47% 8%;
+    --accent: 200 100% 68%;
+    --accent-foreground: 202 75% 6%;
 
-    --destructive: 0 72% 51%;
-    --destructive-foreground: 210 40% 98%;
+    --destructive: 2 100% 67%;
+    --destructive-foreground: 350 45% 5%;
 
-    --border: 217 33% 20%;
-    --input: 217 33% 20%;
-    --ring: 43 74% 52%;
+    --border: 211 26% 16%;
+    --input: 212 24% 22%;
+    --ring: 200 100% 68%;
 
-    --radius: 0.5rem;
+    --radius: 0.625rem;
+
+    /* ── The number plate ─────────────────────────────────────────
+       A plate is drawn as a plate — white, black edge, the blue IND
+       strip — so it is recognised before it is read. */
+    --plate: 60 13% 94%;
+    --plate-ink: 216 18% 5%;
+    --plate-strip: 224 75% 47%;
 
     /* ── Fleet status ─────────────────────────────────────────────
-       Used for camera markers, health pills, and uptime sparklines. */
-    --status-online: 142 71% 45%;
-    --status-offline: 0 72% 51%;
-    --status-degraded: 38 92% 50%;
-    --status-unknown: 215 16% 47%;
+       Answering is the trail colour, not green: normal is quiet, and the
+       loud colours are kept for what needs someone. */
+    --status-online: 200 100% 68%;
+    --status-offline: 2 100% 67%;
+    --status-degraded: 33 90% 60%;
+    --status-unknown: 211 11% 53%;
 
     /* ── Alert priority ───────────────────────────────────────────
-       Critical is deliberately the same red as offline: in a control
-       room, red means "act now" regardless of what raised it. */
-    --priority-critical: 0 84% 60%;
-    --priority-high: 24 95% 53%;
-    --priority-medium: 38 92% 50%;
-    --priority-low: 199 89% 48%;
+       Critical is a watched vehicle, now; high a journey to explain or a
+       grave fault; medium equipment. Critical is the same red as offline:
+       red means "act now" whatever raised it. */
+    --priority-critical: 2 100% 67%;
+    --priority-high: 33 90% 60%;
+    --priority-medium: 221 100% 75%;
+    --priority-low: 210 17% 66%;
+    /* Ink for text set on a filled severity badge — near-black, tinted
+       toward the fill so the word reads as part of the badge. */
+    --priority-critical-ink: 340 44% 5%;
+    --priority-high-ink: 34 84% 5%;
+    --priority-medium-ink: 222 68% 6%;
+
+    /* The application chrome — top bar and docked panels — a half-step
+       above the ground, so the working area reads as the deepest layer. */
+    --chrome: 213 30% 7%;
+
+    /* A camera or a stop on a map: light, but a step below --foreground so
+       the labels beside it stay the brightest thing. MapLibre paint cannot
+       read this, so map layers repeat it by value (#C9D3DD). */
+    --place: 210 19% 83%;
 
     /* ── Chart series ─────────────────────────────────────────────
        Categorical identity only — which corridor, which vehicle class.
@@ -167,71 +207,125 @@
 }
 
 /*
-  MapLibre popup styling.
-
-  These elements are created imperatively by MapLibre, so Tailwind's content
-  scanner never sees the class names — they are styled here instead.
+  Components drawn from Tailwind classes. Only rules whose class appears in
+  src survive Tailwind's purge — which is why the map rules below are not in
+  here.
 */
 @layer components {
-  .maplibregl-popup-content {
-    @apply rounded-md border border-border bg-card px-3 py-2 shadow-xl;
+  /* ── The plate chip ──────────────────────────────────────────────
+     Built here rather than in Tailwind classes at every call site: the
+     shape is fixed, and a plate that renders differently on two screens
+     stops reading as the same object. See components/PlateChip. */
+  .plate-chip {
+    display: inline-flex;
+    align-items: stretch;
+    overflow: hidden;
+    border: 1.5px solid hsl(var(--plate-ink));
+    border-radius: 3px;
+    background: hsl(var(--plate));
+    color: hsl(var(--plate-ink));
+    font-family: 'Barlow Condensed', 'Arial Narrow', sans-serif;
+    font-weight: 700;
+    letter-spacing: 0.07em;
+    line-height: 1;
+    white-space: nowrap;
+  }
+  .plate-chip > .plate-strip {
+    display: flex;
+    align-items: center;
+    padding: 0 3px;
+    background: hsl(var(--plate-strip));
+    color: #fff;
+    font: 600 7px/1 'IBM Plex Sans', sans-serif;
+    letter-spacing: 0.06em;
+  }
+  .plate-chip > .plate-text {
+    padding: 4px 7px 3px;
+  }
+  .plate-chip.is-watched {
+    box-shadow:
+      0 0 0 2px hsl(var(--background)),
+      0 0 0 4px hsl(var(--priority-critical));
+  }
+  .plate-chip.is-partial {
+    border-style: dashed;
+    background: hsl(60 6% 84%);
+  }
+  .plate-chip.is-candidate {
+    border: 1.5px dashed hsl(var(--primary));
+    background: transparent;
     color: hsl(var(--foreground));
   }
-  .maplibregl-popup-tip {
-    border-top-color: hsl(var(--card)) !important;
-    border-bottom-color: hsl(var(--card)) !important;
-  }
-  .district-tooltip .maplibregl-popup-content {
-    @apply px-2.5 py-1 text-xs;
+  .plate-chip.is-candidate > .plate-strip {
+    background: transparent;
+    color: hsl(var(--primary));
   }
 
-  .camera-tooltip .maplibregl-popup-content {
-    @apply min-w-[11rem] px-3 py-2;
-  }
-  .tt-code {
-    @apply font-mono text-xs font-semibold tracking-wider text-primary;
-  }
-  .tt-name {
-    @apply mt-0.5 text-sm leading-tight;
-  }
-  .tt-meta {
-    @apply mt-0.5 text-[11px] text-muted-foreground;
-  }
-  .tt-status {
-    @apply mt-1.5 inline-block rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider;
-  }
-  .tt-online {
-    @apply bg-status-online/20 text-status-online;
-  }
-  .tt-offline {
-    @apply bg-status-offline/20 text-status-offline;
-  }
-  .tt-degraded {
-    @apply bg-status-degraded/20 text-status-degraded;
-  }
-  .tt-unknown {
-    @apply bg-status-unknown/20 text-status-unknown;
-  }
-
-  /* Native controls, themed to the operations palette. */
-  .maplibregl-ctrl-group {
-    @apply border border-border bg-card shadow-lg;
-  }
-  .maplibregl-ctrl-group button + button {
-    @apply border-t border-border;
-  }
-  .maplibregl-ctrl-group button .maplibregl-ctrl-icon {
-    filter: invert(0.85);
-  }
-  .maplibregl-ctrl-scale {
-    @apply border-border bg-card/80 text-[10px] text-muted-foreground;
-    border-width: 1px;
-    border-top: none;
-  }
-  .maplibregl-ctrl-attrib {
-    @apply bg-card/70 text-[10px];
-  }
-  .maplibregl-ctrl-attrib a {
+  /* A key on the keyboard, for shortcut hints (⌘K, J/K, Esc). */
+  .kbd {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 18px;
+    height: 18px;
+    padding: 0 4px;
+    border: 1px solid hsl(var(--input));
+    border-radius: 4px;
+    font: 500 10px/1 'IBM Plex Mono', monospace;
     color: hsl(var(--muted-foreground));
   }
+
+  /* The small uppercase label over a figure or a group. */
+  .eyebrow {
+    font-size: 11px;
+    font-weight: 500;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: hsl(var(--muted-foreground));
+  }
+}
+
+/*
+  MapLibre's own elements, outside any @layer on purpose: MapLibre creates them
+  imperatively, so their class names never appear in src, and Tailwind would
+  silently drop component rules it cannot find there. Scoped under
+  .maplibregl-map so they also outrank maplibre-gl.css, which the map
+  components import after this file — at equal specificity the later rule
+  wins, which is how the zoom buttons were white on a dark map.
+*/
+.maplibregl-map .maplibregl-popup-content {
+  @apply rounded-lg border border-input bg-popover px-3 py-2 shadow-2xl;
+  color: hsl(var(--foreground));
+}
+.maplibregl-map .maplibregl-popup-tip {
+  border-top-color: hsl(var(--popover)) !important;
+  border-bottom-color: hsl(var(--popover)) !important;
+}
+
+/* Native controls, themed to the operations palette. */
+.maplibregl-map .maplibregl-ctrl-group {
+  @apply overflow-hidden rounded-md border border-border bg-card shadow-lg;
+}
+.maplibregl-map .maplibregl-ctrl-group button {
+  @apply bg-transparent;
+}
+.maplibregl-map .maplibregl-ctrl-group button:not(:disabled):hover {
+  @apply bg-secondary;
+}
+.maplibregl-map .maplibregl-ctrl-group button + button {
+  @apply border-t border-border;
+}
+.maplibregl-map .maplibregl-ctrl-group button .maplibregl-ctrl-icon {
+  filter: invert(0.85);
+}
+.maplibregl-map .maplibregl-ctrl-scale {
+  @apply border-border bg-card/80 text-[10px] text-muted-foreground;
+  border-width: 1px;
+  border-top: none;
+}
+.maplibregl-map .maplibregl-ctrl-attrib {
+  @apply bg-card/70 text-[10px];
+}
+.maplibregl-map .maplibregl-ctrl-attrib a {
+  color: hsl(var(--muted-foreground));
 }

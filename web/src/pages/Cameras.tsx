@@ -1,5 +1,7 @@
 /**
- * Camera administration — onboard, amend and retire cameras.
+ * Network · Cameras — the registry: every camera, where its pictures come
+ * from, whether anyone knows where it stands, and the forms that onboard,
+ * amend and retire them.
  *
  * This replaced a read-only "Integration layer" screen that listed the
  * federated VMS instances and the adapters reaching them. It was accurate and
@@ -7,54 +9,99 @@
  * without letting them integrate anything. The federation evidence is still
  * here, at the bottom, where it costs a strip of screen rather than a tab.
  *
- * Onboarding a camera is the act that makes this a platform rather than a
- * demo, so the form is the first thing on the page. CSV import is the second
- * tab because a state onboards estates, not cameras — but a person adding one
- * camera should not have to build a spreadsheet to do it.
+ * Looking at the fleet is the common act and onboarding the rare one, so the
+ * page opens on the table and the forms slide over it. CSV import sits beside
+ * the single-camera form because a city onboards estates, not cameras — but a
+ * person adding one camera should not have to build a spreadsheet to do it.
  *
  * The form asks for a stream URL and says why: a camera without one is a
  * registry record that can never be watched or analysed. That is a legitimate
  * thing to record, and it should be a decision rather than an accident — the
  * registry used to hold 250 of them by default.
+ *
+ * `?camera=<CODE>` opens that camera's detail beside the table (the search
+ * palette links here) and `?filter=unplaced` shows only the cameras with no
+ * known position. Both follow the screen, so the address bar is always a link
+ * to what is on it. Nothing is opened by default.
  */
 
-import { useCallback, useEffect, useMemo, useState, type FormEvent } from 'react'
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type FormEvent,
+  type ReactNode,
+} from 'react'
+import { useSearchParams } from 'react-router-dom'
 
+import CameraPanel from '@/components/CameraPanel'
 import { SkeletonRows } from '@/components/Skeleton'
 import { useToast } from '@/components/Toast'
+import {
+  amendment,
+  countByStatus,
+  departmentOptions,
+  fetchAllCameras,
+  filterCameras,
+  findCamera,
+  isFiltered,
+  NO_FILTER,
+  placeLine,
+  positionKind,
+  readCameraParam,
+  readPositionFilter,
+  SOURCE_LABEL,
+  sourceKind,
+  STATUS_LABEL,
+  STATUS_ORDER,
+  tagsAfterPlacing,
+  UNASSIGNED,
+  vendorWords,
+  withParams,
+  type CameraFilter,
+  type PositionFilter,
+  type SourceKind,
+} from '@/components/network/cameraFacts'
+import { NoPositionGlyph } from '@/components/network/PlaceDot'
 import {
   Badge,
   Button,
   Checkbox,
   Drawer,
+  EmptyState,
+  ErrorBanner,
   Field,
   Icon,
   InfoHint,
   Input,
   PageHeader,
+  Panel,
+  SectionLabel,
   SegmentedControl,
   Select,
+  StatTile,
   StatusBadge,
   Table,
   Td,
   Th,
   Thead,
+  Toolbar,
+  ToolbarField,
   Tr,
 } from '@/components/ui'
 import { useAuth } from '@/hooks/useAuth'
 import * as api from '@/lib/api'
 import { PERMISSIONS } from '@/lib/permissions'
+import { isUnplaced } from '@/lib/places'
 import type { Camera, Department, VmsInstance } from '@/lib/types'
 
-/**
- * Which slide-over is open, if any.
- *
- * These were two tabs above a permanently-expanded form, so the screen called
- * "Cameras" opened on a twenty-field onboarding form with the fleet pushed
- * entirely below the fold. Onboarding is the rare act and looking at the fleet
- * is the common one; the common one is what the page opens on now.
- */
+/** Which slide-over is open, if any. */
 type Drawered = 'none' | 'camera' | 'import'
+
+/** Rows per page. The table pages rather than growing without bound. */
+const PAGE_SIZE = 50
 
 /** Gujarat's bounding box, mirroring the server-side validator. Checked here
  *  too so a typo is caught while the operator is still looking at the field,
@@ -69,6 +116,14 @@ const BOUNDS = { latMin: 20.0, latMax: 24.8, lonMin: 68.1, lonMax: 74.5 }
  * describe how the *browser* is served video, which is the gateway's business
  * and never a property of the upstream camera. */
 const PROTOCOLS = ['rtsp', 'onvif', 'vendor_api'] as const
+
+const SOURCE_TONE: Record<SourceKind, 'neutral' | 'warning' | 'danger'> = {
+  grid: 'neutral',
+  stream: 'neutral',
+  // A replayed clip is not a camera; it must never pass for one.
+  recorded: 'warning',
+  none: 'danger',
+}
 
 const EMPTY = {
   camera_code: '',
@@ -92,12 +147,19 @@ const EMPTY = {
   anpr_enabled: true,
 }
 
+type Form = typeof EMPTY
+type LocalFilter = Omit<CameraFilter, 'position'>
+
 export default function Cameras() {
   const toast = useToast()
   const { can } = useAuth()
   const mayCreate = can(PERMISSIONS.cameraCreate)
   const mayUpdate = can(PERMISSIONS.cameraUpdate)
   const mayDelete = can(PERMISSIONS.cameraDelete)
+
+  const [params, setParams] = useSearchParams()
+  const cameraCode = readCameraParam(params)
+  const position = readPositionFilter(params)
 
   const [drawer, setDrawer] = useState<Drawered>('none')
   const [cameras, setCameras] = useState<Camera[]>([])
@@ -106,15 +168,17 @@ export default function Cameras() {
   const [adapters, setAdapters] = useState<Record<string, string>>({})
   const [sourceVideos, setSourceVideos] = useState<api.SourceVideo[]>([])
   const [loading, setLoading] = useState(true)
+  const [loadError, setLoadError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
-  const [form, setForm] = useState({ ...EMPTY })
+  const [form, setForm] = useState<Form>({ ...EMPTY })
   const [editing, setEditing] = useState<Camera | null>(null)
-  const [filter, setFilter] = useState('')
+  const [filter, setFilter] = useState<LocalFilter>(NO_FILTER)
+  const [page, setPage] = useState(0)
 
   const load = useCallback(async () => {
     try {
       const [fleet, depts, instances, adapterInfo, clips] = await Promise.all([
-        api.getCameras({ limit: '500' }),
+        fetchAllCameras(),
         api.getDepartments(),
         api.getVmsInstances(),
         api.getAdapters(),
@@ -123,50 +187,106 @@ export default function Cameras() {
         // form falls back to the live-URL path, which is all it ever had.
         api.getSourceVideos().catch(() => [] as api.SourceVideo[]),
       ])
-      setCameras(Array.isArray(fleet) ? fleet : (fleet as { items: Camera[] }).items ?? [])
+      setCameras(fleet)
       setDepartments(depts)
       setVms(instances)
       setAdapters(adapterInfo.adapters)
       setSourceVideos(clips)
+      setLoadError(null)
     } catch (err) {
-      toast.error(err)
+      setLoadError(err instanceof Error ? err.message : String(err))
     } finally {
       setLoading(false)
     }
-  }, [toast])
+  }, [])
 
   useEffect(() => {
     void load()
   }, [load])
 
-  const shown = useMemo(() => {
-    const needle = filter.trim().toLowerCase()
-    if (!needle) return cameras
-    return cameras.filter(
-      (c) =>
-        c.camera_code.toLowerCase().includes(needle) ||
-        c.name.toLowerCase().includes(needle) ||
-        (c.district ?? '').toLowerCase().includes(needle),
-    )
-  }, [cameras, filter])
+  // ── URL state ────────────────────────────────────────────────────────
+  const setCameraParam = useCallback(
+    (code: string | null) => {
+      setParams((prev) => withParams(prev, { camera: code }), { replace: true })
+    },
+    [setParams],
+  )
+  const setPosition = useCallback(
+    (value: PositionFilter) => {
+      setParams((prev) => withParams(prev, { filter: value || null }), { replace: true })
+    },
+    [setParams],
+  )
 
-  const set = (key: keyof typeof EMPTY, value: string | boolean) =>
+  // ── What is shown ────────────────────────────────────────────────────
+  const fullFilter = useMemo<CameraFilter>(() => ({ ...filter, position }), [filter, position])
+  const shown = useMemo(() => filterCameras(cameras, fullFilter), [cameras, fullFilter])
+  const counts = useMemo(() => countByStatus(cameras), [cameras])
+  const unplacedCount = useMemo(() => cameras.filter((c) => isUnplaced(c)).length, [cameras])
+  const sourceCounts = useMemo(() => {
+    const out: Record<SourceKind, number> = { grid: 0, recorded: 0, stream: 0, none: 0 }
+    for (const camera of cameras) out[sourceKind(camera)] += 1
+    return out
+  }, [cameras])
+  const { departments: ownedBy, unassigned } = useMemo(() => departmentOptions(cameras), [cameras])
+  const selected = findCamera(cameras, cameraCode)
+
+  const pageCount = Math.max(1, Math.ceil(shown.length / PAGE_SIZE))
+  const safePage = Math.min(page, pageCount - 1)
+  const visible = shown.slice(safePage * PAGE_SIZE, safePage * PAGE_SIZE + PAGE_SIZE)
+
+  useEffect(() => {
+    setPage(0)
+  }, [fullFilter])
+
+  // A camera opened by a link is brought into view once, on the page it is on.
+  const tableRef = useRef<HTMLDivElement>(null)
+  const revealed = useRef<string | null>(null)
+  useEffect(() => {
+    if (!selected) {
+      revealed.current = null
+      return
+    }
+    if (revealed.current === selected.id) return
+    revealed.current = selected.id
+    const index = shown.findIndex((c) => c.id === selected.id)
+    if (index < 0) return
+    setPage(Math.floor(index / PAGE_SIZE))
+    window.requestAnimationFrame(() => {
+      const rows = tableRef.current?.querySelectorAll<HTMLElement>('[data-camera]') ?? []
+      for (const row of rows) {
+        if (row.dataset.camera === selected.camera_code) row.scrollIntoView?.({ block: 'nearest' })
+      }
+    })
+  }, [selected, shown])
+
+  // ── Forms ────────────────────────────────────────────────────────────
+  const set = (key: keyof Form, value: string | boolean) =>
     setForm((current) => ({ ...current, [key]: value }))
 
+  function startCreate() {
+    setEditing(null)
+    setForm({ ...EMPTY })
+    setDrawer('camera')
+  }
+
   function startEdit(camera: Camera) {
+    const unknown = isUnplaced(camera)
     setEditing(camera)
     setForm({
       camera_code: camera.camera_code,
       name: camera.name,
-      lat: String(camera.lat ?? ''),
-      lon: String(camera.lon ?? ''),
+      // A camera with no known position sits at a placeholder; showing those
+      // numbers would invite saving them back as if they were a position.
+      lat: unknown ? '' : String(camera.lat),
+      lon: unknown ? '' : String(camera.lon),
       district: camera.district ?? '',
       city: camera.city ?? '',
       junction: camera.junction ?? '',
-      department_code: '',
+      department_code: camera.department_code ?? '',
       heading_deg: camera.heading_deg == null ? '' : String(camera.heading_deg),
-      camera_type: camera.camera_type ?? 'fixed',
-      protocol: camera.protocol ?? 'rtsp',
+      camera_type: camera.camera_type ?? '',
+      protocol: camera.protocol ?? '',
       // Blank, always. The API never returns the URL — see Camera.has_stream —
       // so anything shown here would be an invention. Left empty it means
       // "keep whatever is configured".
@@ -183,25 +303,35 @@ export default function Cameras() {
     setDrawer('camera')
   }
 
-  function cancelEdit() {
+  const closeForm = useCallback(() => {
     setEditing(null)
     setForm({ ...EMPTY })
     setDrawer('none')
-  }
+  }, [])
 
   async function submit(event: FormEvent) {
     event.preventDefault()
-    const lat = Number(form.lat)
-    const lon = Number(form.lon)
-    if (!Number.isFinite(lat) || !Number.isFinite(lon)) {
-      toast.error('Latitude and longitude are required')
-      return
-    }
-    if (lat < BOUNDS.latMin || lat > BOUNDS.latMax || lon < BOUNDS.lonMin || lon > BOUNDS.lonMax) {
-      toast.error(
-        `(${lat}, ${lon}) is outside Gujarat. Check the values are not swapped.`,
-      )
-      return
+    const latText = form.lat.trim()
+    const lonText = form.lon.trim()
+    const keepUnplaced = editing !== null && isUnplaced(editing) && !latText && !lonText
+
+    let coords: { lat: number; lon: number } | null = null
+    if (!keepUnplaced) {
+      const lat = Number(latText)
+      const lon = Number(lonText)
+      if (!latText || !lonText || !Number.isFinite(lat) || !Number.isFinite(lon)) {
+        toast.error(
+          editing && isUnplaced(editing)
+            ? 'Enter both latitude and longitude to place this camera, or leave both blank'
+            : 'Latitude and longitude are required',
+        )
+        return
+      }
+      if (lat < BOUNDS.latMin || lat > BOUNDS.latMax || lon < BOUNDS.lonMin || lon > BOUNDS.lonMax) {
+        toast.error(`(${lat}, ${lon}) is outside Gujarat. Check the values are not swapped.`)
+        return
+      }
+      coords = { lat, lon }
     }
 
     const recorded = form.source_kind === 'recorded'
@@ -210,11 +340,8 @@ export default function Cameras() {
       return
     }
 
-    const body: api.CameraInput = {
-      camera_code: form.camera_code.trim().toUpperCase(),
+    const body: Partial<api.CameraInput> = {
       name: form.name.trim(),
-      lat,
-      lon,
       district: form.district.trim() || null,
       city: form.city.trim() || null,
       junction: form.junction.trim() || null,
@@ -230,29 +357,50 @@ export default function Cameras() {
       resolution: form.resolution.trim() || null,
       fps: form.fps === '' ? null : Number(form.fps),
       anpr_enabled: form.anpr_enabled,
+      ...(coords ?? {}),
     }
 
     setBusy(true)
     try {
       if (editing) {
-        // camera_code is the estate-wide identity and is not editable: renaming
-        // it would silently detach every detection already recorded against it.
-        const { camera_code: _ignored, ...amendable } = body
-        // An empty field means "leave the configured source alone", not "clear
-        // it" — the form cannot show the current value, so blank cannot mean
-        // delete without silently disconnecting cameras on every other edit.
-        if (!form.stream_url.trim()) delete amendable.stream_url
-        await api.updateCamera(editing.id, amendable)
+        // An empty field means "leave the configured source alone", not
+        // "clear it" — the form cannot show the current URL, so blank cannot
+        // mean delete without silently disconnecting cameras on every edit.
+        if (!form.stream_url.trim()) delete body.stream_url
+        const changes = amendment(editing, body)
+        if (changes.lat !== undefined) {
+          // Typed-in coordinates answer what the grid's placement tag
+          // recorded as unknown; a stale tag would keep the camera off the
+          // map, or pinned to its town's centre, after it was placed.
+          const tags = tagsAfterPlacing(editing.tags)
+          if (tags && tags.length !== (editing.tags ?? []).length) changes.tags = tags
+        }
+        if (Object.keys(changes).length === 0) {
+          toast.info('Nothing changed')
+          closeForm()
+          return
+        }
+        // camera_code is the estate-wide identity and never sent on an edit:
+        // renaming it would detach every detection recorded against it.
+        await api.updateCamera(editing.id, changes)
         toast.success(`${editing.camera_code} updated`)
       } else {
-        await api.createCamera(body)
+        const created: api.CameraInput = {
+          ...(body as api.CameraInput),
+          camera_code: form.camera_code.trim().toUpperCase(),
+          name: form.name.trim(),
+          lat: coords?.lat ?? 0,
+          lon: coords?.lon ?? 0,
+          anpr_enabled: form.anpr_enabled,
+        }
+        await api.createCamera(created)
         toast.success(
-          body.anpr_enabled && body.stream_url
-            ? `${body.camera_code} onboarded — ANPR starts within a minute`
-            : `${body.camera_code} onboarded as a registry record (no stream)`,
+          created.anpr_enabled && (created.stream_url || created.source_file)
+            ? `${created.camera_code} onboarded — plate reading starts within a minute`
+            : `${created.camera_code} onboarded as a registry record (no stream)`,
         )
       }
-      cancelEdit()
+      closeForm()
       await load()
     } catch (err) {
       toast.error(err)
@@ -273,156 +421,368 @@ export default function Cameras() {
     try {
       await api.deleteCamera(camera.id)
       toast.success(`${camera.camera_code} removed`)
+      if (selected?.id === camera.id) setCameraParam(null)
       await load()
     } catch (err) {
       toast.error(err)
     }
   }
 
+  const setLocal = <K extends keyof LocalFilter>(key: K, value: LocalFilter[K]) =>
+    setFilter((current) => ({ ...current, [key]: value }))
+  const filtered = isFiltered(fullFilter)
+  // With a camera open the table shares the screen with its panel, which
+  // carries Edit, Remove and plate reading itself; the table gives up those
+  // columns rather than squeezing every other one.
+  const compact = Boolean(cameraCode)
+  const showActions = (mayUpdate || mayDelete) && !compact
+  const editingUnplaced = editing !== null && isUnplaced(editing)
+
   return (
-    <div className="flex h-full flex-col gap-4 overflow-hidden p-6">
-      <PageHeader
-        title="Cameras"
-        subtitle={
-          <>
-            <span>{cameras.length} registered</span>
-            <span className="text-muted-foreground/40">·</span>
-            <span>{cameras.filter((c) => c.anpr_enabled).length} enabled for plate reading</span>
-            <InfoHint label="What onboarding a camera does">
-              A camera appears on the map, starts being health-probed, and joins
-              the ANPR fleet if it has a stream and analysis is enabled. Every
-              camera here has a video source behind it — a registry record
-              without one can never be watched or analysed, which is a
-              legitimate thing to record but should be a decision rather than an
-              accident.
-            </InfoHint>
-          </>
-        }
-        actions={
-          <div className="flex items-end gap-2">
-            <Input
-              value={filter}
-              onChange={(e) => setFilter(e.target.value)}
-              placeholder="Code, name or district"
-              aria-label="Filter cameras"
-              className="h-8 w-64 py-0"
-            />
-            {mayCreate && (
+    <div className="flex min-h-0 flex-1">
+      <div className="flex min-w-0 flex-1 flex-col">
+        {/* ── Header and filters ─────────────────────────────────── */}
+        <div className="shrink-0 space-y-4 px-6 pb-4 pt-5">
+          <PageHeader
+            title="Cameras"
+            subtitle={
               <>
-                <Button
-                  variant="outline"
-                  className="h-8 shrink-0 whitespace-nowrap"
-                  onClick={() => setDrawer('import')}
-                >
-                  Import CSV
-                </Button>
-                <Button
-                  className="flex h-8 shrink-0 items-center gap-1.5 whitespace-nowrap"
-                  onClick={() => {
-                    setEditing(null)
-                    setForm({ ...EMPTY })
-                    setDrawer('camera')
-                  }}
-                >
-                  <Icon name="camera" size={14} />
-                  Onboard camera
-                </Button>
+                <span>{cameras.length} registered</span>
+                <span className="text-faint">·</span>
+                <span>{cameras.filter((c) => c.anpr_enabled).length} enabled for plates</span>
+                {unplacedCount > 0 && (
+                  <>
+                    <span className="text-faint">·</span>
+                    <button
+                      type="button"
+                      onClick={() => setPosition('unplaced')}
+                      className="text-priority-high hover:underline"
+                    >
+                      {unplacedCount} without a position
+                    </button>
+                  </>
+                )}
+                <InfoHint label="What onboarding a camera does">
+                  A camera appears on the map, starts being health-probed, and joins the plate
+                  reading fleet if it has a video source and analysis is enabled. A registry
+                  record without a source can never be watched or analysed — a legitimate thing
+                  to record, but it should be a decision rather than an accident.
+                </InfoHint>
               </>
+            }
+            actions={
+              mayCreate && (
+                <>
+                  <Button variant="outline" onClick={() => setDrawer('import')}>
+                    <Icon name="download" size={14} className="rotate-180" />
+                    Import CSV
+                  </Button>
+                  <Button onClick={startCreate}>
+                    <Icon name="plus" size={14} />
+                    Onboard camera
+                  </Button>
+                </>
+              )
+            }
+          />
+
+          <Toolbar>
+            <ToolbarField label="Search">
+              <div className="w-52">
+                <Input
+                  value={filter.search}
+                  onChange={(e) => setLocal('search', e.target.value)}
+                  placeholder="Code, name or town"
+                  aria-label="Filter cameras"
+                />
+              </div>
+            </ToolbarField>
+            <FilterGroup label="Status">
+              <SegmentedControl
+                value={filter.status}
+                onChange={(v) => setLocal('status', v)}
+                options={[
+                  { value: '' as const, label: 'All' },
+                  ...STATUS_ORDER.map((status) => ({
+                    value: status,
+                    label: `${status === 'unknown' ? 'Unknown' : STATUS_LABEL[status]} ${counts[status]}`,
+                    title: STATUS_LABEL[status],
+                  })),
+                ]}
+              />
+            </FilterGroup>
+            <FilterGroup label="Source">
+              <SegmentedControl
+                value={filter.source}
+                onChange={(v) => setLocal('source', v)}
+                options={[
+                  { value: '' as const, label: 'All' },
+                  ...(['grid', 'recorded', 'stream', 'none'] as SourceKind[])
+                    .filter((kind) => sourceCounts[kind] > 0 || filter.source === kind)
+                    .map((kind) => ({ value: kind, label: `${SOURCE_LABEL[kind]} ${sourceCounts[kind]}` })),
+                ]}
+              />
+            </FilterGroup>
+            <FilterGroup label="Position">
+              <SegmentedControl
+                value={position}
+                onChange={setPosition}
+                options={[
+                  { value: '' as const, label: 'All' },
+                  { value: 'placed' as const, label: `Placed ${cameras.length - unplacedCount}` },
+                  { value: 'unplaced' as const, label: `Without a position ${unplacedCount}` },
+                ]}
+              />
+            </FilterGroup>
+            <ToolbarField label="Department">
+              <div className="w-44">
+                <Select
+                  value={filter.department}
+                  onChange={(e) => setLocal('department', e.target.value)}
+                >
+                  <option value="">All departments</option>
+                  {ownedBy.map((d) => (
+                    <option key={d.code} value={d.code}>
+                      {d.code} ({d.count})
+                    </option>
+                  ))}
+                  {unassigned > 0 && <option value={UNASSIGNED}>Unassigned ({unassigned})</option>}
+                </Select>
+              </div>
+            </ToolbarField>
+            {filtered && (
+              <Button
+                variant="ghost"
+                size="sm"
+                className="mb-0.5"
+                onClick={() => {
+                  setFilter(NO_FILTER)
+                  setPosition('')
+                }}
+              >
+                <Icon name="close" size={12} />
+                Clear
+              </Button>
             )}
-          </div>
-        }
-      />
+          </Toolbar>
+        </div>
 
-      {/* ── The fleet ─────────────────────────────────────────────────
-          What the page is for, and what it now opens on. */}
-      <div className="min-h-0 flex-1 overflow-y-auto">
-        {loading ? (
-          <SkeletonRows rows={8} />
-        ) : (
-          <Table>
-            <Thead>
-              <tr>
-                <Th>Code</Th>
-                <Th>Name</Th>
-                <Th>District</Th>
-                <Th>Status</Th>
-                <Th>ANPR</Th>
-                <Th>Source</Th>
-                <Th />
-              </tr>
-            </Thead>
-            <tbody>
-              {shown.map((camera) => (
-                <Tr key={camera.id}>
-                  <Td className="font-mono text-xs">{camera.camera_code}</Td>
-                  <Td>{camera.name}</Td>
-                  <Td className="text-muted-foreground">{camera.district ?? '—'}</Td>
-                  <Td>
-                    <StatusBadge status={camera.status} />
-                  </Td>
-                  <Td className="text-xs">
-                    {camera.anpr_enabled ? (
-                      <span className="text-status-online">on</span>
-                    ) : (
-                      <span className="text-muted-foreground">off</span>
+        {/* ── The fleet ───────────────────────────────────────────── */}
+        <div ref={tableRef} className="min-h-0 flex-1 space-y-4 overflow-y-auto px-6 pb-6">
+          {loadError && <ErrorBanner>{loadError}</ErrorBanner>}
+
+          {position === 'unplaced' && unplacedCount > 0 && (
+            <div className="flex items-start gap-3 rounded-lg border border-priority-high/30 bg-priority-high/[0.06] px-4 py-3">
+              <NoPositionGlyph className="mt-1" />
+              <div className="text-xs leading-relaxed text-muted-foreground">
+                <p className="text-[13px] font-medium text-foreground">
+                  {unplacedCount} camera{unplacedCount === 1 ? ' has' : 's have'} no known position
+                </p>
+                <p className="mt-0.5">
+                  The organisers’ grid publishes them without a town, so the map lists them beside
+                  it rather than drawing them anywhere.
+                  {mayUpdate && ' Edit one and enter its latitude and longitude to place it.'}
+                </p>
+              </div>
+            </div>
+          )}
+
+          {loading ? (
+            <SkeletonRows rows={8} height="h-10" />
+          ) : shown.length === 0 ? (
+            <EmptyState
+              title={filtered ? 'No camera matches these filters.' : 'No cameras registered.'}
+              hint={
+                filtered
+                  ? 'Clear a filter to widen the list.'
+                  : mayCreate
+                    ? 'Onboard one, or import an estate from CSV.'
+                    : undefined
+              }
+            />
+          ) : (
+            <>
+              <Table>
+                <Thead>
+                  <tr>
+                    <Th>Code</Th>
+                    <Th>Camera</Th>
+                    <Th>Status</Th>
+                    <Th>Source</Th>
+                    <Th>Position</Th>
+                    {!compact && <Th className="text-right">Plates</Th>}
+                    {showActions && (
+                      <Th>
+                        <span className="sr-only">Actions</span>
+                      </Th>
                     )}
-                  </Td>
-                  <Td className="text-xs text-muted-foreground">
-                    {camera.has_stream ? (
-                      // A boolean, never the URL: it carries credentials
-                      // for every federated camera on the grid.
-                      <span title="Stream configured">configured</span>
-                    ) : (camera.tags ?? []).includes('demo') ? (
-                      // Read from the registry's own tags rather than
-                      // matched against one hardcoded camera code: the
-                      // demonstration fleet is three cameras now, and a
-                      // code match silently mislabelled the other two as
-                      // having no stream at all.
-                      <Badge tone="warning">recorded clip</Badge>
-                    ) : (
-                      <span className="text-priority-high">no stream</span>
-                    )}
-                  </Td>
-                  <Td className="text-right">
-                    <span className="flex justify-end gap-3">
-                      {mayUpdate && (
-                        <button
-                          onClick={() => startEdit(camera)}
-                          className="text-xs text-primary hover:underline"
-                        >
-                          Edit
-                        </button>
-                      )}
-                      {mayDelete && (
-                        <button
-                          onClick={() => void remove(camera)}
-                          className="text-xs text-status-offline hover:underline"
-                        >
-                          Remove
-                        </button>
-                      )}
+                  </tr>
+                </Thead>
+                <tbody>
+                  {visible.map((camera) => {
+                    const isSelected = selected?.id === camera.id
+                    const where = placeLine(camera)
+                    return (
+                      <Tr
+                        key={camera.id}
+                        data-camera={camera.camera_code}
+                        aria-selected={isSelected}
+                        tabIndex={0}
+                        onClick={() => setCameraParam(isSelected ? null : camera.camera_code)}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') setCameraParam(camera.camera_code)
+                        }}
+                        className={`cursor-pointer outline-none focus-visible:bg-secondary/40 ${
+                          isSelected
+                            ? 'bg-primary/[0.07] shadow-[inset_2px_0_0_hsl(var(--primary))] hover:bg-primary/[0.09]'
+                            : ''
+                        }`}
+                      >
+                        <Td className="whitespace-nowrap font-mono text-xs tracking-wide">
+                          {camera.camera_code}
+                        </Td>
+                        <Td>
+                          <p className={`truncate ${compact ? 'max-w-[14rem]' : 'max-w-[20rem]'}`}>
+                            {camera.name}
+                          </p>
+                          {where && (
+                            <p
+                              className={`truncate text-[11px] text-faint ${compact ? 'max-w-[14rem]' : 'max-w-[20rem]'}`}
+                            >
+                              {where}
+                            </p>
+                          )}
+                        </Td>
+                        <Td className="whitespace-nowrap">
+                          <StatusBadge status={camera.status} label={STATUS_LABEL[camera.status]} />
+                        </Td>
+                        <Td className="whitespace-nowrap">
+                          <Badge tone={SOURCE_TONE[sourceKind(camera)]}>
+                            {SOURCE_LABEL[sourceKind(camera)]}
+                          </Badge>
+                        </Td>
+                        <Td className="whitespace-nowrap">
+                          <PositionCell camera={camera} />
+                        </Td>
+                        {!compact && (
+                          <Td className="text-right text-xs">
+                            {camera.anpr_enabled ? (
+                              <span className="text-muted-foreground">On</span>
+                            ) : (
+                              <span className="text-faint">Off</span>
+                            )}
+                          </Td>
+                        )}
+                        {showActions && (
+                          <Td className="text-right">
+                            <span className="flex justify-end gap-1">
+                              {mayUpdate && (
+                                <Button
+                                  variant="ghost"
+                                  size="sm"
+                                  onClick={(e) => {
+                                    e.stopPropagation()
+                                    startEdit(camera)
+                                  }}
+                                >
+                                  Edit
+                                </Button>
+                              )}
+                              {mayDelete && (
+                                <Button
+                                  variant="ghost"
+                                  size="sm"
+                                  className="hover:text-status-offline"
+                                  onClick={(e) => {
+                                    e.stopPropagation()
+                                    void remove(camera)
+                                  }}
+                                >
+                                  Remove
+                                </Button>
+                              )}
+                            </span>
+                          </Td>
+                        )}
+                      </Tr>
+                    )
+                  })}
+                </tbody>
+              </Table>
+
+              <div className="flex items-center justify-between gap-3 text-xs text-faint">
+                <span>
+                  {safePage * PAGE_SIZE + 1}–{Math.min(shown.length, (safePage + 1) * PAGE_SIZE)} of{' '}
+                  {shown.length}
+                  {filtered && ` · ${cameras.length} registered`}
+                </span>
+                {pageCount > 1 && (
+                  <span className="flex items-center gap-1.5">
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      disabled={safePage === 0}
+                      onClick={() => setPage(safePage - 1)}
+                    >
+                      <Icon name="chevronLeft" size={13} />
+                      Previous
+                    </Button>
+                    <span className="font-mono">
+                      {safePage + 1}/{pageCount}
                     </span>
-                  </Td>
-                </Tr>
-              ))}
-              {shown.length === 0 && (
-                <tr>
-                  <Td colSpan={7} className="py-8 text-center text-muted-foreground">
-                    {filter ? `No cameras match “${filter}”.` : 'No cameras registered.'}
-                  </Td>
-                </tr>
-              )}
-            </tbody>
-          </Table>
-        )}
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      disabled={safePage >= pageCount - 1}
+                      onClick={() => setPage(safePage + 1)}
+                    >
+                      Next
+                      <Icon name="chevronRight" size={13} />
+                    </Button>
+                  </span>
+                )}
+              </div>
+            </>
+          )}
 
-        <FederationStrip vms={vms} adapters={adapters} />
+          <FederationStrip vms={vms} adapters={adapters} />
+        </div>
       </div>
+
+      {/* ── One camera ────────────────────────────────────────────── */}
+      {cameraCode && !loading && (
+        <aside
+          aria-label="Camera details"
+          className="flex w-[24rem] shrink-0 flex-col border-l border-border bg-chrome"
+        >
+          {selected ? (
+            <CameraPanel
+              key={selected.id}
+              camera={selected}
+              context="registry"
+              onClose={() => setCameraParam(null)}
+              onRefresh={() => void load()}
+              onEdit={mayUpdate ? () => startEdit(selected) : undefined}
+              onRemove={mayDelete ? () => void remove(selected) : undefined}
+            />
+          ) : (
+            <div className="p-4">
+              <EmptyState
+                title={`No camera ${cameraCode} in the registry.`}
+                hint="It may have been removed, or the link mistyped."
+              />
+              <Button variant="outline" size="sm" className="mt-3" onClick={() => setCameraParam(null)}>
+                Close
+              </Button>
+            </div>
+          )}
+        </aside>
+      )}
 
       {/* ── Onboarding / amendment ────────────────────────────────── */}
       <Drawer
         open={drawer === 'camera'}
-        onClose={cancelEdit}
+        onClose={closeForm}
         title={editing ? `Amend ${editing.camera_code}` : 'Onboard a camera'}
         description={
           editing
@@ -430,106 +790,60 @@ export default function Cameras() {
             : 'A code, a name, a position and a video source.'
         }
       >
-        {mayCreate && (
-          <form onSubmit={submit} className="space-y-4">
-              <div className="grid gap-3 sm:grid-cols-2">
-                <Field label="Camera code" hint="Unique, estate-wide">
-                  <Input
-                    required
-                    disabled={Boolean(editing)}
-                    value={form.camera_code}
-                    onChange={(e) => set('camera_code', e.target.value.toUpperCase())}
-                    placeholder="CAM-00301"
-                  />
-                </Field>
-                <Field label="Name" hint="What an operator will recognise">
-                  <Input
-                    required
-                    value={form.name}
-                    onChange={(e) => set('name', e.target.value)}
-                    placeholder="Kalawad Road Junction"
-                  />
-                </Field>
+        {(editing ? mayUpdate : mayCreate) && (
+          <form onSubmit={submit} className="space-y-5">
+            <div className="grid gap-3 sm:grid-cols-2">
+              <Field label="Camera code" hint="Unique, estate-wide">
+                <Input
+                  required
+                  disabled={Boolean(editing)}
+                  value={form.camera_code}
+                  onChange={(e) => set('camera_code', e.target.value.toUpperCase())}
+                  placeholder="CAM-00301"
+                  className="font-mono"
+                />
+              </Field>
+              <Field label="Name" hint="What an operator will recognise">
+                <Input
+                  required
+                  value={form.name}
+                  onChange={(e) => set('name', e.target.value)}
+                  placeholder="Kalawad Road Junction"
+                />
+              </Field>
+            </div>
+
+            <div>
+              <SectionLabel>Position</SectionLabel>
+              {editingUnplaced && (
+                <p className="mt-1.5 text-xs leading-relaxed text-priority-high">
+                  No position on record. Enter one to place this camera on the map, or leave both
+                  blank to keep it listed without one.
+                </p>
+              )}
+              <div className="mt-2 grid gap-3 sm:grid-cols-2">
                 <Field label="Latitude" hint={`${BOUNDS.latMin} – ${BOUNDS.latMax}`}>
                   <Input
-                    required
+                    required={!editingUnplaced}
                     type="number"
                     step="any"
                     value={form.lat}
                     onChange={(e) => set('lat', e.target.value)}
-                    placeholder="22.2863"
+                    placeholder={editingUnplaced ? 'Not known' : '22.2863'}
+                    className="font-mono"
                   />
                 </Field>
                 <Field label="Longitude" hint={`${BOUNDS.lonMin} – ${BOUNDS.lonMax}`}>
                   <Input
-                    required
+                    required={!editingUnplaced}
                     type="number"
                     step="any"
                     value={form.lon}
                     onChange={(e) => set('lon', e.target.value)}
-                    placeholder="70.7728"
+                    placeholder={editingUnplaced ? 'Not known' : '70.7728'}
+                    className="font-mono"
                   />
                 </Field>
-              </div>
-
-              {/* Where this camera's pictures come from. A live URL is the
-                  real-deployment path; a recorded clip is how footage shot on
-                  a phone becomes a camera without editing .env and restarting
-                  a container. */}
-              <Field label="Video source">
-                <SegmentedControl
-                  value={form.source_kind}
-                  onChange={(v) => set('source_kind', v)}
-                  options={[
-                    { value: 'live', label: 'Live stream URL' },
-                    { value: 'recorded', label: 'Recorded video' },
-                  ]}
-                />
-              </Field>
-
-              {form.source_kind === 'live' ? (
-                <Field
-                  label="Stream URL"
-                  hint={
-                    editing
-                      ? editing.has_stream
-                        ? 'A source is configured. Leave blank to keep it, or type a new one to replace it — the existing URL is never sent to the browser.'
-                        : 'This camera has no source, so it can never be watched or analysed. Add one here.'
-                      : 'RTSP or ONVIF. Without one the camera is a registry record that can never be watched or analysed.'
-                  }
-                >
-                  <Input
-                    value={form.stream_url}
-                    onChange={(e) => set('stream_url', e.target.value)}
-                    placeholder="rtsp://10.0.0.24:554/Streaming/Channels/101"
-                    className="font-mono text-xs"
-                  />
-                </Field>
-              ) : (
-                <Field
-                  label="Recorded clip"
-                  hint={
-                    sourceVideos.length === 0
-                      ? 'No clips found in the video directory. Drop an .mp4 into data/videos/ and reopen this form.'
-                      : 'Replayed on a loop as this camera’s feed. Copy the file into data/videos/ and it appears here.'
-                  }
-                >
-                  <Select
-                    value={form.source_file}
-                    onChange={(e) => set('source_file', e.target.value)}
-                    disabled={sourceVideos.length === 0}
-                  >
-                    <option value="">Select a clip…</option>
-                    {sourceVideos.map((v) => (
-                      <option key={v.filename} value={v.filename}>
-                        {v.filename} ({api.formatBytes(v.size_bytes)})
-                      </option>
-                    ))}
-                  </Select>
-                </Field>
-              )}
-
-              <div className="grid gap-3 sm:grid-cols-2">
                 <Field label="District">
                   <Input
                     value={form.district}
@@ -544,18 +858,12 @@ export default function Cameras() {
                     placeholder="Rajkot"
                   />
                 </Field>
-                <Field label="Department">
-                  <Select
-                    value={form.department_code}
-                    onChange={(e) => set('department_code', e.target.value)}
-                  >
-                    <option value="">Unassigned</option>
-                    {departments.map((d) => (
-                      <option key={d.code} value={d.code}>
-                        {d.name}
-                      </option>
-                    ))}
-                  </Select>
+                <Field label="Junction">
+                  <Input
+                    value={form.junction}
+                    onChange={(e) => set('junction', e.target.value)}
+                    placeholder="Kalawad Road @ KKV Chowk"
+                  />
                 </Field>
                 <Field
                   label="Heading"
@@ -571,13 +879,90 @@ export default function Cameras() {
                   />
                 </Field>
               </div>
+            </div>
 
-              <div className="grid gap-3 sm:grid-cols-2">
+            {/* Where this camera's pictures come from. A live URL is the
+                real-deployment path; a recorded clip is how footage shot on
+                a phone becomes a camera without editing .env and restarting
+                a container. */}
+            <div>
+              <SectionLabel>Video source</SectionLabel>
+              <div className="mt-2 space-y-3">
+                <SegmentedControl
+                  className="w-fit"
+                  value={form.source_kind}
+                  onChange={(v) => set('source_kind', v)}
+                  options={[
+                    { value: 'live', label: 'Live stream URL' },
+                    { value: 'recorded', label: 'Recorded video' },
+                  ]}
+                />
+                {form.source_kind === 'live' ? (
+                  <Field
+                    label="Stream URL"
+                    hint={
+                      editing
+                        ? editing.has_stream
+                          ? 'A source is configured. Leave blank to keep it, or type a new one to replace it — the existing URL is never sent to the browser.'
+                          : 'This camera has no source, so it can never be watched or analysed. Add one here.'
+                        : 'RTSP or ONVIF. Without one the camera is a registry record that can never be watched or analysed.'
+                    }
+                  >
+                    <Input
+                      value={form.stream_url}
+                      onChange={(e) => set('stream_url', e.target.value)}
+                      placeholder="rtsp://10.0.0.24:554/Streaming/Channels/101"
+                      className="font-mono text-xs"
+                    />
+                  </Field>
+                ) : (
+                  <Field
+                    label="Recorded clip"
+                    hint={
+                      sourceVideos.length === 0
+                        ? 'No clips found in the video directory. Drop an .mp4 into data/videos/ and reopen this form.'
+                        : 'Replayed on a loop as this camera’s feed. Copy the file into data/videos/ and it appears here.'
+                    }
+                  >
+                    <Select
+                      value={form.source_file}
+                      onChange={(e) => set('source_file', e.target.value)}
+                      disabled={sourceVideos.length === 0}
+                    >
+                      <option value="">Select a clip…</option>
+                      {sourceVideos.map((v) => (
+                        <option key={v.filename} value={v.filename}>
+                          {v.filename} ({api.formatBytes(v.size_bytes)})
+                        </option>
+                      ))}
+                    </Select>
+                  </Field>
+                )}
+              </div>
+            </div>
+
+            <div>
+              <SectionLabel>Ownership and hardware</SectionLabel>
+              <div className="mt-2 grid gap-3 sm:grid-cols-2">
+                <Field label="Department">
+                  <Select
+                    value={form.department_code}
+                    onChange={(e) => set('department_code', e.target.value)}
+                  >
+                    <option value="">Unassigned</option>
+                    {departments.map((d) => (
+                      <option key={d.code} value={d.code}>
+                        {d.name}
+                      </option>
+                    ))}
+                  </Select>
+                </Field>
                 <Field label="Type">
                   <Select
                     value={form.camera_type}
                     onChange={(e) => set('camera_type', e.target.value)}
                   >
+                    {form.camera_type === '' && <option value="">Not recorded</option>}
                     {['fixed', 'ptz', 'anpr', 'dome', 'thermal'].map((t) => (
                       <option key={t} value={t}>
                         {t}
@@ -586,10 +971,8 @@ export default function Cameras() {
                   </Select>
                 </Field>
                 <Field label="Protocol">
-                  <Select
-                    value={form.protocol}
-                    onChange={(e) => set('protocol', e.target.value)}
-                  >
+                  <Select value={form.protocol} onChange={(e) => set('protocol', e.target.value)}>
+                    {form.protocol === '' && <option value="">Not recorded</option>}
                     {PROTOCOLS.map((p) => (
                       <option key={p} value={p}>
                         {p}
@@ -615,29 +998,28 @@ export default function Cameras() {
                   />
                 </Field>
               </div>
+            </div>
 
-              <Checkbox
-                checked={form.anpr_enabled}
-                onChange={(e) => set('anpr_enabled', e.target.checked)}
-                label={
-                  <>
-                    Analyse this camera for number plates{' '}
-                    <span className="text-xs text-muted-foreground">
-                      — the worker picks it up on its next discovery pass
-                    </span>
-                  </>
-                }
-              />
+            <Checkbox
+              checked={form.anpr_enabled}
+              onChange={(e) => set('anpr_enabled', e.target.checked)}
+              label={
+                <>
+                  Analyse this camera for number plates{' '}
+                  <span className="text-xs text-muted-foreground">
+                    — the worker picks it up on its next discovery pass
+                  </span>
+                </>
+              }
+            />
 
-              <div className="flex items-center pt-1">
-                <Button type="submit" disabled={busy}>
+            <div className="flex items-center gap-2 border-t border-border pt-4">
+              <Button type="submit" disabled={busy}>
                 {busy ? 'Saving…' : editing ? 'Save changes' : 'Onboard camera'}
               </Button>
-              {editing && (
-                <Button variant="ghost" className="ml-2" onClick={cancelEdit}>
-                  Cancel
-                </Button>
-              )}
+              <Button variant="ghost" onClick={closeForm}>
+                Cancel
+              </Button>
             </div>
           </form>
         )}
@@ -659,6 +1041,42 @@ export default function Cameras() {
         />
       </Drawer>
     </div>
+  )
+}
+
+/**
+ * A captioned row of segmented choices.
+ *
+ * Not a ToolbarField: that wraps its control in a <label>, and a label around
+ * a segmented control names only the first segment — which then also catches
+ * every click on the caption, silently resetting the filter. A group with an
+ * accessible name is what a set of choices is.
+ */
+function FilterGroup({ label, children }: { label: string; children: ReactNode }) {
+  return (
+    <div role="group" aria-label={label}>
+      <span className="block text-[11px] font-medium uppercase tracking-[0.06em] text-muted-foreground">
+        {label}
+      </span>
+      <div className="mt-1">{children}</div>
+    </div>
+  )
+}
+
+function PositionCell({ camera }: { camera: Camera }) {
+  const kind = positionKind(camera)
+  if (kind === 'unknown') return <Badge tone="warning">Not known</Badge>
+  if (kind === 'town') {
+    return (
+      <span className="text-xs text-muted-foreground" title="The grid gives the town, not the junction">
+        Town centre
+      </span>
+    )
+  }
+  return (
+    <span className="coord whitespace-nowrap text-[11px] text-faint">
+      {camera.lat.toFixed(4)}, {camera.lon.toFixed(4)}
+    </span>
   )
 }
 
@@ -697,36 +1115,33 @@ function CsvImport({ onDone, allowed }: { onDone: () => Promise<void>; allowed: 
   }
 
   return (
-    <div className="space-y-4 rounded-lg border border-border bg-card p-4">
-      <div>
-        <h2 className="text-sm font-semibold">Onboard an estate from CSV</h2>
-        <p className="mt-1 max-w-3xl text-xs text-muted-foreground">
-          Required columns: <code className="font-mono">camera_code</code>,{' '}
-          <code className="font-mono">name</code>, <code className="font-mono">lat</code>,{' '}
-          <code className="font-mono">lon</code>. Everything else is optional and
-          unknown columns are ignored, so a department&rsquo;s own spreadsheet
-          export usually works unmodified. A sample sits in{' '}
-          <code className="font-mono">data/seed/sample_cameras.csv</code>.
-        </p>
-      </div>
+    <div className="space-y-5">
+      <p className="text-xs leading-relaxed text-muted-foreground">
+        Required columns: <code className="font-mono text-foreground">camera_code</code>,{' '}
+        <code className="font-mono text-foreground">name</code>,{' '}
+        <code className="font-mono text-foreground">lat</code>,{' '}
+        <code className="font-mono text-foreground">lon</code>. Everything else is optional and
+        unknown columns are ignored, so a department’s own spreadsheet export usually works
+        unmodified. A sample sits in{' '}
+        <code className="font-mono text-foreground">data/seed/sample_cameras.csv</code>.
+      </p>
 
-      <input
-        type="file"
-        accept=".csv,text/csv"
-        disabled={!allowed}
-        onChange={(e) => {
-          setFile(e.target.files?.[0] ?? null)
-          setResult(null)
-        }}
-        className="block w-full text-sm file:mr-3 file:rounded file:border-0 file:bg-muted file:px-3 file:py-2 file:text-sm file:text-foreground"
-      />
+      <label className="block">
+        <span className="eyebrow">File</span>
+        <input
+          type="file"
+          accept=".csv,text/csv"
+          disabled={!allowed}
+          onChange={(e) => {
+            setFile(e.target.files?.[0] ?? null)
+            setResult(null)
+          }}
+          className="mt-1.5 block w-full rounded-md border border-dashed border-input bg-background px-3 py-3 text-[13px] text-muted-foreground file:mr-3 file:rounded-md file:border-0 file:bg-secondary file:px-3 file:py-1.5 file:text-[13px] file:font-medium file:text-foreground hover:border-muted-foreground/60"
+        />
+      </label>
 
       <div className="flex gap-2">
-        <Button
-          variant="outline"
-          onClick={() => void run(true)}
-          disabled={!file || busy || !allowed}
-        >
+        <Button variant="outline" onClick={() => void run(true)} disabled={!file || busy || !allowed}>
           {busy ? 'Checking…' : 'Validate only'}
         </Button>
         <Button onClick={() => void run(false)} disabled={!file || busy || !allowed}>
@@ -735,43 +1150,37 @@ function CsvImport({ onDone, allowed }: { onDone: () => Promise<void>; allowed: 
       </div>
 
       {result && (
-        <div className="space-y-3 rounded border border-border bg-background p-3">
-          <div className="flex flex-wrap gap-4 text-sm">
-            <Tally label="Created" value={result.created} tone="text-status-online" />
-            <Tally label="Updated" value={result.updated} tone="text-primary" />
-            <Tally
+        <div className="space-y-3">
+          {result.dry_run && <Badge tone="warning">Validation only — nothing was written</Badge>}
+          <div className="grid grid-cols-3 gap-2">
+            <StatTile label={result.dry_run ? 'Would create' : 'Created'} value={result.created} />
+            <StatTile label={result.dry_run ? 'Would update' : 'Updated'} value={result.updated} />
+            <StatTile
               label="Rejected"
               value={result.failed}
-              tone={result.failed ? 'text-status-offline' : 'text-muted-foreground'}
+              tone={result.failed ? 'bad' : undefined}
             />
-            {result.dry_run && (
-              <span className="self-center text-xs text-priority-high">
-                validation only — nothing was written
-              </span>
-            )}
           </div>
 
           {result.errors.length > 0 && (
-            <div className="overflow-x-auto">
-              <table className="w-full text-xs">
-                <thead className="text-left text-muted-foreground">
-                  <tr>
-                    <th className="py-1 pr-3">Row</th>
-                    <th className="py-1 pr-3">Code</th>
-                    <th className="py-1">Why it was rejected</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-border">
-                  {result.errors.map((row) => (
-                    <tr key={`${row.row}-${row.camera_code ?? ''}`}>
-                      <td className="py-1.5 pr-3 font-mono">{row.row}</td>
-                      <td className="py-1.5 pr-3 font-mono">{row.camera_code ?? '—'}</td>
-                      <td className="py-1.5 text-status-offline">{row.errors.join('; ')}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
+            <Table>
+              <Thead>
+                <tr>
+                  <Th>Row</Th>
+                  <Th>Code</Th>
+                  <Th>Why it was rejected</Th>
+                </tr>
+              </Thead>
+              <tbody>
+                {result.errors.map((row) => (
+                  <Tr key={`${row.row}-${row.camera_code ?? ''}`}>
+                    <Td className="font-mono text-xs">{row.row}</Td>
+                    <Td className="font-mono text-xs">{row.camera_code ?? '—'}</Td>
+                    <Td className="text-xs text-status-offline">{row.errors.join('; ')}</Td>
+                  </Tr>
+                ))}
+              </tbody>
+            </Table>
           )}
         </div>
       )}
@@ -779,21 +1188,13 @@ function CsvImport({ onDone, allowed }: { onDone: () => Promise<void>; allowed: 
   )
 }
 
-function Tally({ label, value, tone }: { label: string; value: number; tone: string }) {
-  return (
-    <span>
-      <span className={`text-lg font-semibold ${tone}`}>{value}</span>{' '}
-      <span className="text-xs text-muted-foreground">{label}</span>
-    </span>
-  )
-}
-
 /**
  * The federation evidence, kept.
  *
  * This was a whole tab. It is real and it matters — one adapter interface
- * reaching four kinds of system is the Model 3 argument — but it is reference
- * information, not something anyone acts on, and a tab implied otherwise.
+ * reaching every kind of recorder a city already runs is how cameras get
+ * federated rather than replaced — but it is reference information, not
+ * something anyone acts on, and a tab implied otherwise.
  */
 function FederationStrip({
   vms,
@@ -803,50 +1204,47 @@ function FederationStrip({
   adapters: Record<string, string>
 }) {
   return (
-    <section className="mt-4 rounded-md border border-border bg-card/50 p-4">
-      <h2 className="flex items-center gap-1.5 text-sm font-semibold">
+    <Panel>
+      <SectionLabel>
         Federation
         <InfoHint>
-          Departmental VMS platforms stay authoritative for their own video.
-          This platform holds their metadata and resolves streams on demand, so
-          the central tier carries events, not video — which is what lets a city
-          deployment run on commodity hardware.
+          Departmental recorders stay authoritative for their own video. This platform holds
+          their metadata and resolves streams on demand, so the central tier carries events, not
+          video — which is what lets a city deployment run on commodity hardware.
         </InfoHint>
-      </h2>
+      </SectionLabel>
 
-      <div className="mt-3 grid gap-4 md:grid-cols-2">
+      <div className="mt-3 grid gap-6 md:grid-cols-2">
         <div>
-          <h3 className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
-            Connected systems
-          </h3>
-          <ul className="mt-2 space-y-1 text-xs">
+          <p className="text-xs text-faint">Connected systems</p>
+          <ul className="mt-2 space-y-1.5 text-xs">
             {vms.map((instance) => (
-              <li key={instance.id} className="flex justify-between gap-3">
-                <span>{instance.name}</span>
-                <span className="font-mono text-muted-foreground">
-                  {instance.vendor} · {instance.adapter_type}
+              <li key={instance.id} className="flex items-baseline justify-between gap-3">
+                <span className="truncate text-[13px]">{instance.name}</span>
+                <span className="shrink-0 text-muted-foreground">
+                  {vendorWords(instance.vendor)}
+                  <span className="ml-1.5 font-mono text-faint">{instance.camera_count}</span>
                 </span>
               </li>
             ))}
-            {vms.length === 0 && (
-              <li className="text-muted-foreground">No federated systems registered.</li>
-            )}
+            {vms.length === 0 && <li className="text-faint">No federated systems registered.</li>}
           </ul>
         </div>
         <div>
-          <h3 className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
-            Available adapters
-          </h3>
-          <ul className="mt-2 space-y-1 text-xs">
+          <p className="text-xs text-faint">Available adapters</p>
+          <ul className="mt-2 flex flex-wrap gap-1.5">
             {Object.entries(adapters).map(([key, description]) => (
-              <li key={key}>
-                <span className="font-mono text-foreground">{key}</span>
-                <span className="text-muted-foreground"> — {description}</span>
+              <li
+                key={key}
+                title={description}
+                className="rounded border border-border bg-secondary/40 px-2 py-0.5 font-mono text-[11px] text-muted-foreground"
+              >
+                {key}
               </li>
             ))}
           </ul>
         </div>
       </div>
-    </section>
+    </Panel>
   )
 }

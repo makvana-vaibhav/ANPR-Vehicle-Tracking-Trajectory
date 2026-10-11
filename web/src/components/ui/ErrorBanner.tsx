@@ -6,7 +6,7 @@ import type { ReactNode } from 'react'
 
 export function ErrorBanner({ children }: { children: ReactNode }) {
   return (
-    <p className="rounded border border-status-offline/40 bg-status-offline/10 px-4 py-2 text-sm text-status-offline">
+    <p role="alert" className="rounded-md border border-status-offline/40 bg-status-offline/[0.08] px-4 py-2 text-[13px] text-status-offline">
       {children}
     </p>
   )

@@ -502,6 +502,10 @@ export const getAlerts = (query: AlertQuery = {}) => {
   return request<AlertPage>(`/api/v1/alerts?${params}`)
 }
 
+/** One alert by id — for a link to an alarm that the current list does not
+ *  hold, such as a closed one opened from an old report. */
+export const getAlert = (id: string) => request<Alert>(`/api/v1/alerts/${encodeURIComponent(id)}`)
+
 /** Move an alert along its lifecycle. Every transition records who and when. */
 export const transitionAlert = (id: string, status: AlertStatus, notes?: string) =>
   request<Alert>(`/api/v1/alerts/${id}/transition`, {

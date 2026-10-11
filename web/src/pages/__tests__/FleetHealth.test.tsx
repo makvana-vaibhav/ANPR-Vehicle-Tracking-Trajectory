@@ -1,0 +1,167 @@
+/**
+ * Fleet health.
+ *
+ * No camera's history opens by itself; a link or a gap-report row opens it;
+ * failures are said in words; and grey stays grey — colour only on the
+ * figures that need someone.
+ */
+
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+
+import { camera, DEMO } from '@/components/network/__tests__/fixtures'
+import * as api from '@/lib/api'
+import type { CameraHealthHistory, CameraPage, FleetHealth, GapReport } from '@/lib/types'
+import FleetHealthPage from '@/pages/FleetHealth'
+
+const GRID_CAMERA = camera('SBX-cam05', { name: 'Visat teen Rasta' })
+
+const HEALTH: FleetHealth = {
+  total: 31,
+  online: 1,
+  offline: 0,
+  degraded: 0,
+  unknown: 30,
+  integrated: 1,
+  awaiting_integration: 30,
+  availability_pct: 3.2,
+  integrated_availability_pct: 100,
+  by_department: [
+    { department: 'UNASSIGNED', total: 27, online: 0, offline: 0, degraded: 0, availability_pct: 0 },
+    { department: 'MUNICIPAL', total: 1, online: 1, offline: 0, degraded: 0, availability_pct: 100 },
+  ],
+  by_vendor: [
+    { vendor: 'hosted_grid', total: 30, online: 0, availability_pct: 0 },
+    { vendor: 'simulated', total: 1, online: 1, availability_pct: 100 },
+  ],
+  top_errors: [{ error_code: 'sandbox_unreachable', count: 3690 }],
+  generated_at: new Date().toISOString(),
+}
+
+const GAPS: GapReport = {
+  window_hours: 24,
+  generated_at: new Date().toISOString(),
+  summary: {
+    unavailable_cameras: 0,
+    districts_below_anpr_target: 0,
+    districts_with_no_cameras: 1,
+    unreliable_cameras: 1,
+  },
+  availability_gaps: [],
+  capability_gaps: [],
+  coverage_gaps: [{ district: 'Vatva', reason: 'No cameras registered in this district' }],
+  reliability_gaps: [
+    {
+      camera_code: 'SBX-cam05',
+      name: 'Visat teen Rasta',
+      district: 'Ahmadabad',
+      uptime_pct: 57.5,
+      reason: 'Intermittent — repeatedly dropping in and out',
+      probes: 40,
+    },
+  ],
+  district_coverage: [],
+}
+
+function history(code: string, id: string): CameraHealthHistory {
+  return {
+    camera_id: id,
+    camera_code: code,
+    status: 'online',
+    uptime: { window_hours: 24, probes: 3, uptime_pct: 66.7, avg_latency_ms: 120, avg_fps: null },
+    history: [
+      { ts: '2026-10-11T18:10:00Z', reachable: true, fps_actual: null, latency_ms: 100, bitrate_kbps: null, error_code: null },
+      { ts: '2026-10-11T18:05:00Z', reachable: false, fps_actual: null, latency_ms: 0, bitrate_kbps: null, error_code: 'timeout' },
+      { ts: '2026-10-11T18:00:00Z', reachable: true, fps_actual: null, latency_ms: 140, bitrate_kbps: null, error_code: null },
+    ],
+  }
+}
+
+function Where() {
+  return <output data-testid="where">{useLocation().search}</output>
+}
+
+function renderAt(url: string) {
+  return render(
+    <MemoryRouter initialEntries={[url]}>
+      <Routes>
+        <Route
+          path="/health"
+          element={
+            <>
+              <FleetHealthPage />
+              <Where />
+            </>
+          }
+        />
+      </Routes>
+    </MemoryRouter>,
+  )
+}
+
+// Recharts' ResponsiveContainer measures itself; jsdom has nothing to measure with.
+class NoResize {
+  observe() {}
+  unobserve() {}
+  disconnect() {}
+}
+
+describe('FleetHealth', () => {
+  beforeEach(() => {
+    vi.stubGlobal('ResizeObserver', NoResize)
+    vi.spyOn(api, 'getFleetHealth').mockResolvedValue(HEALTH)
+    vi.spyOn(api, 'getGapReport').mockResolvedValue(GAPS)
+    vi.spyOn(api, 'getDepartments').mockResolvedValue([])
+    vi.spyOn(api, 'getCameras').mockResolvedValue({
+      items: [DEMO, GRID_CAMERA],
+      total: 2,
+      limit: 500,
+      offset: 0,
+    } as CameraPage)
+    vi.spyOn(api, 'getCameraHealth').mockImplementation(async (id) =>
+      id === DEMO.id ? history(DEMO.camera_code, DEMO.id) : history('SBX-cam05', GRID_CAMERA.id),
+    )
+  })
+
+  afterEach(() => {
+    vi.restoreAllMocks()
+    vi.unstubAllGlobals()
+  })
+
+  it('opens no camera’s history by default', async () => {
+    renderAt('/health')
+    expect(await screen.findByText('Choose a camera to see how it has answered.')).toBeTruthy()
+    await screen.findByRole('option', { name: /CAM-DEMO-01/ })
+    expect(api.getCameraHealth).not.toHaveBeenCalled()
+  })
+
+  it('opens the history a link names', async () => {
+    renderAt('/health?camera=CAM-DEMO-01')
+    await waitFor(() => expect(api.getCameraHealth).toHaveBeenCalledWith(DEMO.id, 24))
+    expect(await screen.findByText('66.7%')).toBeTruthy()
+  })
+
+  it('says what is failing in words, with the code beside it', async () => {
+    renderAt('/health')
+    expect(await screen.findByText("The organisers' grid did not answer")).toBeTruthy()
+    expect(screen.getByText('sandbox_unreachable')).toBeTruthy()
+    expect(screen.getByText(/3,690 failed probes in the last hour/)).toBeTruthy()
+  })
+
+  it('opens a camera’s history from the gap report, into the URL', async () => {
+    renderAt('/health')
+    const row = (await screen.findByText('Visat teen Rasta')).closest('tr')!
+    fireEvent.click(row)
+    expect(screen.getByTestId('where').textContent).toBe('?camera=SBX-cam05')
+    await waitFor(() => expect(api.getCameraHealth).toHaveBeenCalledWith(GRID_CAMERA.id, 24))
+  })
+
+  it('colours only the figure that needs someone', async () => {
+    renderAt('/health')
+    const unknown = (await screen.findByText('State unknown')).closest('div')!
+    expect(within(unknown.parentElement!).getByText('30').className).toMatch(/text-priority-high/)
+    const offline = screen.getByText('Offline', { selector: 'p' }).parentElement!
+    expect(within(offline).getByText('0').className).not.toMatch(/text-priority/)
+  })
+})

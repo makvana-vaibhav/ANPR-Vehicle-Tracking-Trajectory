@@ -266,6 +266,10 @@ async def change_password(
 
     # argon2 is intentionally slow; keep it off the event loop.
     record.password_hash = await asyncio.to_thread(hash_password, payload.new_password)
+    # The holder has now chosen it, so it is no longer a secret an
+    # administrator shares. Left set, the account kept saying "password not
+    # yet personal" after the one change that makes it so.
+    record.must_change_password = False
     await session.flush()
 
     await audit.record(

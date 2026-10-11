@@ -57,7 +57,7 @@ export function Drawer({
         role="dialog"
         aria-modal="true"
         aria-label={title}
-        className={`relative flex h-full flex-col border-l border-border bg-card shadow-2xl ${width}`}
+        className={`relative flex h-full flex-col border-l border-border bg-chrome shadow-2xl ${width}`}
       >
         <header className="flex shrink-0 items-start justify-between gap-4 border-b border-border px-5 py-3">
           <div className="min-w-0">

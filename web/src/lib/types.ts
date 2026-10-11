@@ -175,6 +175,8 @@ export interface GapReport {
     district: string | null
     uptime_pct: number
     reason: string
+    /** Probes the uptime figure is computed from. */
+    probes: number
   }>
   district_coverage: Array<{
     district: string

@@ -9,12 +9,18 @@
  * The API refuses these calls regardless. This exists so the refusal is
  * legible: it says which permission is missing and who to ask, rather than
  * leaving somebody to guess whether the system is broken.
+ *
+ * Grey, not red. Nothing has gone wrong and nobody needs to act on it now —
+ * this is a boundary working as designed, and drawing it in the alarm colour
+ * would teach operators that boundaries are faults.
  */
 
 import { Link } from 'react-router-dom'
 
+import { Icon, RoleBadge } from '@/components/ui'
 import { useAuth } from '@/hooks/useAuth'
 import { ROLE_SUMMARY, type Permission } from '@/lib/permissions'
+import type { Role } from '@/lib/types'
 
 interface Props {
   /** Any one of these is enough to open the screen. */
@@ -24,6 +30,13 @@ interface Props {
   children: React.ReactNode
 }
 
+const ROLES: readonly Role[] = ['admin', 'supervisor', 'operator', 'analyst', 'auditor', 'api_client']
+
+/** The profile carries its role as a plain string; the badge wants one it knows. */
+function isRole(value: string | undefined): value is Role {
+  return value !== undefined && (ROLES as readonly string[]).includes(value)
+}
+
 export default function RequirePermission({ anyOf, label, children }: Props) {
   const { user, can } = useAuth()
 
@@ -31,38 +44,71 @@ export default function RequirePermission({ anyOf, label, children }: Props) {
     return <>{children}</>
   }
 
-  const summary = user?.role ? ROLE_SUMMARY[user.role] : undefined
+  const role = user?.role
+  const summary = role ? ROLE_SUMMARY[role] : undefined
 
   return (
-    <div className="flex h-full items-center justify-center p-6">
-      <div className="max-w-md rounded-md border border-border bg-card px-6 py-5 text-center">
-        <p className="text-sm font-medium">{label} is not available to your role</p>
+    <div className="flex min-h-0 flex-1 items-center justify-center overflow-y-auto p-6">
+      <section
+        aria-labelledby="no-access-title"
+        className="w-full max-w-[26rem] rounded-lg border border-border bg-card p-6"
+      >
+        <span className="grid h-10 w-10 place-items-center rounded-full border border-input bg-secondary text-muted-foreground">
+          <Icon name="shield" size={19} />
+        </span>
 
-        <p className="mt-2 text-xs text-muted-foreground">
-          You are signed in as{' '}
-          <span className="font-medium text-foreground">{user?.username}</span> with
-          the role{' '}
-          <span className="font-medium text-foreground">{user?.role}</span>
-          {summary ? <> — {summary.toLowerCase()}.</> : '.'}
-        </p>
+        <p className="eyebrow mt-5">Not available to your role</p>
+        <h1 id="no-access-title" className="mt-1 text-[17px] font-semibold leading-snug">
+          {label} is outside what your role can open
+        </h1>
 
-        {/* Naming the permission turns "it doesn't work" into a request an
-            administrator can act on without a conversation. */}
-        <p className="mt-2 text-[11px] text-muted-foreground">
-          This screen needs{' '}
-          <code className="rounded bg-muted px-1 py-px font-mono">
-            {anyOf.join(' or ')}
-          </code>
-          . An administrator can grant it by changing your role.
+        <dl className="mt-5 divide-y divide-border/70 rounded-md border border-border text-[13px]">
+          <div className="flex items-center justify-between gap-4 px-3 py-2">
+            <dt className="text-muted-foreground">Signed in as</dt>
+            <dd className="truncate font-mono text-foreground">{user?.username ?? '—'}</dd>
+          </div>
+          <div className="flex items-center justify-between gap-4 px-3 py-2">
+            <dt className="text-muted-foreground">Role</dt>
+            <dd>
+              {isRole(role) ? (
+                <RoleBadge role={role} title={summary} />
+              ) : (
+                <span className="font-mono text-foreground">{role ?? '—'}</span>
+              )}
+            </dd>
+          </div>
+          {/* Naming the permission turns "it doesn't work" into a request an
+              administrator can act on without a conversation. */}
+          <div className="flex items-start justify-between gap-4 px-3 py-2">
+            <dt className="shrink-0 text-muted-foreground">
+              {anyOf.length > 1 ? 'Needs one of' : 'Needs'}
+            </dt>
+            <dd className="flex flex-wrap justify-end gap-1">
+              {anyOf.map((permission) => (
+                <code
+                  key={permission}
+                  className="rounded border border-input bg-background px-1.5 py-px font-mono text-[11px] text-foreground"
+                >
+                  {permission}
+                </code>
+              ))}
+            </dd>
+          </div>
+        </dl>
+
+        <p className="mt-4 text-xs leading-relaxed text-muted-foreground">
+          {summary ? <>Your role allows: {summary.toLowerCase()}. </> : null}
+          An administrator can grant this by changing your role.
         </p>
 
         <Link
           to="/"
-          className="mt-4 inline-block rounded bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground transition hover:opacity-90"
+          className="mt-5 inline-flex h-8 items-center gap-1.5 rounded-md bg-foreground px-3.5 text-[13px] font-medium text-background transition hover:bg-foreground/90"
         >
           Back to what you can see
+          <Icon name="arrowRight" size={14} />
         </Link>
-      </div>
+      </section>
     </div>
   )
 }

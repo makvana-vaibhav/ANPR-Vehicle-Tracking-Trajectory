@@ -75,8 +75,18 @@
 import Hls from 'hls.js'
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
 
-type PlayerState = 'idle' | 'connecting' | 'playing' | 'failed'
-type Transport = 'webrtc' | 'hls'
+import { Button, Icon, Spinner } from '@/components/ui'
+
+export type PlayerState = 'idle' | 'connecting' | 'playing' | 'failed'
+export type Transport = 'webrtc' | 'hls'
+
+/** What the player has settled on, for a caller that labels the picture. */
+export interface PlayerStatus {
+  state: PlayerState
+  transport: Transport
+  /** The player can name which capture instant is on screen. */
+  clockLive: boolean
+}
 
 /** Give up on a peer connection that has not produced video by now. */
 const WEBRTC_DEADLINE_MS = 8_000
@@ -135,6 +145,72 @@ interface Props {
    * screen, in epoch milliseconds, or null when the transport cannot say.
    */
   overlay?: (videoClock: () => number | null) => ReactNode
+  /**
+   * The caller's own controls for this picture (what is drawn over it, how
+   * far it is held back), set at the start of the player's control row so a
+   * stage has one row of controls under the video rather than two.
+   */
+  toolbar?: ReactNode
+  /** Told whenever the state, the transport or the capture clock changes. */
+  onStatus?: (status: PlayerStatus) => void
+}
+
+/** Wall-clock time in IST, for a capture instant read off the stream. */
+function formatCaptureIST(epochMs: number): string {
+  return new Intl.DateTimeFormat('en-IN', {
+    timeZone: 'Asia/Kolkata',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false,
+  }).format(new Date(epochMs))
+}
+
+/**
+ * Four corners pointing out: full screen.
+ *
+ * Drawn here because the shared icon set has no such glyph, on the set's own
+ * 24-unit grid and 1.5 stroke so it reads as one of them.
+ */
+function ExpandGlyph() {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      width={13}
+      height={13}
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={1.5}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+      focusable="false"
+      className="shrink-0"
+    >
+      <path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5" />
+    </svg>
+  )
+}
+
+/**
+ * The capture time of the frame on screen, printed on the picture.
+ *
+ * Its own component with its own one-second timer, so the tick re-renders a
+ * line of text rather than the player and the overlay it hosts. Shows nothing
+ * until the transport can say which instant is on screen: a ticking wall clock
+ * in the corner of a video reads as "this frame is from now", which is exactly
+ * the claim that cannot be made without the capture clock.
+ */
+function CaptureClock({ videoClock }: { videoClock: () => number | null }) {
+  const [shown, setShown] = useState<number | null>(() => videoClock())
+
+  useEffect(() => {
+    const timer = window.setInterval(() => setShown(videoClock()), 1_000)
+    return () => window.clearInterval(timer)
+  }, [videoClock])
+
+  if (shown === null) return null
+  return <span title="Capture time of the frame on screen">{formatCaptureIST(shown)} IST</span>
 }
 
 /**
@@ -188,6 +264,8 @@ export default function StreamPlayer({
   preferHls = false,
   syncDelayMs = 0,
   overlay,
+  toolbar,
+  onStatus,
 }: Props) {
   const videoRef = useRef<HTMLVideoElement>(null)
   const shellRef = useRef<HTMLDivElement>(null)
@@ -217,6 +295,19 @@ export default function StreamPlayer({
   const [latencyNote, setLatencyNote] = useState<string | null>(null)
   const [isFullscreen, setIsFullscreen] = useState(false)
   const [clockLive, setClockLive] = useState(false)
+  // The picture's own size, read off the element once frames arrive — what the
+  // camera is actually sending, not what the registry says it should.
+  const [resolution, setResolution] = useState<string | null>(null)
+
+  // Held in a ref so a caller passing a fresh closure every render does not
+  // re-announce an unchanged status on every render.
+  const onStatusRef = useRef(onStatus)
+  useEffect(() => {
+    onStatusRef.current = onStatus
+  }, [onStatus])
+  useEffect(() => {
+    onStatusRef.current?.({ state, transport, clockLive })
+  }, [state, transport, clockLive])
 
   /**
    * Capture time of the frame on screen, epoch ms, or null.
@@ -331,6 +422,7 @@ export default function StreamPlayer({
     hlsRef.current = null
     rtcLagRef.current = null
     setClockLive(false)
+    setResolution(null)
     if (videoRef.current) {
       videoRef.current.srcObject = null
       videoRef.current.removeAttribute('src')
@@ -354,6 +446,7 @@ export default function StreamPlayer({
         if (generationRef.current !== gen) return
         if (video.videoWidth > 0 && video.readyState >= 2) {
           detach()
+          setResolution(`${video.videoWidth}×${video.videoHeight}`)
           then()
         }
       }
@@ -805,6 +898,17 @@ export default function StreamPlayer({
     return () => document.removeEventListener('fullscreenchange', onChange)
   }, [])
 
+  // An adaptive ladder can change size mid-stream; the label follows it.
+  useEffect(() => {
+    const video = videoRef.current
+    if (!video) return
+    const onResize = () => {
+      if (video.videoWidth > 0) setResolution(`${video.videoWidth}×${video.videoHeight}`)
+    }
+    video.addEventListener('resize', onResize)
+    return () => video.removeEventListener('resize', onResize)
+  }, [])
+
   const toggleFullscreen = useCallback(() => {
     const shell = shellRef.current
     if (!shell) return
@@ -815,11 +919,13 @@ export default function StreamPlayer({
     }
   }, [])
 
+  const transportLabel = transport === 'hls' ? 'HLS' : 'WebRTC'
+
   return (
     <div className="space-y-2">
       <div
         ref={shellRef}
-        className="group relative aspect-video overflow-hidden rounded-md border border-border bg-black"
+        className="group relative aspect-video overflow-hidden rounded-lg border border-border bg-background"
       >
         <video
           ref={videoRef}
@@ -830,29 +936,38 @@ export default function StreamPlayer({
         />
 
         {state === 'connecting' && (
-          <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 bg-black/70">
-            <div className="h-6 w-6 animate-spin rounded-full border-2 border-primary border-t-transparent" />
+          <div className="absolute inset-0 flex flex-col items-center justify-center gap-2.5 bg-background/75">
+            <Spinner className="h-6 w-6" />
             <p className="text-xs text-muted-foreground">
               {transport === 'hls' ? 'Buffering HLS…' : 'Negotiating WebRTC…'}
             </p>
           </div>
         )}
 
+        {/* Amber, not red: a feed that will not play needs looking at, but it
+            is equipment, not an emergency — red on this screen is kept for a
+            watched vehicle. The reason is the sentence the transport or the
+            grid gave, and the retry is where the eye already is. */}
         {state === 'failed' && (
-          <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 p-4 text-center">
-            <p className="text-sm font-medium text-status-offline">
+          <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 bg-background/85 px-6 text-center">
+            <Icon name="video" size={22} className="text-status-degraded" />
+            <p className="text-[13px] font-medium text-status-degraded">
               Cannot play this stream
             </p>
-            <p className="text-xs text-muted-foreground">{error}</p>
+            <p className="max-w-md text-xs leading-relaxed text-muted-foreground">{error}</p>
+            <Button variant="outline" size="sm" className="mt-1" onClick={() => void connect()}>
+              <Icon name="refresh" size={13} />
+              Retry
+            </Button>
           </div>
         )}
 
         {state === 'playing' && overlay?.(videoClock)}
 
         {state === 'playing' && (
-          <span className="absolute left-2 top-2 flex items-center gap-1.5 rounded bg-black/60 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-status-online">
+          <span className="absolute left-2.5 top-2.5 flex h-6 items-center gap-1.5 rounded-md border border-border bg-background/80 px-2 text-[10px] font-semibold uppercase tracking-[0.06em] text-foreground">
             <span className="h-1.5 w-1.5 animate-pulse-alert rounded-full bg-status-online" />
-            Live · {transport === 'hls' ? 'HLS' : 'WebRTC'}
+            Live · {transportLabel}
             {/* Not "synced", which used to mean "the picture is being held
                 back". This says the narrower and more useful thing: the player
                 can name which capture instant is on screen, so an overlay can
@@ -863,64 +978,74 @@ export default function StreamPlayer({
           </span>
         )}
 
+        {/* The code stays on the picture itself, because full screen takes
+            the page's own title bar away with it. */}
+        <span className="absolute right-2.5 top-2.5 flex h-6 items-center rounded-md border border-border bg-background/80 px-2 font-mono text-[11px] text-foreground">
+          {cameraCode}
+        </span>
+
+        {state === 'playing' && (
+          <span className="pointer-events-none absolute bottom-2.5 left-2.5 flex items-center gap-2 rounded-md bg-background/70 px-2 py-0.5 font-mono text-[11px] text-muted-foreground">
+            <CaptureClock videoClock={videoClock} />
+            <span>
+              {transportLabel}
+              {resolution && ` · ${resolution}`}
+            </span>
+          </span>
+        )}
+
         {/* Expand sits on the video itself, where a viewer expects it. */}
         <button
           type="button"
           onClick={toggleFullscreen}
           title={isFullscreen ? 'Exit full screen' : 'Full screen'}
           aria-label={isFullscreen ? 'Exit full screen' : 'Full screen'}
-          className="absolute bottom-2 right-2 rounded bg-black/60 px-2 py-1 text-xs text-white/80 opacity-0 transition hover:bg-black/80 hover:text-white focus:opacity-100 group-hover:opacity-100"
+          className="absolute bottom-2.5 right-2.5 flex h-7 items-center gap-1.5 rounded-md border border-border bg-background/80 px-2 text-xs text-muted-foreground opacity-0 transition hover:text-foreground focus:opacity-100 group-hover:opacity-100"
         >
-          {isFullscreen ? '⤢ Exit' : '⤢ Full screen'}
+          <ExpandGlyph />
+          {isFullscreen ? 'Exit' : 'Full screen'}
         </button>
-
-        <span className="absolute right-2 top-2 rounded bg-black/60 px-2 py-0.5 font-mono text-[10px] text-white/80">
-          {cameraCode}
-        </span>
       </div>
 
-      <div className="flex flex-wrap items-center gap-2 text-xs">
-        {state !== 'playing' && (
-          <button
-            type="button"
-            onClick={() => void connect()}
-            className="rounded border border-border px-2 py-1 transition hover:border-primary/50"
-          >
-            {state === 'failed' ? 'Retry' : 'Play'}
-          </button>
-        )}
-        {hlsUrl && transport !== 'hls' && (
-          <button
-            type="button"
-            onClick={playHls}
-            className="rounded border border-border px-2 py-1 text-muted-foreground transition hover:border-primary/50 hover:text-foreground"
-            title="Higher latency, but traverses networks that block WebRTC"
-          >
-            Switch to HLS
-          </button>
-        )}
-        {whepUrl && transport === 'hls' && syncDelayMs === 0 && (
-          <button
-            type="button"
-            onClick={() => void connect()}
-            className="rounded border border-border px-2 py-1 text-muted-foreground transition hover:border-primary/50 hover:text-foreground"
-            title="Lower latency where the network allows it"
-          >
-            Try WebRTC
-          </button>
-        )}
-        <button
-          type="button"
-          onClick={toggleFullscreen}
-          className="rounded border border-border px-2 py-1 text-muted-foreground transition hover:border-primary/50 hover:text-foreground"
-        >
-          Full screen
-        </button>
-        {latencyNote && (
-          <span className="font-mono text-[11px] text-muted-foreground">
-            {latencyNote}
-          </span>
-        )}
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
+        {toolbar}
+        <div className="ml-auto flex flex-wrap items-center justify-end gap-1.5">
+          {latencyNote && (
+            <span className="mr-1 font-mono text-[11px] text-faint">{latencyNote}</span>
+          )}
+          {/* A failed stream offers its retry on the picture, beside the
+              reason; offering it twice would be two buttons for one act. */}
+          {state !== 'playing' && state !== 'failed' && (
+            <Button variant="outline" size="sm" onClick={() => void connect()}>
+              <Icon name="play" size={12} />
+              Play
+            </Button>
+          )}
+          {hlsUrl && transport !== 'hls' && (
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={playHls}
+              title="Higher latency, but traverses networks that block WebRTC"
+            >
+              Switch to HLS
+            </Button>
+          )}
+          {whepUrl && transport === 'hls' && syncDelayMs === 0 && (
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => void connect()}
+              title="Lower latency where the network allows it"
+            >
+              Try WebRTC
+            </Button>
+          )}
+          <Button variant="ghost" size="sm" onClick={toggleFullscreen}>
+            <ExpandGlyph />
+            Full screen
+          </Button>
+        </div>
       </div>
     </div>
   )

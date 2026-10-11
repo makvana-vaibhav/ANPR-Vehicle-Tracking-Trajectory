@@ -1,8 +1,10 @@
 /** Command centre shell: navigation, session, and routing. */
 
+import { useEffect, useState } from 'react'
 import { Navigate, Route, Routes } from 'react-router-dom'
 
-import AppNav, { NAV_ITEMS } from '@/components/AppNav'
+import CommandPalette from '@/components/CommandPalette'
+import TopBar from '@/components/TopBar'
 import { ToastProvider } from '@/components/Toast'
 import { Spinner } from '@/components/ui'
 import Alerts from '@/pages/Alerts'
@@ -22,6 +24,7 @@ import Watchlist from '@/pages/Watchlist'
 import RequirePermission from '@/components/RequirePermission'
 import { useAuth } from '@/hooks/useAuth'
 import { EventStreamProvider } from '@/hooks/useEventStream'
+import { landingFor } from '@/lib/nav'
 import { PERMISSIONS } from '@/lib/permissions'
 
 export default function App() {
@@ -39,8 +42,8 @@ export default function App() {
     return <Login />
   }
 
-  // The provider sits above the shell because the navigation itself shows a
-  // live alert count and the feed's own connection state. One socket serves
+  // The provider sits above the shell because the top bar itself shows the
+  // open alarm count and the feed's own connection state. One socket serves
   // every screen inside it.
   return (
     <EventStreamProvider>
@@ -51,17 +54,46 @@ export default function App() {
   )
 }
 
+/** Typing into a field must never be hijacked by a shortcut. */
+function isEditable(target: EventTarget | null): boolean {
+  if (!(target instanceof HTMLElement)) return false
+  return (
+    target.isContentEditable ||
+    target instanceof HTMLInputElement ||
+    target instanceof HTMLTextAreaElement ||
+    target instanceof HTMLSelectElement
+  )
+}
+
 function Shell() {
   const { can } = useAuth()
   // Where to send someone whose role cannot open the default screen.
-  const landing = NAV_ITEMS.find((item) => can(item.needs))?.to ?? '/no-access'
+  const landing = landingFor(can)
+  const [searchOpen, setSearchOpen] = useState(false)
+
+  // ⌘K / Ctrl K from anywhere, and "/" when not typing — the two shortcuts
+  // operators bring with them from every other tool.
+  useEffect(() => {
+    function onKey(event: KeyboardEvent) {
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') {
+        event.preventDefault()
+        setSearchOpen((v) => !v)
+      } else if (event.key === '/' && !isEditable(event.target)) {
+        event.preventDefault()
+        setSearchOpen(true)
+      }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [])
 
   return (
-    <div className="flex h-screen overflow-hidden bg-background print:block print:h-auto print:overflow-visible print:bg-white">
-      <AppNav />
+    <div className="flex h-screen flex-col overflow-hidden bg-background print:block print:h-auto print:overflow-visible print:bg-white">
+      <TopBar onOpenSearch={() => setSearchOpen(true)} />
+      <CommandPalette open={searchOpen} onClose={() => setSearchOpen(false)} />
 
-      {/* min-w-0 so a wide table or a map inside a page cannot push the rail
-          off the left edge — a flex child defaults to min-content width. */}
+      {/* min-h-0 so a page that scrolls its own panels cannot push the
+          window into scrolling — a flex child defaults to min-content. */}
       <main className="flex min-h-0 min-w-0 flex-1 flex-col print:block">
         <Routes>
           <Route path="/" element={<Navigate to={landing} replace />} />
@@ -179,6 +211,17 @@ function Shell() {
           {/* Every signed-in account can change its own password; there is no
               permission for it because needing one would be circular. */}
           <Route path="/password" element={<ChangePassword />} />
+          {/* Where a role that can open no screen at all lands (a machine
+              identity signing in by hand). Without its own route, the
+              catch-all below sent it back here forever. */}
+          <Route
+            path="/no-access"
+            element={
+              <RequirePermission anyOf={[PERMISSIONS.cameraRead]} label="The command centre">
+                <Navigate to="/" replace />
+              </RequirePermission>
+            }
+          />
           <Route path="*" element={<Navigate to={landing} replace />} />
         </Routes>
       </main>

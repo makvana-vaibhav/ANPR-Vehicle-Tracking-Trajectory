@@ -9,7 +9,7 @@
  * apply immediately rather than inputs that are submitted.
  */
 
-import type { ReactNode } from 'react'
+import { useId, type ReactNode } from 'react'
 
 export function Toolbar({ children }: { children: ReactNode }) {
   return (
@@ -17,21 +17,44 @@ export function Toolbar({ children }: { children: ReactNode }) {
   )
 }
 
-/** One labelled control inside a Toolbar. */
+/**
+ * One labelled control inside a Toolbar.
+ *
+ * `group` for a row of buttons (a SegmentedControl): a `<label>` around
+ * buttons hands the caption to the first one as its name, and a click on the
+ * caption presses it — which reset the filter to its first option.
+ */
 export function ToolbarField({
   label,
   children,
   className = '',
+  group = false,
 }: {
   label: ReactNode
   children: ReactNode
   className?: string
+  group?: boolean
 }) {
+  const id = useId()
+  const caption = (
+    <span
+      id={group ? id : undefined}
+      className="block text-[11px] font-medium uppercase tracking-[0.06em] text-muted-foreground"
+    >
+      {label}
+    </span>
+  )
+  if (group) {
+    return (
+      <div role="group" aria-labelledby={id} className={`block ${className}`}>
+        {caption}
+        <div className="mt-1">{children}</div>
+      </div>
+    )
+  }
   return (
     <label className={`block ${className}`}>
-      <span className="block text-[11px] font-medium uppercase tracking-[0.08em] text-muted-foreground">
-        {label}
-      </span>
+      {caption}
       <span className="mt-1 block">{children}</span>
     </label>
   )
@@ -74,7 +97,7 @@ export function Tabs<T extends string>({
             role="tab"
             aria-selected={active}
             onClick={() => onChange(tab.value)}
-            className={`-mb-px flex items-center gap-1.5 border-b-2 px-3 py-2 text-sm transition ${
+            className={`-mb-px flex items-center gap-1.5 border-b-2 px-3 py-2 text-[13px] transition ${
               active
                 ? 'border-primary font-medium text-foreground'
                 : 'border-transparent text-muted-foreground hover:border-border hover:text-foreground'

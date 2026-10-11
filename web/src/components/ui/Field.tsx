@@ -22,7 +22,7 @@ export function Field({
 }) {
   return (
     <label className="block">
-      <span className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
+      <span className="text-[11px] font-medium uppercase tracking-[0.06em] text-muted-foreground">
         {label}
       </span>
       {/* The label-to-control gap lives here, not on the control itself — a
@@ -33,13 +33,13 @@ export function Field({
           generated stylesheet — not the order classes are written in JSX —
           decides which one wins. */}
       <div className="mt-1">{children}</div>
-      {hint && <span className="mt-1 block text-[11px] text-muted-foreground/80">{hint}</span>}
+      {hint && <span className="mt-1 block text-[11px] text-faint">{hint}</span>}
     </label>
   )
 }
 
 export const controlClass =
-  'w-full rounded-md border border-input bg-background px-2.5 py-1.5 text-sm outline-none transition focus:border-primary focus:ring-1 focus:ring-primary'
+  'w-full rounded-md border border-input bg-background px-2.5 py-1.5 text-[13px] text-foreground outline-none transition placeholder:text-faint focus:border-primary/70 focus:ring-1 focus:ring-primary/40'
 
 export const Input = forwardRef<HTMLInputElement, InputHTMLAttributes<HTMLInputElement>>(
   ({ className = '', ...rest }, ref) => (

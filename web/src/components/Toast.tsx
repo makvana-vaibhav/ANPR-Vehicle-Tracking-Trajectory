@@ -9,6 +9,12 @@
  * Errors are **not** auto-dismissed. A success can vanish — the outcome is
  * visible in the thing that changed — but a failure the operator did not read
  * is a failure they will assume did not happen.
+ *
+ * Drawn in the product's language: a raised surface, never a filled colour
+ * block. A failure carries the severity triangle, the word and the red — the
+ * same three channels a critical alarm uses, so it reads as one before it is
+ * read at all. A success or a note carries the trail accent on its icon only:
+ * it is information, and nothing on it needs a person.
  */
 
 import {
@@ -19,6 +25,8 @@ import {
   useState,
   type ReactNode,
 } from 'react'
+
+import { Icon, SeverityGlyph } from '@/components/ui'
 
 export type ToastKind = 'success' | 'error' | 'info'
 
@@ -39,10 +47,21 @@ const ToastContext = createContext<ToastApi | null>(null)
 /** Success and info clear themselves; errors wait to be dismissed. */
 const DISMISS_AFTER_MS = 5_000
 
-const STYLE: Record<ToastKind, string> = {
-  success: 'border-status-online/50 bg-status-online/10 text-status-online',
-  error: 'border-status-offline/50 bg-status-offline/10 text-status-offline',
-  info: 'border-border bg-card text-foreground',
+/** Past this many notices on screen, offer to clear them in one go — a run of
+ *  failures should not have to be closed one × at a time. */
+const CLEAR_ALL_FROM = 3
+
+const BORDER: Record<ToastKind, string> = {
+  success: 'border-border',
+  error: 'border-priority-critical/45',
+  info: 'border-border',
+}
+
+function Glyph({ kind }: { kind: ToastKind }) {
+  if (kind === 'error') {
+    return <SeverityGlyph priority="critical" size={11} className="text-priority-critical" />
+  }
+  return <Icon name={kind === 'success' ? 'check' : 'info'} size={15} className="text-primary" />
 }
 
 export function ToastProvider({ children }: { children: ReactNode }) {
@@ -80,24 +99,47 @@ export function ToastProvider({ children }: { children: ReactNode }) {
       {children}
       <div
         // Announced to screen readers: an operator who cannot see the corner
-        // of the screen still needs to know the action failed.
+        // of the screen still needs to know the action failed. A failure also
+        // carries role="alert" itself, so it interrupts rather than queues.
         role="status"
         aria-live="polite"
-        className="pointer-events-none fixed bottom-4 right-4 z-50 flex w-full max-w-sm flex-col gap-2"
+        className="pointer-events-none fixed bottom-4 right-4 z-50 flex w-[min(24rem,calc(100vw-2rem))] flex-col items-stretch gap-2 print:hidden"
       >
+        {toasts.length >= CLEAR_ALL_FROM && (
+          <button
+            type="button"
+            onClick={() => setToasts([])}
+            className="pointer-events-auto self-end rounded-md border border-border bg-popover px-2.5 py-1 text-xs text-muted-foreground shadow-lg transition hover:text-foreground"
+          >
+            Clear all {toasts.length}
+          </button>
+        )}
         {toasts.map((toast) => (
           <div
             key={toast.id}
-            className={`pointer-events-auto flex items-start gap-3 rounded-md border px-3 py-2 text-xs shadow-lg backdrop-blur ${STYLE[toast.kind]}`}
+            role={toast.kind === 'error' ? 'alert' : undefined}
+            className={`pointer-events-auto flex animate-ticker-in items-start gap-2.5 rounded-lg border bg-popover py-2.5 pl-3 pr-1.5 shadow-2xl ${BORDER[toast.kind]}`}
           >
-            <span className="flex-1 leading-relaxed">{toast.message}</span>
+            <span className="mt-px flex h-4 w-4 shrink-0 items-center justify-center">
+              <Glyph kind={toast.kind} />
+            </span>
+            <div className="min-w-0 flex-1">
+              {toast.kind === 'error' && (
+                <p className="text-[11px] font-semibold uppercase tracking-[0.06em] text-priority-critical">
+                  Failed
+                </p>
+              )}
+              <p className="break-words text-[13px] leading-relaxed text-foreground">
+                {toast.message}
+              </p>
+            </div>
             <button
               type="button"
               onClick={() => dismiss(toast.id)}
               aria-label="Dismiss"
-              className="shrink-0 opacity-60 transition hover:opacity-100"
+              className="shrink-0 rounded p-1 text-muted-foreground transition hover:bg-secondary hover:text-foreground"
             >
-              ✕
+              <Icon name="close" size={14} />
             </button>
           </div>
         ))}

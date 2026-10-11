@@ -16,8 +16,10 @@ export function ConnectionBadge({
   return (
     <span
       title={title}
-      className={`flex items-center gap-1.5 rounded px-2 py-1 text-[11px] font-medium ${
-        live ? 'bg-status-online/15 text-status-online' : 'bg-priority-high/15 text-priority-high'
+      className={`flex h-7 items-center gap-1.5 rounded-full border px-2.5 text-[11px] font-medium ${
+        live
+          ? 'border-border text-muted-foreground'
+          : 'border-priority-high/40 bg-priority-high/10 text-priority-high'
       }`}
     >
       <span

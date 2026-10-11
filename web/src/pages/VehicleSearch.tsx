@@ -1,42 +1,59 @@
 /**
- * Vehicle search: a plate in, a journey out.
+ * Investigate: a plate in, a journey out.
  *
  * This is Judge Moment 4 — type a plate, get every sighting and a route drawn
- * across cameras with timestamps and implied speeds.
+ * across cameras with timestamps and implied speeds — and Moment 5, search.
+ * `/vehicles?plate=GJ03AB1234` opens a journey directly: the ⌘K palette and
+ * any screen that shows a plate link here that way (see `vehicleSearchUrl`).
  *
  * ## What this screen is careful about
  *
  * The route is inference, and the screen says so in three places rather than
- * one: the map caption, the hop table's speed column, and the summary. That
- * repetition is deliberate. Somebody reading a printed screenshot of this in a
- * case file will not have the docstring, and "37 km/h between Rajkot and
- * Gondal" reads as a measurement unless it is told otherwise.
+ * one: the map's legend, each leg's figures in the sightings list, and the
+ * summary above them. That repetition is deliberate. Somebody reading a
+ * printed screenshot of this in a case file will not have the docstring, and
+ * "37 km/h between Rajkot and Gondal" reads as a measurement unless it is told
+ * otherwise.
  *
  * Legs the correlator could not believe are shown, in red, with the reason.
  * They are not filtered out — an impossible leg is the signature of a cloned
  * plate, and hiding it would remove the most useful thing on the page.
+ *
+ * Sightings at cameras whose position is unknown are listed, never dropped,
+ * and never placed on the map or used for a distance.
  */
 
-import { Fragment, useCallback, useEffect, useState, type FormEvent } from 'react'
-import { useNavigate } from 'react-router-dom'
+import {
+  Fragment,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type FormEvent,
+  type KeyboardEvent,
+  type ReactNode,
+} from 'react'
+import { useNavigate, useSearchParams } from 'react-router-dom'
 
 import PlateCrop from '@/components/PlateCrop'
-import RouteMap from '@/components/RouteMap'
+import RouteMap, { type RouteMapHandle } from '@/components/RouteMap'
+import { formatDuration, formatKm, groupStops, legSummary } from '@/components/routeTrail'
 import UnplacedSightings from '@/components/UnplacedSightings'
 import { useToast } from '@/components/Toast'
 import {
   Badge,
   Button,
-  ErrorBanner,
   EmptyState,
   Field,
+  Icon,
   InfoHint,
   Input,
-  PageHeader,
+  PlateChip,
   PriorityBadge,
-  SectionLabel,
   SegmentedControl,
   Select,
+  Spinner,
   Table,
   Td,
   Th,
@@ -44,14 +61,23 @@ import {
   Tr,
 } from '@/components/ui'
 import * as api from '@/lib/api'
+import { buildTimeline, journeySeconds } from '@/lib/journey'
 import type {
   Convoy,
   Detection,
   PlateSearchResult,
   ReidMatchResponse,
-  RouteGeoJSON,
+  RouteHop,
   VehicleRoute,
+  WatchlistHit,
 } from '@/lib/types'
+import {
+  paramsFor,
+  plateFromParams,
+  toSearchPlate,
+  windowFromParams,
+  type ExactWindow,
+} from '@/pages/vehicleSearchUrl'
 
 /** Windows an operator actually asks for. */
 const WINDOWS = [
@@ -77,110 +103,336 @@ const FLAG_TEXT: Record<string, string> = {
     'The camera faces away from the direction of travel, so the reading may belong to a different carriageway.',
 }
 
+/** The flags that make a leg impossible, rather than merely worth a note. */
+const GRAVE_FLAGS = new Set(['implausible_speed', 'impossible_simultaneous'])
+
+/** A plate offered as a starting point should be one the reader was sure of. */
+const RECENT_MIN_CONFIDENCE = 0.85
+
+const NO_HOPS: RouteHop[] = []
+
+/** The left rail, shared by both ways of searching. */
+const RAIL =
+  'flex shrink-0 flex-col gap-5 border-b border-border bg-chrome px-4 py-4 lg:w-[272px] lg:overflow-y-auto lg:border-b-0 lg:border-r xl:w-[296px]'
+
 function since(hours: number): string {
   return new Date(Date.now() - hours * 3_600_000).toISOString()
 }
 
-function duration(seconds: number): string {
-  if (seconds < 60) return `${Math.round(seconds)}s`
-  const minutes = Math.round(seconds / 60)
-  if (minutes < 60) return `${minutes} min`
-  const hrs = Math.floor(minutes / 60)
-  return `${hrs}h ${minutes % 60}m`
+/** The window a search runs over: relative, or the exact one a link asked for. */
+interface SearchWindow {
+  hours: number
+  exact: ExactWindow | null
+}
+
+function queryOf(window: SearchWindow): api.RouteQuery {
+  return window.exact
+    ? { since: window.exact.since, until: window.exact.until ?? undefined }
+    : { since: since(window.hours) }
+}
+
+/** What identifies a search, so arriving at the same address twice runs it once. */
+function keyOf(plate: string, exact: ExactWindow | null): string {
+  return exact ? `${plate}|${exact.since}|${exact.until ?? ''}` : `${plate}|relative`
+}
+
+function windowLabel(hours: number, exact: ExactWindow | null): string {
+  if (exact) {
+    const from = api.formatIST(exact.since)
+    return exact.until ? `${from} to ${api.formatIST(exact.until)} IST` : `since ${from} IST`
+  }
+  return `the last ${WINDOWS.find((w) => w.hours === hours)?.label ?? `${hours} h`}`
+}
+
+/** Every read of the plate, placed or not, in time order. */
+interface Read {
+  at: string
+  camera_code: string
+  city: string | null
+}
+
+function readsOf(route: VehicleRoute | null): Read[] {
+  if (!route) return []
+  return [
+    ...route.hops.flatMap((h) => [
+      { at: h.arrived_at, camera_code: h.camera_code, city: h.city },
+      { at: h.departed_at, camera_code: h.camera_code, city: h.city },
+    ]),
+    ...route.unplaced_sightings.map((s) => ({ at: s.seen_at, camera_code: s.camera_code, city: null })),
+  ].sort((a, b) => new Date(a.at).getTime() - new Date(b.at).getTime())
+}
+
+/**
+ * `19:03:37`, or `11 Oct, 19:03:37` when the reads cross a day. Rendered in
+ * IST at the edge like every time on screen; the year adds nothing inside a
+ * window of thirty days at most.
+ */
+function istTime(iso: string, withDate: boolean): string {
+  return new Intl.DateTimeFormat('en-IN', {
+    timeZone: 'Asia/Kolkata',
+    ...(withDate ? { day: 'numeric' as const, month: 'short' as const } : {}),
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false,
+  }).format(new Date(iso))
+}
+
+/** The IST calendar day a moment falls on — `11 Oct` — or '' for none. */
+function istDay(iso: string | undefined): string {
+  if (!iso) return ''
+  return new Intl.DateTimeFormat('en-IN', {
+    timeZone: 'Asia/Kolkata',
+    day: 'numeric',
+    month: 'short',
+  }).format(new Date(iso))
+}
+
+/** `2026-10-11`: the IST date, for telling days apart (en-CA orders it so). */
+function istDate(iso: string): string {
+  return new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata' }).format(new Date(iso))
+}
+
+/** A read's confidence below this is worth checking against its crop. */
+const WEAK_READ = 0.6
+
+function plural(n: number, word: string): string {
+  return `${n} ${word}${n === 1 ? '' : 's'}`
 }
 
 export default function VehicleSearch() {
   const toast = useToast()
   const navigate = useNavigate()
+  const [params, setParams] = useSearchParams()
   const [mode, setMode] = useState<'plate' | 'attributes'>('plate')
   const [query, setQuery] = useState('')
-  const [plate, setPlate] = useState<string | null>(null)
   const [hours, setHours] = useState<number>(24)
+  /** An exact window a link asked for; replaces `hours` until one is picked. */
+  const [exact, setExact] = useState<ExactWindow | null>(null)
 
+  const [plate, setPlate] = useState<string | null>(null)
   const [route, setRoute] = useState<VehicleRoute | null>(null)
-  const [geojson, setGeojson] = useState<RouteGeoJSON | null>(null)
+  /** The window the route on screen was fetched over, so the exports and the
+   *  printable report describe the same reads the screen shows. */
+  const [searched, setSearched] = useState<api.RouteQuery | null>(null)
   const [convoys, setConvoys] = useState<Convoy[]>([])
+  const [matches, setMatches] = useState<PlateSearchResult[] | null>(null)
+  const [crops, setCrops] = useState<Record<string, string | null>>({})
   const [suggestions, setSuggestions] = useState<{ plate: string; cameras: number }[]>([])
-  const [fuzzyMatches, setFuzzyMatches] = useState<PlateSearchResult[]>([])
-  const [activeHop, setActiveHop] = useState<number | null>(null)
+  const [recent, setRecent] = useState<Detection[]>([])
+  const [hoverHop, setHoverHop] = useState<number | null>(null)
+  const [selectedHop, setSelectedHop] = useState<number | null>(null)
+  const [playing, setPlaying] = useState(false)
   const [busy, setBusy] = useState(false)
-  const [error, setError] = useState<string | null>(null)
+
+  const mapRef = useRef<RouteMapHandle>(null)
+  const hopRefs = useRef<(HTMLLIElement | null)[]>([])
+  /** Only the newest search may write its answer: a slow reply for a plate
+   *  typed earlier must not replace the one for the plate typed since. */
+  const sequence = useRef(0)
+  const lastKey = useRef<string | null>(null)
+  const hoursRef = useRef(hours)
+  hoursRef.current = hours
+
+  const search = useCallback(
+    async (target: string, window: SearchWindow) => {
+      const normalised = toSearchPlate(target)
+      if (normalised.length < 4) {
+        toast.error('A plate needs at least four letters or digits to search on.')
+        return
+      }
+      lastKey.current = keyOf(normalised, window.exact)
+      setQuery(normalised)
+      // The address names the vehicle on screen, so it can be shared or
+      // reloaded. Replaced rather than pushed: Back leaves the screen instead
+      // of stepping through every plate typed into it.
+      setParams((current) => paramsFor(current, normalised, window.exact), { replace: true })
+
+      const id = (sequence.current += 1)
+      const q = queryOf(window)
+      setBusy(true)
+      setSelectedHop(null)
+      setHoverHop(null)
+      try {
+        const [document, convoyReport] = await Promise.all([
+          api.getVehicleRoute(normalised, q),
+          api.getConvoys(normalised, { ...q, min_shared_cameras: 2 }),
+        ])
+        if (id !== sequence.current) return
+        setPlate(normalised)
+        setRoute(document)
+        setSearched(q)
+        setConvoys(convoyReport.convoys)
+      } catch (err) {
+        if (id !== sequence.current) return
+        toast.error(err)
+        setPlate(null)
+        setRoute(null)
+        setSearched(null)
+        setConvoys([])
+      } finally {
+        if (id === sequence.current) setBusy(false)
+      }
+    },
+    [toast, setParams],
+  )
+  const searchRef = useRef(search)
+  searchRef.current = search
+
+  // ── Arriving from a link ────────────────────────────────────────────
+  const paramPlate = plateFromParams(params)
+  const paramWindow = windowFromParams(params)
+  const paramSince = paramWindow?.since ?? null
+  const paramUntil = paramWindow?.until ?? null
+
+  useEffect(() => {
+    if (!paramPlate) return
+    const linked = paramSince ? { since: paramSince, until: paramUntil } : null
+    // The address this screen wrote itself, after a search it already ran.
+    if (keyOf(paramPlate, linked) === lastKey.current) return
+    setMode('plate')
+    setExact(linked)
+    void searchRef.current(paramPlate, { hours: hoursRef.current, exact: linked })
+  }, [paramPlate, paramSince, paramUntil])
+
+  // ── Starting points ─────────────────────────────────────────────────
 
   // Which plates have a route worth drawing, over the window actually being
   // searched. Computing these over a longer window than the search would
   // promise a multi-camera route and then deliver a single-camera one.
   useEffect(() => {
-    async function load() {
-      try {
-        setSuggestions((await api.getRoutablePlates(2, 12, since(hours))).plates)
-      } catch {
-        /* the search still works without suggestions */
-      }
-    }
-    void load()
-  }, [hours])
-
-  // An exact search that finds nothing tries a fuzzy one automatically — a
-  // misread character or a partial plate should not dead-end on an empty
-  // screen when the vehicle is sitting one edit away in the same window.
-  useEffect(() => {
-    if (!route || route.hop_count > 0 || !plate) {
-      setFuzzyMatches([])
-      return
-    }
     let cancelled = false
     api
-      .searchPlates(plate, { since: since(hours) })
+      .getRoutablePlates(2, 12, exact?.since ?? since(hours))
       .then((body) => {
-        if (!cancelled) setFuzzyMatches(body.results.filter((r) => r.plate_normalised !== plate))
+        if (!cancelled) setSuggestions(body.plates)
       })
       .catch(() => {
-        if (!cancelled) setFuzzyMatches([])
+        /* the search still works without suggestions */
       })
     return () => {
       cancelled = true
     }
-  }, [route, plate, hours])
+  }, [hours, exact])
 
-  const search = useCallback(async (target: string, windowHours: number) => {
-    const normalised = target.toUpperCase().replace(/[^A-Z0-9]/g, '')
-    if (normalised.length < 4) {
-      toast.error('A plate needs at least four letters or digits to search on.')
+  // Plates read most recently, for a screen that would otherwise open on an
+  // empty box. Not a plate search — no plate is asked for — so it is not one
+  // of the audited lookups; opening one of these is.
+  useEffect(() => {
+    let cancelled = false
+    api
+      .getDetections({ readable_only: true, since: exact?.since ?? since(hours), limit: 80 })
+      .then((page) => {
+        if (cancelled) return
+        const seen = new Set<string>()
+        const picked: Detection[] = []
+        for (const d of page.items) {
+          if (!d.plate || seen.has(d.plate)) continue
+          if ((d.plate_confidence ?? 0) < RECENT_MIN_CONFIDENCE || d.grammar_valid === false) continue
+          seen.add(d.plate)
+          picked.push(d)
+          if (picked.length >= 8) break
+        }
+        setRecent(picked)
+      })
+      .catch(() => {
+        if (!cancelled) setRecent([])
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [hours, exact])
+
+  // ── Around the vehicle on screen ────────────────────────────────────
+
+  // Plates close to the one searched. When the exact plate was not read this
+  // is the way out of a dead end — a misread character or a partial plate
+  // should not stop at an empty screen when the vehicle is one edit away —
+  // and when it was, the near-identical plates are often this same vehicle
+  // read differently. The exact match also says whether it is watched.
+  useEffect(() => {
+    if (!route || !plate || !searched) {
+      setMatches(null)
       return
     }
-
-    setBusy(true)
-    setError(null)
-    setActiveHop(null)
-    try {
-      const window = { since: since(windowHours) }
-      const [document, shape, convoyReport] = await Promise.all([
-        api.getVehicleRoute(normalised, window),
-        api.getVehicleRouteGeoJSON(normalised, window),
-        api.getConvoys(normalised, { ...window, min_shared_cameras: 2 }),
-      ])
-      setPlate(normalised)
-      setRoute(document)
-      setGeojson(shape)
-      setConvoys(convoyReport.convoys)
-    } catch (err) {
-      toast.error(err)
-      setRoute(null)
-      setGeojson(null)
-      setConvoys([])
-    } finally {
-      setBusy(false)
+    let cancelled = false
+    api
+      .searchPlates(plate, { since: searched.since, until: searched.until })
+      .then((body) => {
+        if (!cancelled) setMatches(body.results)
+      })
+      .catch(() => {
+        if (!cancelled) setMatches([])
+      })
+    return () => {
+      cancelled = true
     }
-  }, [toast])
+  }, [route, plate, searched])
+
+  // The evidence crop for each visit — its clearest read. One request,
+  // filtered to reads at least as confident as the weakest visit's best: a
+  // busy plate has hundreds of reads, and the newest page alone would miss
+  // the best read of every visit but the last. The margin covers the route's
+  // four-decimal rounding. A crop that still is not found shows nothing — it
+  // is evidence about a sighting, never the sighting itself.
+  useEffect(() => {
+    if (!route || !plate || !searched) {
+      setCrops({})
+      return
+    }
+    const confidences = [
+      ...route.hops.map((h) => h.plate_confidence),
+      ...route.unplaced_sightings.map((u) => u.plate_confidence),
+    ]
+    if (confidences.length === 0) {
+      setCrops({})
+      return
+    }
+    let cancelled = false
+    api
+      .getDetections({
+        plate,
+        since: searched.since,
+        until: searched.until,
+        min_confidence: Math.max(0, Math.min(...confidences) - 0.001),
+        limit: 200,
+      })
+      .then((page) => {
+        if (!cancelled) setCrops(Object.fromEntries(page.items.map((d) => [d.id, d.crop_url ?? null])))
+      })
+      .catch(() => {
+        if (!cancelled) setCrops({})
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [route, plate, searched])
+
+  // ── Actions ─────────────────────────────────────────────────────────
 
   function submit(event: FormEvent) {
     event.preventDefault()
-    void search(query, hours)
+    void search(query, { hours, exact })
   }
+
+  /** Open another plate — a suggestion, a near match, a vehicle alongside. */
+  const open = useCallback(
+    (target: string) => {
+      setMode('plate')
+      void searchRef.current(target, { hours: hoursRef.current, exact })
+    },
+    [exact],
+  )
 
   function changeWindow(next: number) {
     setHours(next)
-    if (plate) void search(plate, next)
+    setExact(null)
+    if (plate) void search(plate, { hours: next, exact: null })
+  }
+
+  function clearExact() {
+    setExact(null)
+    if (plate) void search(plate, { hours, exact: null })
   }
 
   async function exportCsv(run: () => Promise<string>) {
@@ -191,477 +443,972 @@ export default function VehicleSearch() {
     }
   }
 
-  const hops = route?.hops ?? []
+  function openReport() {
+    if (!route || !searched) return
+    const qs = new URLSearchParams()
+    if (searched.since) qs.set('since', searched.since)
+    if (searched.until) qs.set('until', searched.until)
+    navigate(`/reports/vehicle/${encodeURIComponent(route.plate)}?${qs}`)
+  }
+
+  const selectFromMap = useCallback((index: number) => {
+    setSelectedHop(index)
+    window.requestAnimationFrame(() =>
+      hopRefs.current[index]?.scrollIntoView({ block: 'nearest', behavior: 'smooth' }),
+    )
+  }, [])
+
+  function selectFromList(index: number) {
+    setSelectedHop((current) => (current === index ? null : index))
+    mapRef.current?.focus(index)
+  }
+
+  // ── Derived ─────────────────────────────────────────────────────────
+
+  const hops = route?.hops ?? NO_HOPS
   const unplaced = route?.unplaced_sightings ?? []
+  const reads = useMemo(() => readsOf(route), [route])
+  const firstRead = reads[0]
+  const lastRead = reads[reads.length - 1]
   // A window spanning midnight makes time-only stamps look out of order
-  // (17:49 then 12:32), so the date is shown whenever the route crosses a day.
-  const spansDays =
-    hops.length > 1 &&
-    new Date(hops[0]!.arrived_at).toDateString() !==
-      new Date(hops[hops.length - 1]!.arrived_at).toDateString()
+  // (17:49 then 12:32), so the date is shown whenever the reads cross a day —
+  // an IST day, since that is the clock every stamp is shown on.
+  const spansDays = !!firstRead && !!lastRead && istDate(firstRead.at) !== istDate(lastRead.at)
+  const watch = matches?.find((m) => m.plate_normalised === plate)?.watchlist ?? null
+  const nearMatches = (matches ?? []).filter((m) => m.plate_normalised !== plate)
+  // Places, not cameras: two cameras on one spot leave nothing to travel
+  // between, and the map groups its stops the same way.
+  const places = useMemo(() => groupStops(hops).length, [hops])
+  const canReplay = useMemo(
+    () => places > 1 && journeySeconds(buildTimeline(hops)) > 0,
+    [places, hops],
+  )
+  const activeHop = hoverHop ?? selectedHop
+  const nothingRead = !!route && hops.length === 0 && unplaced.length === 0
+  const currentQuery = () => queryOf({ hours, exact })
+
+  const modeSwitch = (
+    <SegmentedControl
+      fill
+      value={mode}
+      onChange={setMode}
+      options={[
+        { value: 'plate', label: 'By plate' },
+        { value: 'attributes', label: 'By attributes' },
+      ]}
+    />
+  )
 
   return (
-    <div className="flex h-full flex-col gap-4 overflow-y-auto p-6">
-      <PageHeader
-        title="Vehicle search"
-        subtitle={
-          <>
-            <span>
-              {mode === 'plate'
-                ? 'every sighting of a plate, and the journey they imply'
-                : 'browse sightings by what a vehicle looks like'}
-            </span>
-            <InfoHint label="What a drawn route is and is not">
-              A route is inference. The platform knows where a vehicle was seen,
-              not how it got between those points — the lines are straight legs
-              between cameras, not the roads driven, so every distance and speed
-              is a lower bound. Legs the correlator could not believe are shown
-              in red rather than hidden: an impossible leg is the signature of a
-              cloned plate, and removing it would remove the most useful thing
-              on the page.
-            </InfoHint>
-          </>
-        }
-        actions={
-          <SegmentedControl
-            className="h-8"
-            value={mode}
-            onChange={setMode}
-            options={[
-              { value: 'plate', label: 'By plate' },
-              { value: 'attributes', label: 'By attributes' },
-            ]}
-          />
-        }
-      />
-
-      {mode === 'attributes' && <AttributeSearch />}
-
-      {mode === 'plate' && (
-        <>
-      {/* ── Search ──────────────────────────────────────────────────── */}
-      <form onSubmit={submit} className="flex flex-wrap items-end gap-3">
-        <div className="w-56">
-          <Field label="Plate">
-            <Input
-              value={query}
-              onChange={(e) => setQuery(e.target.value.toUpperCase())}
-              placeholder="GJ03AB1234"
-              className="font-mono uppercase"
-            />
-          </Field>
-        </div>
-
-        <div>
-          <span className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
-            Window
-          </span>
-          <div className="mt-1">
-            <SegmentedControl
-              value={String(hours)}
-              onChange={(v) => changeWindow(Number(v))}
-              options={WINDOWS.map((w) => ({ value: w.value, label: w.label }))}
-            />
-          </div>
-        </div>
-
-        <Button type="submit" disabled={busy}>
-          {busy ? 'Searching…' : 'Search'}
-        </Button>
-
-        {/* The submission's "detected plates with timestamps" report: every
-            plate read in the chosen window, on every camera. */}
-        <Button
-          type="button"
-          variant="outline"
-          className="ml-auto"
-          onClick={() => void exportCsv(() => api.downloadPlatesReport({ since: since(hours) }))}
-        >
-          Export plate reads (CSV)
-        </Button>
-      </form>
-
-      {suggestions.length > 0 && !route && (
-        <div>
-          <p className="text-[11px] uppercase tracking-wider text-muted-foreground">
-            {suggestions.length > 0
-              ? 'Plates seen on more than one camera in this window'
-              : 'No plate was seen on more than one camera in this window'}
-          </p>
-          <ul className="mt-1.5 flex flex-wrap gap-1.5">
-            {suggestions.map((s) => (
-              <li key={s.plate}>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setQuery(s.plate)
-                    void search(s.plate, hours)
-                  }}
-                  className="rounded border border-border px-2 py-0.5 font-mono text-[11px] transition hover:border-primary"
-                >
-                  {s.plate}
-                  <span className="ml-1 text-muted-foreground">{s.cameras} cams</span>
-                </button>
-              </li>
-            ))}
-          </ul>
-        </div>
+    <div className="flex h-full min-h-0 flex-col">
+      {mode === 'plate' && route && !nothingRead ? (
+        <VehicleBand
+          route={route}
+          watch={watch}
+          firstRead={firstRead}
+          lastRead={lastRead}
+          spansDays={spansDays}
+          places={places}
+          canReplay={canReplay}
+          playing={playing}
+          onReplay={() => (playing ? mapRef.current?.pause() : mapRef.current?.replay())}
+          onCsv={() =>
+            void exportCsv(() => api.downloadRouteReport(route.plate, searched ?? currentQuery()))
+          }
+          onReport={openReport}
+        />
+      ) : (
+        <PageBand mode={mode} />
       )}
 
-      {error && <ErrorBanner>{error}</ErrorBanner>}
+      <div className="flex min-h-0 flex-1 flex-col overflow-y-auto lg:flex-row lg:overflow-hidden">
+        {mode === 'attributes' ? (
+          <AttributeSearch modeSwitch={modeSwitch} onOpenPlate={open} />
+        ) : (
+          <>
+            {/* ── The question ─────────────────────────────────────── */}
+            <aside aria-label="Search" className={RAIL}>
+              {modeSwitch}
 
-      {route && (
-        <>
-          {/* ── Summary ───────────────────────────────────────────── */}
-          <section className="flex flex-wrap items-center gap-x-6 gap-y-2 rounded-md border border-border bg-card px-4 py-3">
-            <div>
-              <p className="font-mono text-lg font-bold tracking-wide">{route.plate}</p>
-              <p className="text-[11px] text-muted-foreground">
-                {route.hop_count} sighting{route.hop_count === 1 ? '' : 's'} on{' '}
-                {route.camera_count} camera{route.camera_count === 1 ? '' : 's'}
-                {unplaced.length > 0 &&
-                  ` · ${unplaced.length} more where the camera's position is unknown`}
-              </p>
-            </div>
-
-            {route.hop_count > 0 && (
-              <>
-                {/* First and last seen were already in the API payload and in
-                    the TS type, and were rendered on no screen — so the one
-                    question an operator asks first ("when was it about?") had
-                    no answer in the product. */}
-                {route.first_seen && (
-                  <Stat label="First seen" value={api.formatIST(route.first_seen, false)} />
-                )}
-                {route.last_seen && (
-                  <Stat label="Last seen" value={api.formatIST(route.last_seen, false)} />
-                )}
-                {route.camera_count > 1 && (
-                  <Stat
-                    label="Straight-line"
-                    value={`≥ ${route.distance_km} km`}
-                    hint="Roads are never shorter than the straight line, so this is a floor."
+              <form onSubmit={submit} className="flex flex-col gap-4">
+                <label className="block">
+                  <span className="eyebrow">Plate, as read or as remembered</span>
+                  <input
+                    value={query}
+                    onChange={(e) => setQuery(e.target.value.toUpperCase())}
+                    placeholder="GJ03AB1234"
+                    aria-label="Plate"
+                    autoComplete="off"
+                    spellCheck={false}
+                    className="mt-1.5 h-11 w-full rounded-md border border-input bg-background px-3 font-plate text-[22px] font-bold uppercase tracking-[0.08em] text-foreground outline-none transition placeholder:text-faint/50 focus:border-primary/70 focus:ring-1 focus:ring-primary/40"
                   />
-                )}
-                <Stat label="Elapsed" value={duration(route.duration_s)} />
-                {route.average_kmph !== null && (
-                  <Stat
-                    label="Average speed"
-                    value={`≥ ${route.average_kmph} km/h`}
-                    hint={
-                      'First sighting to last, so it includes time parked at a junction. ' +
-                      'Distances are straight-line. Both push this down, so the real ' +
-                      'average is at least this.' +
-                      (route.moving_kmph !== null && route.moving_kmph !== route.average_kmph
-                        ? ` Excluding dwell: ≥ ${route.moving_kmph} km/h.`
-                        : '')
-                    }
+                </label>
+
+                <div>
+                  <span className="eyebrow">Window</span>
+                  <SegmentedControl
+                    fill
+                    className="mt-1.5 [&>button]:px-0"
+                    value={exact ? 'exact' : String(hours)}
+                    onChange={(v) => changeWindow(Number(v))}
+                    options={WINDOWS.map((w) => ({ value: w.value, label: w.label }))}
                   />
-                )}
-                <Stat
-                  label="Confidence"
-                  value={route.confidence.toFixed(2)}
-                  hint="Bounded by the weakest plate read in the route."
-                />
-                <span
-                  className={`rounded px-2 py-1 text-[11px] font-medium ${
-                    route.is_plausible
-                      ? 'bg-status-online/15 text-status-online'
-                      : 'bg-status-offline/15 text-status-offline'
-                  }`}
-                >
-                  {route.is_plausible
-                    ? 'no impossible legs'
-                    : `${route.flagged_hop_count} leg(s) need explaining`}
-                </span>
-              </>
-            )}
+                  {exact && (
+                    <p className="mt-2 flex items-start gap-2 rounded-md border border-input bg-secondary/60 px-2.5 py-1.5 text-xs text-foreground">
+                      <Icon name="clock" size={13} className="mt-px text-faint" />
+                      <span className="min-w-0 flex-1 font-mono text-[11px] leading-snug">
+                        {windowLabel(hours, exact)}
+                      </span>
+                      <button
+                        type="button"
+                        onClick={clearExact}
+                        aria-label="Use a relative window instead"
+                        title="Use a relative window instead"
+                        className="text-faint transition hover:text-foreground"
+                      >
+                        <Icon name="close" size={13} />
+                      </button>
+                    </p>
+                  )}
+                </div>
 
-            {(route.hop_count > 0 || unplaced.length > 0) && (
-              <div className="ml-auto flex gap-2">
-                <Button
-                  variant="outline"
-                  onClick={() =>
-                    void exportCsv(() =>
-                      api.downloadRouteReport(route.plate, { since: since(hours) }),
-                    )
-                  }
-                >
-                  Download CSV
+                <Button type="submit" disabled={busy} className="h-9 w-full">
+                  {busy ? (
+                    <>
+                      <Spinner className="h-3.5 w-3.5 border-background border-t-transparent" />
+                      Searching…
+                    </>
+                  ) : (
+                    <>
+                      <Icon name="search" size={14} />
+                      Search
+                    </>
+                  )}
                 </Button>
-                <Button
-                  onClick={() =>
-                    navigate(
-                      `/reports/vehicle/${encodeURIComponent(route.plate)}?since=${encodeURIComponent(since(hours))}`,
-                    )
-                  }
-                >
-                  Printable report
-                </Button>
-              </div>
-            )}
-          </section>
+              </form>
 
-          {unplaced.length > 0 && <UnplacedSightings sightings={unplaced} />}
-
-          {route.hop_count === 0 && unplaced.length > 0 ? null : route.hop_count === 0 ? (
-            <>
-              <EmptyState
-                title={
-                  <>
-                    <span className="font-mono">{route.plate}</span> was not seen in this window.
-                  </>
-                }
-                hint={
-                  fuzzyMatches.length > 0
-                    ? 'No exact match, but these plates are close to what you typed.'
-                    : 'Try a longer window, or pick a plate from the list above.'
-                }
-              />
-              {fuzzyMatches.length > 0 && (
+              {route && !nothingRead && nearMatches.length > 0 && (
                 <section>
-                  <SectionLabel>
-                    Did you mean…
-                    <InfoHint>
-                      Ranked by how closely each plate matches what you typed,
-                      not by when it was seen.
-                    </InfoHint>
-                  </SectionLabel>
-                  <ul className="mt-1.5 space-y-1.5">
-                    {fuzzyMatches.map((match) => (
+                  <RailHeading
+                    info={
+                      <>
+                        Ranked by how closely each plate matches what you typed, not by when
+                        it was seen. A near-identical plate in the same place and hour is
+                        usually this vehicle read differently.
+                      </>
+                    }
+                  >
+                    Close to what you typed
+                  </RailHeading>
+                  <ul className="mt-2 space-y-1.5">
+                    {nearMatches.slice(0, 6).map((match) => (
                       <li key={match.plate_normalised}>
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setQuery(match.plate_normalised)
-                            void search(match.plate_normalised, hours)
-                          }}
-                          className="flex w-full flex-wrap items-center gap-x-3 gap-y-1 rounded-md border border-border bg-card px-3 py-2 text-left transition hover:border-primary/50"
-                        >
-                          <span className="font-mono text-sm font-semibold">
-                            {match.plate_normalised}
-                          </span>
-                          <span className="text-[11px] text-muted-foreground">
-                            {Math.round(match.similarity * 100)}% match
-                          </span>
-                          <span className="text-[11px] text-muted-foreground">
-                            {match.sightings} sighting{match.sightings === 1 ? '' : 's'} ·{' '}
-                            {match.cameras} camera{match.cameras === 1 ? '' : 's'}
-                          </span>
-                          {match.watchlist && <PriorityBadge priority={match.watchlist.priority} solid />}
-                          <span className="ml-auto shrink-0 text-[11px] text-primary">Search →</span>
-                        </button>
+                        <MatchRow match={match} onOpen={open} />
                       </li>
                     ))}
                   </ul>
                 </section>
               )}
+
+              {route && !nothingRead && convoys.length > 0 && (
+                <Convoys convoys={convoys} onOpen={open} />
+              )}
+
+              {/* The submission's "detected plates with timestamps" report:
+                  every plate read in the chosen window, on every camera. */}
+              <div className="mt-auto space-y-3 pt-1">
+                <div>
+                  <Button
+                    variant="outline"
+                    className="w-full"
+                    onClick={() => void exportCsv(() => api.downloadPlatesReport(currentQuery()))}
+                  >
+                    <Icon name="download" size={14} />
+                    Export plate reads (CSV)
+                  </Button>
+                  <p className="mt-1.5 text-[11px] text-faint">
+                    Every plate read in {windowLabel(hours, exact)}, on every camera.
+                  </p>
+                </div>
+                <div className="rounded-lg border border-border p-3 text-xs leading-relaxed text-muted-foreground">
+                  <p className="mb-1 font-medium text-foreground">Reading a route</p>
+                  Legs are straight lines between cameras, so every distance and speed is a lower
+                  bound. A camera that was not reading plates at the time could not have seen the
+                  vehicle: absence here is not absence from the road.
+                </div>
+              </div>
+            </aside>
+
+            {/* ── The journey ──────────────────────────────────────── */}
+            <main className="relative flex h-[480px] min-w-0 shrink-0 flex-col lg:h-auto lg:flex-1 lg:shrink">
+              <RouteMap
+                ref={mapRef}
+                hops={hops}
+                activeSequence={activeHop}
+                onSelectHop={selectFromMap}
+                onPlayingChange={setPlaying}
+              >
+                {busy && (
+                  <div className="absolute inset-x-0 top-3 flex justify-center">
+                    <span className="flex items-center gap-2 rounded-full border border-border bg-card/95 px-3 py-1.5 text-xs text-muted-foreground shadow-lg">
+                      <Spinner className="h-3.5 w-3.5" />
+                      Searching {query ? <span className="font-mono">{query}</span> : null}…
+                    </span>
+                  </div>
+                )}
+
+                {!route && !busy && (
+                  <MapCard>
+                    <Starting
+                      suggestions={suggestions}
+                      recent={recent}
+                      windowText={windowLabel(hours, exact)}
+                      onOpen={open}
+                    />
+                  </MapCard>
+                )}
+
+                {route && nothingRead && (
+                  <MapCard>
+                    <NotRead
+                      plate={route.plate}
+                      windowText={windowLabel(hours, exact)}
+                      hours={exact ? null : hours}
+                      matches={nearMatches}
+                      onWiden={changeWindow}
+                      onOpen={open}
+                    />
+                  </MapCard>
+                )}
+
+                {route && hops.length === 0 && unplaced.length > 0 && (
+                  <MapCard>
+                    <p className="eyebrow">Not on the map</p>
+                    <p className="mt-2 text-[13px] leading-relaxed text-muted-foreground">
+                      <PlateChip plate={route.plate} size="xs" /> was read{' '}
+                      {plural(unplaced.length, 'time')}, only at cameras whose position is
+                      unknown — so there is nothing to place, and no distance or speed to
+                      measure. The reads are listed under Sightings.
+                    </p>
+                  </MapCard>
+                )}
+
+                {route && hops.length > 0 && places === 1 && !busy && (
+                  <div className="absolute left-3 right-[12.5rem] top-3 flex">
+                    <p className="pointer-events-auto flex max-w-xl gap-2.5 rounded-lg border border-border bg-card/95 px-4 py-2.5 text-xs leading-relaxed text-muted-foreground shadow-xl backdrop-blur">
+                      <Icon name="info" size={15} className="mt-px text-faint" />
+                      <span>
+                        {hops.length === 1 ? (
+                          <>
+                            Seen once, at{' '}
+                            <span className="font-mono text-foreground">{hops[0]!.camera_code}</span>.
+                            A journey needs the plate read again at a camera somewhere else.
+                          </>
+                        ) : route.camera_count === 1 ? (
+                          <>
+                            All {hops.length} sightings are on one camera, so there is no journey to
+                            draw — only a record of the vehicle passing{' '}
+                            <span className="font-mono text-foreground">{hops[0]!.camera_code}</span>{' '}
+                            more than once. A route needs the plate read on cameras in different
+                            places.
+                          </>
+                        ) : (
+                          <>
+                            All {hops.length} sightings are at cameras on one spot, so there is no
+                            journey to draw and no distance to measure. A route needs the plate read
+                            on cameras in different places.
+                          </>
+                        )}
+                      </span>
+                    </p>
+                  </div>
+                )}
+              </RouteMap>
+            </main>
+
+            {/* ── The evidence ─────────────────────────────────────── */}
+            {route && (hops.length > 0 || unplaced.length > 0) && (
+              <aside
+                aria-label="Sightings"
+                className="flex shrink-0 flex-col border-t border-border bg-chrome lg:w-[330px] lg:border-l lg:border-t-0 xl:w-[368px]"
+              >
+                <div className="flex items-center gap-2 px-4 pb-2.5 pt-3.5">
+                  <h2 className="text-[15px] font-semibold">Sightings</h2>
+                  <span className="truncate text-xs text-faint">
+                    {[
+                      hops.length > 0 &&
+                        `${plural(hops.length, 'visit')} · ${plural(route.camera_count, 'camera')}`,
+                      unplaced.length > 0 && `${unplaced.length} position unknown`,
+                    ]
+                      .filter(Boolean)
+                      .join(' · ')}
+                  </span>
+                  <span className="ml-auto">
+                    <InfoHint label="How these figures are measured" align="right">
+                      {route.geometry_note}
+                    </InfoHint>
+                  </span>
+                </div>
+                <div className="min-h-0 flex-1 space-y-4 overflow-y-auto px-2.5 pb-4">
+                  {hops.length > 0 && (
+                    <ol className="space-y-1.5">
+                      {hops.map((hop, index) => (
+                        <Fragment key={`${hop.camera_id}-${hop.arrived_at}`}>
+                          {/* A day divider rather than a date on every row:
+                              the list is in time order, so it reads once. */}
+                          {spansDays &&
+                            istDay(hop.arrived_at) !== istDay(hops[index - 1]?.arrived_at) && (
+                              <li role="presentation" className="eyebrow px-1.5 pb-0.5 pt-2 first:pt-0">
+                                {istDay(hop.arrived_at)}
+                              </li>
+                            )}
+                          <HopRow
+                            hop={hop}
+                            index={index}
+                            last={hops.length - 1}
+                            active={activeHop === index}
+                            selected={selectedHop === index}
+                            crop={hop.best_detection_id ? (crops[hop.best_detection_id] ?? null) : null}
+                            plate={route.plate}
+                            innerRef={(node) => {
+                              hopRefs.current[index] = node
+                            }}
+                            onEnter={() => setHoverHop(index)}
+                            onLeave={() => setHoverHop(null)}
+                            onSelect={() => selectFromList(index)}
+                          />
+                        </Fragment>
+                      ))}
+                    </ol>
+                  )}
+                  {unplaced.length > 0 && (
+                    <UnplacedSightings
+                      sightings={unplaced}
+                      crops={crops}
+                      plate={route.plate}
+                      withDate={spansDays}
+                    />
+                  )}
+                </div>
+              </aside>
+            )}
+          </>
+        )}
+      </div>
+    </div>
+  )
+}
+
+// ── The bands ─────────────────────────────────────────────────────────
+
+function PageBand({ mode }: { mode: 'plate' | 'attributes' }) {
+  return (
+    <header className="flex shrink-0 flex-wrap items-center gap-x-6 gap-y-2 border-b border-border bg-chrome px-5 py-3">
+      <div className="min-w-0">
+        <h1 className="text-[17px] font-semibold leading-tight tracking-tight">Vehicle search</h1>
+        <p className="mt-0.5 flex flex-wrap items-center gap-x-1.5 text-xs text-muted-foreground">
+          {mode === 'plate' ? (
+            <>
+              <span>every sighting of a plate, and the journey they imply</span>
+              <InfoHint label="What a drawn route is and is not">
+                A route is inference. The platform knows where a vehicle was seen, not how it
+                got between those points — the lines are straight legs between cameras, not
+                the roads driven, so every distance and speed is a lower bound. Legs the
+                correlator could not believe are shown in red rather than hidden: an
+                impossible leg is the signature of a cloned plate, and removing it would
+                remove the most useful thing on the page.
+              </InfoHint>
             </>
           ) : (
             <>
-            {route.camera_count === 1 && (
-              <p className="rounded border border-priority-high/40 bg-priority-high/10 px-4 py-2 text-xs text-priority-high">
-                All {route.hop_count} sightings are on one camera, so there is no
-                journey to draw — only a record of the vehicle passing{' '}
-                {route.hops[0]?.camera_code} more than once. A route needs the plate
-                read on cameras in different places.
-              </p>
-            )}
-            <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_460px]">
-              <section className="h-[460px]">
-                <RouteMap
-                  route={geojson}
-                  hops={hops}
-                  activeSequence={activeHop}
-                  onSelectHop={setActiveHop}
-                />
-              </section>
-
-              {/* ── Hop table ─────────────────────────────────────── */}
-              <section className="space-y-3">
-                <div>
-                  <SectionLabel>
-                    Journey
-                    <InfoHint>{route.geometry_note}</InfoHint>
-                  </SectionLabel>
-                  <ol className="mt-1.5 space-y-1.5">
-                    {hops.map((hop, index) => (
-                      <li
-                        key={`${hop.camera_id}-${hop.arrived_at}`}
-                        onMouseEnter={() => setActiveHop(index)}
-                        onMouseLeave={() => setActiveHop(null)}
-                        className={`rounded-md border px-3 py-2 transition ${
-                          hop.plausible
-                            ? 'border-border bg-card'
-                            : 'border-status-offline/50 bg-status-offline/5'
-                        } ${activeHop === index ? 'ring-1 ring-primary' : ''}`}
-                      >
-                        <div className="flex items-baseline justify-between gap-2">
-                          <span className="flex items-baseline gap-2">
-                            <span
-                              className={`inline-flex h-4 w-4 shrink-0 items-center justify-center rounded-full text-[9px] font-bold text-white ${
-                                hop.plausible ? 'bg-sky-500' : 'bg-red-500'
-                              }`}
-                            >
-                              {index + 1}
-                            </span>
-                            <span className="font-mono text-xs font-semibold">
-                              {hop.camera_code}
-                            </span>
-                          </span>
-                          <span className="text-[11px] text-muted-foreground">
-                            {api.formatIST(hop.arrived_at, spansDays)}
-                          </span>
-                        </div>
-
-                        <p className="mt-0.5 truncate text-[11px] text-muted-foreground">
-                          {hop.camera_name}
-                          {hop.city ? ` · ${hop.city}` : ''}
-                        </p>
-
-                        <div className="mt-1 flex flex-wrap gap-x-3 gap-y-0.5 text-[11px] text-muted-foreground">
-                          <span>
-                            {hop.sightings} read{hop.sightings === 1 ? '' : 's'}
-                          </span>
-                          <span>conf {hop.plate_confidence.toFixed(2)}</span>
-                          {hop.dwell_s > 0 && <span>dwell {duration(hop.dwell_s)}</span>}
-                          {hop.distance_km !== null && (
-                            <span>≥ {hop.distance_km} km from previous</span>
-                          )}
-                          {hop.implied_kmph !== null && (
-                            <span
-                              className={hop.plausible ? '' : 'font-semibold text-status-offline'}
-                              title="Straight-line distance over elapsed time: a lower bound on the speed actually driven."
-                            >
-                              ≥ {hop.implied_kmph} km/h
-                            </span>
-                          )}
-                        </div>
-
-                        {hop.flags.length > 0 && (
-                          <ul className="mt-1.5 space-y-0.5">
-                            {hop.flags.map((flag) => (
-                              <li
-                                key={flag}
-                                className={`text-[11px] leading-snug ${
-                                  flag === 'implausible_speed' ||
-                                  flag === 'impossible_simultaneous'
-                                    ? 'text-status-offline'
-                                    : 'text-priority-high'
-                                }`}
-                              >
-                                {FLAG_TEXT[flag] ?? flag}
-                              </li>
-                            ))}
-                          </ul>
-                        )}
-                      </li>
-                    ))}
-                  </ol>
-                </div>
-
-                {/* ── Convoys ───────────────────────────────────────── */}
-                {convoys.length > 0 &&
-                  (() => {
-                    const real = convoys.filter((c) => !c.likely_same_vehicle)
-                    const misreads = convoys.filter((c) => c.likely_same_vehicle)
-                    return (
-                      <div>
-                        <SectionLabel>
-                          Seen alongside
-                          <InfoHint>
-                            Co-occurrence is evidence of association, not proof
-                            of it. Two vehicles on the same road at the same
-                            time will co-occur without being related.
-                          </InfoHint>
-                        </SectionLabel>
-
-                        {real.length === 0 && (
-                          <p className="mt-1.5 text-[11px] text-muted-foreground">
-                            No other vehicle travelled with this one.
-                          </p>
-                        )}
-
-                        <ul className="mt-1.5 space-y-1">
-                          {real.map((convoy) => (
-                            <li
-                              key={convoy.with_plate}
-                              className="flex items-baseline justify-between gap-2 rounded border border-border px-2 py-1"
-                            >
-                              <button
-                                type="button"
-                                onClick={() => {
-                                  setQuery(convoy.with_plate)
-                                  void search(convoy.with_plate, hours)
-                                }}
-                                className="font-mono text-xs hover:text-primary"
-                              >
-                                {convoy.with_plate}
-                              </button>
-                              <span className="text-[11px] text-muted-foreground">
-                                {convoy.shared_cameras} shared cameras ·{' '}
-                                {Math.round(convoy.median_gap_s)}s apart
-                              </span>
-                            </li>
-                          ))}
-                        </ul>
-
-                        {/* Kept visible rather than filtered away: a cluster of
-                            near-identical plates is a measurement of how often
-                            the reader is disagreeing with itself on this
-                            vehicle, which is worth an operator knowing. */}
-                        {misreads.length > 0 && (
-                          <details className="mt-2">
-                            <summary className="cursor-pointer text-[11px] text-muted-foreground">
-                              {misreads.length} near-identical plate
-                              {misreads.length === 1 ? '' : 's'} — almost certainly
-                              this same vehicle read differently, not a convoy
-                            </summary>
-                            <ul className="mt-1 flex flex-wrap gap-1">
-                              {misreads.map((convoy) => (
-                                <li
-                                  key={convoy.with_plate}
-                                  className="rounded border border-border/60 px-1.5 py-0.5 font-mono text-[11px] text-muted-foreground"
-                                >
-                                  {convoy.with_plate}
-                                </li>
-                              ))}
-                            </ul>
-                          </details>
-                        )}
-                      </div>
-                    )
-                  })()}
-
-
-              </section>
-            </div>
+              <span>browse sightings by what a vehicle looks like</span>
+              <InfoHint label="What can be searched on">
+                Type, camera and time window filter every sighting the pipeline has made,
+                including ones whose plate could not be read. Colour cannot be filtered on
+                yet — nothing in the pipeline reads it.
+              </InfoHint>
             </>
           )}
-        </>
-      )}
-        </>
+        </p>
+      </div>
+    </header>
+  )
+}
+
+/** The vehicle on screen: its plate, when and where it was read, and what needs explaining. */
+function VehicleBand({
+  route,
+  watch,
+  firstRead,
+  lastRead,
+  spansDays,
+  places,
+  canReplay,
+  playing,
+  onReplay,
+  onCsv,
+  onReport,
+}: {
+  route: VehicleRoute
+  watch: WatchlistHit | null
+  firstRead: Read | undefined
+  lastRead: Read | undefined
+  spansDays: boolean
+  /** Distinct places the vehicle was read at — what a distance needs two of. */
+  places: number
+  canReplay: boolean
+  playing: boolean
+  onReplay: () => void
+  onCsv: () => void
+  onReport: () => void
+}) {
+  const hops = route.hops
+  const unplaced = route.unplaced_sightings
+  const reads = hops.reduce((sum, h) => sum + h.sightings, 0) + unplaced.length
+  const impossible = hops.filter((h) => !h.plausible).length
+  const noted = hops.filter((h) => h.plausible && h.flags.length > 0).length
+  const weakest = hops.length > 0 ? Math.min(...hops.map((h) => h.plate_confidence)) : null
+  const elapsed =
+    firstRead && lastRead
+      ? (new Date(lastRead.at).getTime() - new Date(firstRead.at).getTime()) / 1000
+      : 0
+  const placeOf = (read: Read) => [read.camera_code, read.city].filter(Boolean).join(' · ')
+  const measurable = places > 1 && route.distance_km > 0
+
+  return (
+    // Two fixed rows — the vehicle and its actions, then its figures — so
+    // nothing reflows (and the map below never resizes) when a label changes.
+    <section aria-label="Vehicle" className="shrink-0 border-b border-border bg-chrome px-5 py-3">
+      <h1 className="sr-only">Journey of {route.plate}</h1>
+      <div className="flex flex-wrap items-center gap-x-5 gap-y-2">
+        <div className="flex items-center gap-4">
+          <PlateChip plate={route.plate} size="xl" watched={!!watch} />
+          <div className="flex min-w-0 flex-col gap-1">
+            {watch && (
+              <span className="flex flex-wrap items-center gap-2 text-xs">
+                <PriorityBadge priority={watch.priority} solid />
+                <span className="font-medium capitalize text-foreground">
+                  On the watchlist · {watch.category}
+                </span>
+                {watch.case_ref && (
+                  <span className="font-mono text-[11px] text-muted-foreground">{watch.case_ref}</span>
+                )}
+              </span>
+            )}
+            <span className="text-xs text-muted-foreground">
+              {hops.length > 0
+                ? `${plural(reads, 'read')} · ${plural(hops.length, 'visit')} to ${plural(route.camera_count, 'camera')}`
+                : `${plural(reads, 'read')}, none where the camera's position is known`}
+            </span>
+            {hops.length > 0 && unplaced.length > 0 && (
+              <span className="text-xs text-faint">
+                and {unplaced.length} where the camera&rsquo;s position is unknown
+              </span>
+            )}
+          </div>
+        </div>
+
+        <div className="ml-auto flex flex-wrap gap-2">
+          {canReplay && (
+            <Button
+              variant="outline"
+              onClick={onReplay}
+              className="min-w-[138px]"
+              title="Play the journey on the map, in proportion to real time"
+            >
+              <Icon name={playing ? 'pause' : 'play'} size={13} />
+              {playing ? 'Pause' : 'Replay journey'}
+            </Button>
+          )}
+          <Button variant="outline" onClick={onCsv} title="Every visit in order, and the leg to it">
+            <Icon name="download" size={14} />
+            CSV
+          </Button>
+          <Button onClick={onReport}>
+            <Icon name="ledger" size={14} />
+            Printable report
+          </Button>
+        </div>
+      </div>
+
+      <dl className="mt-3 flex flex-wrap gap-x-6 gap-y-2.5 xl:gap-x-8">
+        {/* One read has one moment: "first" and "last" would both be it. */}
+        {firstRead && lastRead && elapsed > 0 ? (
+          <>
+            <Figure
+              label="First seen"
+              value={istTime(firstRead.at, spansDays)}
+              detail={placeOf(firstRead)}
+            />
+            <Figure
+              label="Last seen"
+              value={istTime(lastRead.at, spansDays)}
+              detail={placeOf(lastRead)}
+            />
+            <Figure label="Elapsed" value={formatDuration(elapsed)} detail="first read to last" />
+          </>
+        ) : (
+          firstRead && (
+            <Figure label="Seen" value={istTime(firstRead.at, spansDays)} detail={placeOf(firstRead)} />
+          )
+        )}
+        {/* A distance, a speed and a leg need two places; with fewer there is
+            nothing to measure, and a zero would read as a measurement. */}
+        {measurable && (
+          <Figure
+            label="Straight-line"
+            value={`≥ ${formatKm(route.distance_km)} km`}
+            info="Roads are never shorter than the straight line between two cameras, so this is a floor on the distance driven."
+          />
+        )}
+        {measurable && route.average_kmph !== null && (
+          <Figure
+            label="Average speed"
+            value={`≥ ${Math.round(route.average_kmph)} km/h`}
+            detail={
+              route.moving_kmph !== null && route.moving_kmph !== route.average_kmph
+                ? `≥ ${Math.round(route.moving_kmph)} km/h moving`
+                : undefined
+            }
+            info={
+              <>
+                First sighting to last, so it includes time stopped at a junction, and the
+                distances are straight lines. Both push it down, so the real average is at least
+                this. The moving figure leaves out the time spent at each camera.
+              </>
+            }
+          />
+        )}
+        {weakest !== null && (
+          <Figure
+            label={hops.length === 1 ? 'Read confidence' : 'Route confidence'}
+            value={route.confidence.toFixed(2)}
+            detail={
+              weakest < WEAK_READ
+                ? 'a weak read — check its crop'
+                : impossible > 0
+                  ? 'lowered by the impossible legs'
+                  : undefined
+            }
+            tone={weakest < WEAK_READ ? 'warn' : undefined}
+            info="The weakest plate read on the route, less a quarter for every impossible leg: a route is only as good as its worst link."
+          />
+        )}
+        {places > 1 && (
+          <Figure
+            label="To explain"
+            value={
+              impossible > 0 ? (
+                <span className="flex items-center gap-1.5 text-priority-critical">
+                  <Icon name="alert" size={14} />
+                  {plural(impossible, 'leg')}
+                </span>
+              ) : (
+                'none'
+              )
+            }
+            detail={noted > 0 ? `${plural(noted, 'leg')} with a note` : 'no impossible legs'}
+          />
+        )}
+      </dl>
+    </section>
+  )
+}
+
+function Figure({
+  label,
+  value,
+  detail,
+  info,
+  tone,
+}: {
+  label: string
+  value: ReactNode
+  detail?: string
+  info?: ReactNode
+  /** Amber when a person should look again; grey otherwise. */
+  tone?: 'warn'
+}) {
+  return (
+    <div className="min-w-0">
+      <dt className="eyebrow flex items-center gap-1">
+        {label}
+        {info && <InfoHint>{info}</InfoHint>}
+      </dt>
+      <dd
+        className={`mt-0.5 font-mono text-[15px] leading-tight ${tone === 'warn' ? 'text-priority-high' : 'text-foreground'}`}
+      >
+        {value}
+      </dd>
+      {detail && (
+        <dd
+          className={`mt-0.5 max-w-[220px] truncate text-[11px] ${tone === 'warn' ? 'text-priority-high' : 'font-mono text-faint'}`}
+        >
+          {detail}
+        </dd>
       )}
     </div>
   )
 }
 
-function Stat({
-  label,
-  value,
-  hint,
-}: {
-  label: string
-  value: string
-  hint?: string
-}) {
+// ── Over the map ──────────────────────────────────────────────────────
+
+function MapCard({ children }: { children: ReactNode }) {
   return (
-    <div title={hint}>
-      <p className="text-[11px] uppercase tracking-wider text-muted-foreground">{label}</p>
-      <p className="font-mono text-sm">{value}</p>
+    <div className="absolute inset-0 flex items-center justify-center p-6">
+      <div className="pointer-events-auto max-h-full w-full max-w-[460px] overflow-y-auto rounded-lg border border-border bg-card/95 p-5 shadow-2xl backdrop-blur">
+        {children}
+      </div>
     </div>
   )
 }
+
+/** Before any search: what this screen answers, and somewhere to start. */
+function Starting({
+  suggestions,
+  recent,
+  windowText,
+  onOpen,
+}: {
+  suggestions: { plate: string; cameras: number }[]
+  recent: Detection[]
+  windowText: string
+  onOpen: (plate: string) => void
+}) {
+  return (
+    <>
+      <p className="eyebrow">Investigate</p>
+      <h2 className="mt-1 text-lg font-semibold leading-snug">Where has a vehicle been?</h2>
+      <p className="mt-1.5 text-[13px] leading-relaxed text-muted-foreground">
+        Type a plate — as read, or as remembered — for every sighting of it, the journey those
+        sightings imply, and anything about that journey that needs explaining.
+      </p>
+
+      {suggestions.length > 0 && (
+        <section className="mt-4">
+          <p className="eyebrow">Seen on more than one camera</p>
+          <ul className="mt-2 flex flex-wrap gap-2">
+            {suggestions.map((s) => (
+              <li key={s.plate}>
+                <button
+                  type="button"
+                  onClick={() => onOpen(s.plate)}
+                  className="flex items-center gap-2 rounded-md border border-border bg-background/60 px-2 py-1.5 transition hover:border-primary/60"
+                >
+                  <PlateChip plate={s.plate} size="xs" />
+                  <span className="font-mono text-[11px] text-muted-foreground">{s.cameras} cams</span>
+                </button>
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
+
+      {recent.length > 0 && (
+        <section className="mt-4">
+          <p className="eyebrow">Read most recently</p>
+          <ul className="mt-2 flex flex-wrap gap-2">
+            {recent.map((d) => (
+              <li key={d.plate}>
+                <button
+                  type="button"
+                  onClick={() => onOpen(d.plate!)}
+                  title={`${d.camera_code} · ${api.formatIST(d.ts)} IST · read ${(d.plate_confidence ?? 0).toFixed(2)}`}
+                  className="rounded-md p-1 transition hover:bg-secondary"
+                >
+                  <PlateChip plate={d.plate!} size="xs" />
+                </button>
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
+
+      {suggestions.length === 0 && recent.length === 0 && (
+        <p className="mt-4 text-xs text-faint">No plate was read with confidence in {windowText}.</p>
+      )}
+    </>
+  )
+}
+
+/** The searched plate was not read at all: say so, and offer the ways out. */
+function NotRead({
+  plate,
+  windowText,
+  hours,
+  matches,
+  onWiden,
+  onOpen,
+}: {
+  plate: string
+  windowText: string
+  /** Null when the window is an exact one from a link. */
+  hours: number | null
+  matches: PlateSearchResult[]
+  onWiden: (hours: number) => void
+  onOpen: (plate: string) => void
+}) {
+  const wider = WINDOWS.filter((w) => hours !== null && w.hours > hours && w.hours >= 168)
+  return (
+    <>
+      <p className="eyebrow">No sightings</p>
+      <p className="mt-2 flex flex-wrap items-center gap-2 text-[13px] text-muted-foreground">
+        <PlateChip plate={plate} size="sm" candidate title="As typed — not read by any camera" />
+        was not read in {windowText}.
+      </p>
+
+      {wider.length > 0 && (
+        <div className="mt-3 flex flex-wrap gap-2">
+          {wider.map((w) => (
+            <Button key={w.value} size="sm" variant="outline" onClick={() => onWiden(w.hours)}>
+              Search the last {w.label}
+            </Button>
+          ))}
+        </div>
+      )}
+
+      {matches.length > 0 ? (
+        <section className="mt-4">
+          <RailHeading info="Ranked by how closely each plate matches what you typed, not by when it was seen.">
+            Did you mean…
+          </RailHeading>
+          <ul className="mt-2 space-y-1.5">
+            {matches.map((match) => (
+              <li key={match.plate_normalised}>
+                <MatchRow match={match} onOpen={onOpen} />
+              </li>
+            ))}
+          </ul>
+        </section>
+      ) : (
+        <p className="mt-3 text-xs text-faint">
+          No plate close to it was read either. A camera that was not reading plates at the time
+          could not have seen it.
+        </p>
+      )}
+    </>
+  )
+}
+
+// ── The left rail's lists ─────────────────────────────────────────────
+
+function RailHeading({ children, info }: { children: ReactNode; info?: ReactNode }) {
+  return (
+    <h2 className="eyebrow flex items-center gap-1">
+      {children}
+      {info && <InfoHint>{info}</InfoHint>}
+    </h2>
+  )
+}
+
+/** A plate the fuzzy search suggests: drawn as a candidate, never as a read. */
+function MatchRow({ match, onOpen }: { match: PlateSearchResult; onOpen: (plate: string) => void }) {
+  return (
+    <button
+      type="button"
+      onClick={() => onOpen(match.plate_normalised)}
+      className="group flex w-full items-center gap-2.5 rounded-md border border-border bg-background/40 px-2.5 py-2 text-left transition hover:border-primary/50"
+    >
+      <PlateChip plate={match.plate_normalised} size="xs" candidate watched={!!match.watchlist} />
+      <span className="min-w-0 flex-1 truncate font-mono text-[11px] text-muted-foreground">
+        {Math.round(match.similarity * 100)}% · {plural(match.sightings, 'read')}
+        {match.cameras > 1 && ` · ${match.cameras} cams`}
+      </span>
+      {match.watchlist && <PriorityBadge priority={match.watchlist.priority} />}
+      <Icon name="arrowRight" size={13} className="text-faint transition group-hover:text-primary" />
+    </button>
+  )
+}
+
+function Convoys({ convoys, onOpen }: { convoys: Convoy[]; onOpen: (plate: string) => void }) {
+  const real = convoys.filter((c) => !c.likely_same_vehicle)
+  const misreads = convoys.filter((c) => c.likely_same_vehicle)
+  return (
+    <section>
+      <RailHeading
+        info={
+          <>
+            Co-occurrence is evidence of association, not proof of it. Two vehicles on the same
+            road at the same time will co-occur without being related.
+          </>
+        }
+      >
+        Seen alongside
+      </RailHeading>
+
+      {real.length === 0 ? (
+        <p className="mt-2 text-xs text-faint">No other vehicle travelled with this one.</p>
+      ) : (
+        <ul className="mt-2 space-y-1.5">
+          {real.map((convoy) => (
+            <li key={convoy.with_plate}>
+              <button
+                type="button"
+                onClick={() => onOpen(convoy.with_plate)}
+                className="group flex w-full items-center gap-2.5 rounded-md border border-border bg-background/40 px-2.5 py-2 text-left transition hover:border-primary/50"
+              >
+                <PlateChip plate={convoy.with_plate} size="xs" />
+                <span className="min-w-0 flex-1 truncate font-mono text-[11px] text-muted-foreground">
+                  {convoy.shared_cameras} shared · {Math.round(convoy.median_gap_s)} s apart
+                </span>
+                <Icon name="arrowRight" size={13} className="text-faint transition group-hover:text-primary" />
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+
+      {/* Kept visible rather than filtered away: a cluster of near-identical
+          plates is a measurement of how often the reader is disagreeing with
+          itself on this vehicle, which is worth an operator knowing. */}
+      {misreads.length > 0 && (
+        <details className="mt-2">
+          <summary className="cursor-pointer text-[11px] leading-snug text-muted-foreground">
+            {misreads.length} near-identical plate{misreads.length === 1 ? '' : 's'} — almost
+            certainly this same vehicle read differently, not a convoy
+          </summary>
+          <ul className="mt-2 flex flex-wrap gap-1.5">
+            {misreads.map((convoy) => (
+              <li key={convoy.with_plate}>
+                <PlateChip plate={convoy.with_plate} size="xs" candidate />
+              </li>
+            ))}
+          </ul>
+        </details>
+      )}
+    </section>
+  )
+}
+
+// ── The sightings column ──────────────────────────────────────────────
+
+/** A visit's number, drawn the way the map draws its stop. */
+const BADGE: Record<'start' | 'via' | 'end' | 'impossible', string> = {
+  start: 'border-2 border-foreground/80 text-foreground',
+  via: 'bg-foreground/80 text-background',
+  end: 'bg-primary text-primary-foreground',
+  impossible: 'border-2 border-priority-critical text-priority-critical',
+}
+
+function HopRow({
+  hop,
+  index,
+  last,
+  active,
+  selected,
+  crop,
+  plate,
+  innerRef,
+  onEnter,
+  onLeave,
+  onSelect,
+}: {
+  hop: RouteHop
+  index: number
+  last: number
+  active: boolean
+  selected: boolean
+  crop: string | null
+  plate: string
+  innerRef: (node: HTMLLIElement | null) => void
+  onEnter: () => void
+  onLeave: () => void
+  onSelect: () => void
+}) {
+  const impossible = !hop.plausible
+  const look = impossible ? 'impossible' : index === last ? 'end' : index === 0 ? 'start' : 'via'
+  const leg = legSummary(hop)
+
+  function onKeyDown(event: KeyboardEvent) {
+    if (event.key === 'Enter' || event.key === ' ') {
+      event.preventDefault()
+      onSelect()
+    }
+  }
+
+  return (
+    <li
+      ref={innerRef}
+      role="button"
+      tabIndex={0}
+      aria-pressed={selected}
+      aria-label={`Visit ${index + 1}, ${hop.camera_code}, ${api.formatIST(hop.arrived_at)} IST`}
+      onMouseEnter={onEnter}
+      onMouseLeave={onLeave}
+      onFocus={onEnter}
+      onBlur={onLeave}
+      onClick={onSelect}
+      onKeyDown={onKeyDown}
+      className={`grid cursor-pointer grid-cols-[22px_minmax(0,1fr)_auto] gap-x-2.5 rounded-lg border px-2.5 py-2 transition ${
+        impossible
+          ? 'border-priority-critical/40 bg-priority-critical/[0.06]'
+          : 'border-border bg-card hover:border-input'
+      } ${active ? 'ring-1 ring-primary/80' : ''}`}
+    >
+      <span
+        className={`mt-0.5 flex h-[22px] w-[22px] items-center justify-center rounded-full font-mono text-[10px] font-semibold ${BADGE[look]}`}
+      >
+        {index + 1}
+      </span>
+
+      <div className="min-w-0">
+        <p className="flex items-baseline gap-1.5 font-mono text-xs">
+          <span className="text-foreground">{istTime(hop.arrived_at, false)}</span>
+          <span className="text-faint">·</span>
+          <span className="truncate font-medium text-foreground">{hop.camera_code}</span>
+        </p>
+        <p className="truncate text-xs text-muted-foreground" title={hop.camera_name}>
+          {hop.camera_name}
+          {hop.city ? ` · ${hop.city}` : ''}
+        </p>
+        <p className="mt-0.5 flex flex-wrap gap-x-2.5 font-mono text-[11px] text-faint">
+          <span title="The plate reader's agreement across frames, 0 to 1">
+            read {hop.plate_confidence.toFixed(2)}
+          </span>
+          <span>{plural(hop.sightings, 'read')}</span>
+          {hop.dwell_s > 0 && <span>seen for {formatDuration(hop.dwell_s)}</span>}
+        </p>
+        {leg && (
+          <p
+            className={`mt-0.5 font-mono text-[11px] ${impossible ? 'font-medium text-priority-critical' : 'text-muted-foreground'}`}
+            title="Straight-line distance over elapsed time, from the previous visit: a lower bound on the speed actually driven."
+          >
+            {leg}
+          </p>
+        )}
+        {hop.flags.length > 0 && (
+          <div className="mt-1 space-y-0.5">
+            {hop.flags.map((flag) => (
+              <FlagLine key={flag} flag={flag} />
+            ))}
+          </div>
+        )}
+      </div>
+
+      <div className="flex items-start pt-0.5">
+        {crop && <PlateCrop url={crop} plate={plate} height={26} />}
+      </div>
+    </li>
+  )
+}
+
+/** One reason, in plain words: red with a triangle when the leg is impossible. */
+function FlagLine({ flag }: { flag: string }) {
+  const grave = GRAVE_FLAGS.has(flag)
+  const tone = grave
+    ? 'text-priority-critical'
+    : flag === 'heading_conflict'
+      ? 'text-priority-high'
+      : 'text-muted-foreground'
+  return (
+    <p className={`flex gap-1.5 text-[11px] leading-snug ${tone}`}>
+      <Icon name={grave ? 'alert' : 'info'} size={12} className="mt-px" />
+      <span>{FLAG_TEXT[flag] ?? flag}</span>
+    </p>
+  )
+}
+
+// ── Search by attributes ──────────────────────────────────────────────
 
 /** Windows worth offering for a browse rather than a route — shorter by
  *  default, since an attribute query with no plate to anchor it can return a
@@ -680,8 +1427,19 @@ const ATTRIBUTE_WINDOWS = [
  * vehicle's colour yet (see BUILD_STATE.md's P9 section for exactly what is
  * and is not built) — so that field is shown, disabled, with the reason
  * stated, rather than silently accepted and always returning nothing.
+ *
+ * A sighting with no readable plate can still be followed: "Find similar"
+ * asks re-identification (P11) for candidates at other cameras, each with the
+ * reasons it was matched on. A candidate is never a confirmed sighting.
  */
-function AttributeSearch() {
+function AttributeSearch({
+  modeSwitch,
+  onOpenPlate,
+}: {
+  modeSwitch: ReactNode
+  /** Open a plate's journey — from a row, or from a candidate that has one. */
+  onOpenPlate: (plate: string) => void
+}) {
   const toast = useToast()
   const [vehicleType, setVehicleType] = useState('')
   const [cameraId, setCameraId] = useState('')
@@ -747,9 +1505,11 @@ function AttributeSearch() {
   }
 
   return (
-    <div className="space-y-3">
-      <form onSubmit={submit} className="flex flex-wrap items-end gap-3">
-        <div className="w-36">
+    <>
+      <aside aria-label="Search" className={RAIL}>
+        {modeSwitch}
+
+        <form onSubmit={submit} className="flex flex-col gap-4">
           <Field label="Type">
             <Select value={vehicleType} onChange={(e) => setVehicleType(e.target.value)}>
               <option value="">Any vehicle</option>
@@ -759,9 +1519,7 @@ function AttributeSearch() {
               <option value="truck">Truck</option>
             </Select>
           </Field>
-        </div>
 
-        <div className="w-48">
           <Field label="Camera">
             <Select value={cameraId} onChange={(e) => setCameraId(e.target.value)}>
               <option value="">Any camera</option>
@@ -772,47 +1530,66 @@ function AttributeSearch() {
               ))}
             </Select>
           </Field>
-        </div>
 
-        <div className="w-32">
           <Field
             label="Colour"
             hint="Not available yet — nothing in the pipeline reads vehicle colour."
           >
             <Input value="" disabled placeholder="Coming later" />
           </Field>
-        </div>
 
-        <div>
-          <span className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
-            Window
-          </span>
-          <div className="mt-1">
+          <div>
+            <span className="eyebrow">Window</span>
             <SegmentedControl
+              fill
+              className="mt-1.5"
               value={String(hours)}
               onChange={(v) => setHours(Number(v))}
               options={ATTRIBUTE_WINDOWS.map((w) => ({ value: w.value, label: w.label }))}
             />
           </div>
+
+          <Button type="submit" disabled={busy} className="h-9 w-full">
+            {busy ? (
+              <>
+                <Spinner className="h-3.5 w-3.5 border-background border-t-transparent" />
+                Searching…
+              </>
+            ) : (
+              <>
+                <Icon name="filter" size={14} />
+                Search
+              </>
+            )}
+          </Button>
+        </form>
+
+        <div className="mt-auto rounded-lg border border-border p-3 text-xs leading-relaxed text-muted-foreground">
+          <p className="mb-1 font-medium text-foreground">When the plate is unreadable</p>
+          Blur, darkness, angle and dirt defeat a plate reader. A sighting with no plate can still
+          be followed: <span className="text-foreground">Find similar</span> lists vehicles at
+          other cameras that could have been it — candidates, with their reasons, never
+          confirmed sightings.
         </div>
+      </aside>
 
-        <Button type="submit" disabled={busy}>
-          {busy ? 'Searching…' : 'Search'}
-        </Button>
-      </form>
-
-      {results !== null &&
-        (results.length === 0 ? (
+      <main className="min-w-0 flex-1 overflow-y-auto p-5">
+        {results === null ? (
+          <EmptyState
+            title="Describe the vehicle on the left, then search."
+            hint="Type, camera and window filter every sighting the pipeline has made — including ones whose plate could not be read."
+          />
+        ) : results.length === 0 ? (
           <EmptyState
             title="Nothing matched."
             hint="Try a different type, camera or window — colour can't be filtered on yet."
           />
         ) : (
           <div>
-            <p className="text-[11px] text-muted-foreground">
-              {results.length} shown of {total} matching
+            <p className="text-xs text-faint">
+              {results.length} shown of {total} matching · newest first · times IST
             </p>
-            <div className="mt-1.5">
+            <div className="mt-2">
               <Table>
                 <Thead>
                   <tr>
@@ -820,7 +1597,7 @@ function AttributeSearch() {
                     <Th>Camera</Th>
                     <Th>Type</Th>
                     <Th>Plate</Th>
-                    <Th />
+                    <Th>Evidence</Th>
                     <Th />
                   </tr>
                 </Thead>
@@ -828,21 +1605,34 @@ function AttributeSearch() {
                   {results.map((d) => (
                     <Fragment key={d.id}>
                       <Tr>
-                        <Td className="whitespace-nowrap text-[11px] text-muted-foreground">
+                        <Td className="whitespace-nowrap font-mono text-xs text-muted-foreground">
                           {api.formatIST(d.ts)}
                         </Td>
                         <Td className="font-mono text-xs">{d.camera_code}</Td>
                         <Td className="text-xs capitalize">{d.vehicle_type ?? '—'}</Td>
-                        <Td className="font-mono text-xs">{d.plate ?? '—'}</Td>
+                        <Td>
+                          {d.plate ? (
+                            <button
+                              type="button"
+                              onClick={() => onOpenPlate(d.plate!)}
+                              title="Open this vehicle's journey"
+                              className="rounded transition hover:opacity-80"
+                            >
+                              <PlateChip plate={d.plate} size="xs" />
+                            </button>
+                          ) : (
+                            <span className="text-xs text-faint">unread</span>
+                          )}
+                        </Td>
                         <Td>
                           <PlateCrop url={d.crop_url} plate={d.plate} height={22} />
                         </Td>
-                        <Td>
+                        <Td className="text-right">
                           {!d.plate && (
                             <button
                               type="button"
                               onClick={() => void toggleReid(d)}
-                              className="text-[11px] font-medium text-primary hover:underline"
+                              className="text-xs font-medium text-primary hover:underline"
                             >
                               {reidOpenId === d.id ? 'Hide similar' : 'Find similar'}
                             </button>
@@ -851,47 +1641,74 @@ function AttributeSearch() {
                       </Tr>
                       {reidOpenId === d.id && (
                         <tr key={`${d.id}-reid`}>
-                          <td colSpan={6} className="bg-muted/40 px-3 py-2.5">
+                          <td colSpan={6} className="border-b border-border bg-secondary/40 px-3 py-3">
                             {reidBusy ? (
-                              <p className="text-[11px] text-muted-foreground">Searching…</p>
+                              <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                                <Spinner className="h-3.5 w-3.5" />
+                                Searching…
+                              </div>
                             ) : !reidResult || reidResult.candidates.length === 0 ? (
-                              <p className="text-[11px] text-muted-foreground">
+                              <p className="text-xs text-muted-foreground">
                                 No plausible candidate at another camera in the surrounding
                                 30 minutes.
                               </p>
                             ) : (
-                              <div className="space-y-1.5">
-                                <div className="flex items-center gap-2">
+                              <div className="space-y-2">
+                                <div className="flex flex-wrap items-center gap-2">
                                   <Badge tone={reidResult.embedding_available ? 'primary' : 'neutral'}>
                                     {reidResult.embedding_available
                                       ? 'appearance-matched'
                                       : 'plausibility only'}
                                   </Badge>
-                                  <p className="text-[11px] text-muted-foreground">
-                                    {reidResult.note}
-                                  </p>
+                                  <p className="text-xs text-muted-foreground">{reidResult.note}</p>
                                 </div>
-                                <ul className="space-y-1">
+                                <p className="eyebrow">Candidates · not confirmed</p>
+                                <ul className="space-y-1.5">
                                   {reidResult.candidates.map((c) => (
                                     <li
                                       key={c.detection_id}
-                                      className="flex flex-wrap items-center gap-2 rounded border border-border bg-card px-2 py-1"
+                                      className="rounded-md border border-dashed border-primary/40 bg-card px-3 py-2"
                                     >
-                                      <span className="font-mono text-xs font-semibold">
-                                        {c.camera_code}
-                                      </span>
-                                      <span className="text-[11px] text-muted-foreground">
-                                        {api.formatIST(c.detection_ts)}
-                                      </span>
-                                      <span className="text-[11px] text-muted-foreground">
-                                        {c.distance_km} km · {Math.round(c.elapsed_s)}s ·{' '}
-                                        {c.implied_kmph} km/h
-                                      </span>
-                                      {c.similarity !== null && (
-                                        <Badge tone="primary">sim {c.similarity.toFixed(2)}</Badge>
-                                      )}
-                                      {c.plate && (
-                                        <span className="font-mono text-xs">{c.plate}</span>
+                                      <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+                                        <span className="font-mono text-xs font-medium">
+                                          {c.camera_code}
+                                        </span>
+                                        <span className="font-mono text-xs text-muted-foreground">
+                                          {api.formatIST(c.detection_ts)}
+                                        </span>
+                                        <span
+                                          className="font-mono text-[11px] text-faint"
+                                          title="Straight line between the two cameras, so the distance and the speed are lower bounds"
+                                        >
+                                          ≥ {formatKm(c.distance_km)} km ·{' '}
+                                          {formatDuration(c.elapsed_s)} · ≥{' '}
+                                          {Math.round(c.implied_kmph)} km/h
+                                        </span>
+                                        {c.similarity !== null && (
+                                          <Badge tone="primary">sim {c.similarity.toFixed(2)}</Badge>
+                                        )}
+                                        {c.plate && (
+                                          <button
+                                            type="button"
+                                            onClick={() => onOpenPlate(c.plate!)}
+                                            title="Open this plate's journey"
+                                            className="rounded transition hover:opacity-80"
+                                          >
+                                            <PlateChip plate={c.plate} size="xs" candidate />
+                                          </button>
+                                        )}
+                                      </div>
+                                      {c.matched_on.length > 0 && (
+                                        <ul className="mt-1 space-y-0.5">
+                                          {c.matched_on.map((reason) => (
+                                            <li
+                                              key={reason.factor}
+                                              className="text-[11px] leading-snug text-faint"
+                                            >
+                                              {reason.detail}
+                                            </li>
+                                          ))}
+                                        </ul>
                                       )}
                                     </li>
                                   ))}
@@ -907,7 +1724,8 @@ function AttributeSearch() {
               </Table>
             </div>
           </div>
-        ))}
-    </div>
+        )}
+      </main>
+    </>
   )
 }

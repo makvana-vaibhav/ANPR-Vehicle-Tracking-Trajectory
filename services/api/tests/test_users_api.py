@@ -109,6 +109,31 @@ class TestAccountCreation:
         created = await make_user(headers)
         assert created["must_change_password"] is True
 
+    async def test_choosing_your_own_password_clears_the_flag(
+        self, client: AsyncClient, make_user
+    ):
+        """The change that makes a password personal must say so."""
+        created = await make_user()
+        assert created["must_change_password"] is True
+
+        signed_in = await client.post(
+            "/api/v1/auth/login",
+            json={"username": created["username"], "password": STRONG},
+        )
+        assert signed_in.status_code == 200, signed_in.text
+        headers = {"Authorization": f"Bearer {signed_in.json()['access_token']}"}
+
+        changed = await client.post(
+            "/api/v1/auth/password",
+            headers=headers,
+            json={"current_password": STRONG, "new_password": "Saputara-Mist-88"},
+        )
+        assert changed.status_code == 200, changed.text
+
+        me = await client.get("/api/v1/auth/me", headers=headers)
+        assert me.status_code == 200, me.text
+        assert me.json()["must_change_password"] is False
+
     async def test_a_weak_password_is_refused_at_creation(self, client: AsyncClient, auth_headers):
         headers = await auth_headers("admin")
         response = await client.post(

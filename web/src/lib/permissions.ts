@@ -16,7 +16,8 @@
  *
  * Names are duplicated from the backend rather than generated because there
  * are nineteen of them and they change about once a phase; the RBAC test suite
- * asserts the matrix, and `Nav.test.tsx` asserts these strings resolve.
+ * asserts the matrix, and `lib/__tests__/nav.test.ts` asserts every screen's
+ * permission is one of these strings.
  */
 
 export const PERMISSIONS = {

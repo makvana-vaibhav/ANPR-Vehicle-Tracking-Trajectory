@@ -18,6 +18,8 @@ interface AuthState {
   loading: boolean
   signIn: (username: string, password: string) => Promise<void>
   signOut: () => Promise<void>
+  /** Re-read the profile, after something here changed it (a new password). */
+  refresh: () => Promise<void>
   can: (permission: string) => boolean
 }
 
@@ -64,6 +66,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setUser(null)
   }, [])
 
+  const refresh = useCallback(async () => {
+    setUser(await api.getProfile())
+  }, [])
+
   /** Whether the signed-in role holds a permission, for hiding actions. */
   const can = useCallback(
     (permission: string) => user?.permissions.includes(permission) ?? false,
@@ -71,8 +77,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   )
 
   const value = useMemo(
-    () => ({ user, loading, signIn, signOut, can }),
-    [user, loading, signIn, signOut, can],
+    () => ({ user, loading, signIn, signOut, refresh, can }),
+    [user, loading, signIn, signOut, refresh, can],
   )
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>

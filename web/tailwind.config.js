@@ -1,6 +1,6 @@
 /** @type {import('tailwindcss').Config} */
 
-// NagarNetra command centre theme.
+// Contrail command centre theme.
 //
 // Dark by default: this is a wall-mounted operations display in a control room,
 // not a document. The palette is shadcn/ui-compatible (HSL CSS variables in
@@ -40,6 +40,8 @@ export default {
           DEFAULT: 'hsl(var(--muted))',
           foreground: 'hsl(var(--muted-foreground))',
         },
+        // Tertiary text: captions and units.
+        faint: 'hsl(var(--faint))',
         accent: {
           DEFAULT: 'hsl(var(--accent))',
           foreground: 'hsl(var(--accent-foreground))',
@@ -67,7 +69,15 @@ export default {
           high: 'hsl(var(--priority-high))',
           medium: 'hsl(var(--priority-medium))',
           low: 'hsl(var(--priority-low))',
+          // Text on a filled severity badge.
+          'critical-ink': 'hsl(var(--priority-critical-ink))',
+          'high-ink': 'hsl(var(--priority-high-ink))',
+          'medium-ink': 'hsl(var(--priority-medium-ink))',
         },
+        // Top bar and docked side panels.
+        chrome: 'hsl(var(--chrome))',
+        // A camera or a stop drawn on a map.
+        place: 'hsl(var(--place))',
 
         // ── Chart series ─────────────────────────────────────────────
         // Categorical identity for chart marks, and nothing else. Kept apart
@@ -87,29 +97,30 @@ export default {
         sm: 'calc(var(--radius) - 4px)',
       },
       fontFamily: {
-        // Both faces are self-hosted and imported in src/styles/index.css.
+        // All three faces are self-hosted and imported in src/styles/index.css.
         // The names here must match the `font-family` those @font-face rules
-        // declare — until recently this named Inter and JetBrains Mono while
-        // loading neither, so every screen quietly fell through to system-ui.
+        // declare — a name that loads nothing falls through to system-ui
+        // silently, which this product did for months.
         //
-        // Geist for the interface: a grotesque with unambiguous digits and
-        // real tabular figures, which is what a screen made almost entirely
-        // of counts and timestamps needs.
+        // IBM Plex Sans for the interface: engineered, plain, real tabular
+        // figures — a screen made almost entirely of counts and timestamps.
         sans: [
-          'Geist Variable',
+          'IBM Plex Sans',
           'system-ui',
           '-apple-system',
           'Segoe UI',
           'sans-serif',
         ],
-        // Plates, timestamps, camera codes and coordinates are all read
-        // character-by-character — they belong in a monospace face.
+        // Timestamps, camera codes and coordinates are read character by
+        // character — they belong in a monospace face.
         mono: [
-          'JetBrains Mono Variable',
+          'IBM Plex Mono',
           'SFMono-Regular',
           'Menlo',
           'monospace',
         ],
+        // Number plates only. Condensed and bold, like the plate itself.
+        plate: ['Barlow Condensed', 'Arial Narrow', 'sans-serif'],
       },
       keyframes: {
         'pulse-alert': {
@@ -120,11 +131,17 @@ export default {
           from: { opacity: '0', transform: 'translateY(-6px)' },
           to: { opacity: '1', transform: 'translateY(0)' },
         },
+        // A plate read at a place on the map: one ring, expanding and fading.
+        ripple: {
+          from: { opacity: '0.9', transform: 'translate(-50%, -50%) scale(0.5)' },
+          to: { opacity: '0', transform: 'translate(-50%, -50%) scale(2.6)' },
+        },
       },
       animation: {
         // Critical alerts pulse until acknowledged.
         'pulse-alert': 'pulse-alert 1.4s ease-in-out infinite',
         'ticker-in': 'ticker-in 220ms ease-out',
+        ripple: 'ripple 1.4s cubic-bezier(0.2, 0.6, 0.3, 1) forwards',
       },
     },
   },

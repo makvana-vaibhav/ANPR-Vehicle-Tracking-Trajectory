@@ -19,7 +19,7 @@ export function Skeleton({ className = '' }: Props) {
   return (
     <div
       aria-hidden
-      className={`animate-pulse rounded bg-muted/40 ${className}`}
+      className={`animate-pulse rounded bg-secondary/70 ${className}`}
     />
   )
 }
@@ -39,7 +39,7 @@ export function SkeletonRows({ rows = 4, height = 'h-14' }: { rows?: number; hei
 /** A stand-in for a KPI tile. */
 export function SkeletonStat() {
   return (
-    <div className="rounded-md border border-border bg-card px-4 py-3">
+    <div className="rounded-lg border border-border bg-card px-3.5 py-3">
       <Skeleton className="h-2.5 w-20" />
       <Skeleton className="mt-2 h-6 w-14" />
     </div>

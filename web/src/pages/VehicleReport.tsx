@@ -8,7 +8,11 @@
  * to avoid over-reading it. The same rows download as CSV beside it.
  *
  * It is light whatever the app's theme — it is paper — so its colours are
- * the palette's own rather than the theme's tokens, chosen once here.
+ * the palette's own rather than the theme's tokens, chosen once here. On
+ * screen the sheet sits on the app's own dark ground, where the app's
+ * buttons are legible; printed, there is only the sheet. Its type is the
+ * product's: Plex Sans to read, Plex Mono for times, codes and figures, and
+ * the plate drawn as a plate.
  *
  * Every number on it is the route endpoint's, unchanged. Opening it is a
  * plate search, and the audit log records it as one.
@@ -18,7 +22,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom'
 
 import { useToast } from '@/components/Toast'
-import { Button, ErrorBanner, Spinner } from '@/components/ui'
+import { Button, ErrorBanner, Icon, PlateChip, Spinner } from '@/components/ui'
 import { useAuth } from '@/hooks/useAuth'
 import * as api from '@/lib/api'
 import type { RouteHop, VehicleRoute } from '@/lib/types'
@@ -43,23 +47,8 @@ function minutes(seconds: number): string {
   return m < 120 ? `${m} min` : `${Math.floor(m / 60)} h ${m % 60} min`
 }
 
-/** GJ03AB1234 → GJ 03 AB 1234, when it has the Indian shape; as read otherwise. */
-export function spacedPlate(plate: string): string {
-  const match = /^([A-Z]{2})(\d{1,2})([A-Z]{0,3})(\d{1,4})$/.exec(plate)
-  return match ? match.slice(1).filter(Boolean).join(' ') : plate
-}
-
-/** A plate drawn as a plate: white, black border, the blue IND strip. */
-function PlateChip({ plate }: { plate: string }) {
-  return (
-    <span className="inline-flex items-stretch overflow-hidden rounded border-2 border-zinc-900 bg-white font-mono text-zinc-900">
-      <span className="flex items-center bg-blue-700 px-1.5 text-[10px] font-bold text-white">
-        IND
-      </span>
-      <span className="px-3 py-1 text-2xl font-bold tracking-[0.12em]">{spacedPlate(plate)}</span>
-    </span>
-  )
-}
+/** Re-exported for the tests that pinned it here before it moved to lib. */
+export { spacedPlate } from '@/lib/plates'
 
 /**
  * The visits drawn to scale on a plain grid — no map tiles, so it prints the
@@ -132,14 +121,22 @@ function RouteSketch({ hops }: { hops: RouteHop[] }) {
             stroke="#ffffff"
             strokeWidth={2}
           />
-          <text x={p.x} y={p.y + 3.5} textAnchor="middle" fontSize={10} fontWeight={700} fill="#ffffff">
+          <text
+            x={p.x}
+            y={p.y + 3.5}
+            textAnchor="middle"
+            fontSize={10}
+            fontWeight={600}
+            fontFamily="'IBM Plex Mono', ui-monospace, monospace"
+            fill="#ffffff"
+          >
             {i + 1}
           </text>
           <text
             x={p.x + 14}
             y={p.y + 4 + labelOffset[i]! * 13}
             fontSize={11}
-            fontFamily="ui-monospace, monospace"
+            fontFamily="'IBM Plex Mono', ui-monospace, monospace"
             fill="#18181b"
           >
             {hops[i]!.camera_code}
@@ -231,17 +228,20 @@ export default function VehicleReport() {
   }
 
   return (
-    <div className="h-full overflow-y-auto bg-zinc-200 p-6 print:h-auto print:overflow-visible print:bg-white print:p-0">
+    <div className="h-full overflow-y-auto bg-background p-6 print:h-auto print:overflow-visible print:bg-white print:p-0">
       <style>{'@page { size: A4; margin: 12mm; }'}</style>
 
       <div className="mx-auto mb-4 flex max-w-[210mm] flex-wrap gap-2 print:hidden">
         <Button variant="outline" onClick={() => navigate(-1)}>
-          ← Back
+          <Icon name="chevronLeft" size={14} />
+          Back
         </Button>
         <Button variant="outline" className="ml-auto" onClick={() => void downloadCsv()}>
+          <Icon name="download" size={14} />
           Download CSV
         </Button>
         <Button onClick={() => window.print()} disabled={!route}>
+          <Icon name="ledger" size={14} />
           Print or save as PDF
         </Button>
       </div>
@@ -259,31 +259,39 @@ export default function VehicleReport() {
       )}
 
       {route && (
-        <article className="mx-auto max-w-[210mm] space-y-6 bg-white p-10 text-[13px] leading-relaxed text-zinc-900 shadow print:max-w-none print:p-0 print:shadow-none">
+        <article className="mx-auto max-w-[210mm] space-y-6 bg-white p-10 font-sans text-[13px] leading-relaxed text-zinc-900 shadow-2xl print:max-w-none print:p-0 print:shadow-none">
           <header className="space-y-3 border-b-2 border-zinc-900 pb-4">
             <div className="flex flex-wrap items-baseline justify-between gap-2">
-              <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-zinc-600">
+              <p className="text-[11px] font-semibold uppercase tracking-[0.1em] text-zinc-600">
                 Contrail · Vehicle movement report
               </p>
               <p className="font-mono text-[11px] text-zinc-600">Ref {reference}</p>
             </div>
-            <PlateChip plate={route.plate} />
+            <PlateChip plate={route.plate} size="xl" />
             <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-0.5 text-[12px]">
               <dt className="text-zinc-600">Window</dt>
               <dd>
-                {route.window.from ? istStamp(route.window.from) : 'the last 24 hours'} to{' '}
-                {route.window.to ? istStamp(route.window.to) : `${istStamp(prepared)} (prepared)`} IST
+                {route.window.from ? (
+                  <span className="font-mono">{istStamp(route.window.from)}</span>
+                ) : (
+                  'the last 24 hours'
+                )}{' '}
+                to{' '}
+                <span className="font-mono">
+                  {route.window.to ? istStamp(route.window.to) : istStamp(prepared)}
+                </span>
+                {route.window.to ? '' : ' (prepared)'} IST
               </dd>
               <dt className="text-zinc-600">Prepared</dt>
               <dd>
-                {istStamp(prepared)} IST
+                <span className="font-mono">{istStamp(prepared)}</span> IST
                 {user ? ` by ${user.full_name || user.username} (${user.role})` : ''}
               </dd>
             </dl>
           </header>
 
           <section>
-            <h2 className="mb-2 text-[11px] font-semibold uppercase tracking-[0.14em] text-zinc-600">
+            <h2 className="mb-2 text-[11px] font-semibold uppercase tracking-[0.1em] text-zinc-600">
               Summary
             </h2>
             {seen.length === 0 ? (
@@ -344,7 +352,7 @@ export default function VehicleReport() {
 
           {route.hops.length > 0 && (
             <section className="print:break-inside-avoid">
-              <h2 className="mb-2 text-[11px] font-semibold uppercase tracking-[0.14em] text-zinc-600">
+              <h2 className="mb-2 text-[11px] font-semibold uppercase tracking-[0.1em] text-zinc-600">
                 Route, to scale
               </h2>
               <RouteSketch hops={route.hops} />
@@ -357,18 +365,18 @@ export default function VehicleReport() {
 
           {route.hops.length > 0 && (
             <section>
-              <h2 className="mb-2 text-[11px] font-semibold uppercase tracking-[0.14em] text-zinc-600">
+              <h2 className="mb-2 text-[11px] font-semibold uppercase tracking-[0.1em] text-zinc-600">
                 Visits, in order
               </h2>
               <table className="w-full border-collapse text-[11.5px]">
                 <thead>
-                  <tr className="border-b border-zinc-900 text-left">
-                    <th className="py-1 pr-2">#</th>
-                    <th className="py-1 pr-2">Time (IST)</th>
-                    <th className="py-1 pr-2">Camera</th>
-                    <th className="py-1 pr-2">Reads</th>
-                    <th className="py-1 pr-2">Evidence</th>
-                    <th className="py-1">Leg from previous</th>
+                  <tr className="border-b border-zinc-900 text-left text-[10px] uppercase tracking-[0.06em] text-zinc-600">
+                    <th className="py-1 pr-2 font-semibold">#</th>
+                    <th className="py-1 pr-2 font-semibold">Time (IST)</th>
+                    <th className="py-1 pr-2 font-semibold">Camera</th>
+                    <th className="py-1 pr-2 font-semibold">Reads</th>
+                    <th className="py-1 pr-2 font-semibold">Evidence</th>
+                    <th className="py-1 font-semibold">Leg from previous</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -381,8 +389,8 @@ export default function VehicleReport() {
                           hop.plausible ? '' : 'bg-red-50'
                         }`}
                       >
-                        <td className="py-1.5 pr-2 font-bold">{i + 1}</td>
-                        <td className="py-1.5 pr-2 whitespace-nowrap">
+                        <td className="py-1.5 pr-2 font-mono font-semibold">{i + 1}</td>
+                        <td className="whitespace-nowrap py-1.5 pr-2 font-mono">
                           {api.formatIST(hop.arrived_at)}
                           {hop.dwell_s > 0 && (
                             <span className="block text-zinc-600">
@@ -398,7 +406,7 @@ export default function VehicleReport() {
                             {departments[hop.camera_id] ? ` · ${departments[hop.camera_id]}` : ''}
                           </span>
                         </td>
-                        <td className="py-1.5 pr-2 whitespace-nowrap">
+                        <td className="whitespace-nowrap py-1.5 pr-2 font-mono">
                           {hop.sightings} · best {hop.plate_confidence.toFixed(2)}
                         </td>
                         <td className="py-1.5 pr-2">
@@ -414,10 +422,10 @@ export default function VehicleReport() {
                         </td>
                         <td className="py-1.5">
                           {hop.distance_km !== null && hop.elapsed_s !== null ? (
-                            <>
+                            <span className="font-mono">
                               ≥ {hop.distance_km} km in {minutes(hop.elapsed_s)}
                               {hop.implied_kmph !== null && ` · ≥ ${Math.round(hop.implied_kmph)} km/h`}
-                            </>
+                            </span>
                           ) : (
                             <span className="text-zinc-500">start</span>
                           )}
@@ -437,22 +445,22 @@ export default function VehicleReport() {
 
           {route.unplaced_sightings.length > 0 && (
             <section>
-              <h2 className="mb-2 text-[11px] font-semibold uppercase tracking-[0.14em] text-zinc-600">
+              <h2 className="mb-2 text-[11px] font-semibold uppercase tracking-[0.1em] text-zinc-600">
                 Also seen where the camera&rsquo;s position is unknown
               </h2>
               <table className="w-full border-collapse text-[11.5px]">
                 <thead>
-                  <tr className="border-b border-zinc-900 text-left">
-                    <th className="py-1 pr-2">Time (IST)</th>
-                    <th className="py-1 pr-2">Camera</th>
-                    <th className="py-1 pr-2">Read</th>
-                    <th className="py-1">Evidence</th>
+                  <tr className="border-b border-zinc-900 text-left text-[10px] uppercase tracking-[0.06em] text-zinc-600">
+                    <th className="py-1 pr-2 font-semibold">Time (IST)</th>
+                    <th className="py-1 pr-2 font-semibold">Camera</th>
+                    <th className="py-1 pr-2 font-semibold">Read</th>
+                    <th className="py-1 font-semibold">Evidence</th>
                   </tr>
                 </thead>
                 <tbody>
                   {route.unplaced_sightings.map((s) => (
                     <tr key={s.detection_id} className="border-b border-zinc-200 align-top print:break-inside-avoid">
-                      <td className="py-1.5 pr-2 whitespace-nowrap">{api.formatIST(s.seen_at)}</td>
+                      <td className="whitespace-nowrap py-1.5 pr-2 font-mono">{api.formatIST(s.seen_at)}</td>
                       <td className="py-1.5 pr-2">
                         <span className="font-mono font-semibold">{s.camera_code}</span>
                         <span className="block">{s.camera_name}</span>
@@ -460,7 +468,7 @@ export default function VehicleReport() {
                           <span className="block text-zinc-600">{departments[s.camera_id]}</span>
                         )}
                       </td>
-                      <td className="py-1.5 pr-2">{s.plate_confidence.toFixed(2)}</td>
+                      <td className="py-1.5 pr-2 font-mono">{s.plate_confidence.toFixed(2)}</td>
                       <td className="py-1.5">
                         {crops[s.detection_id] ? (
                           <img
@@ -480,7 +488,7 @@ export default function VehicleReport() {
           )}
 
           <section className="space-y-1.5 border-t border-zinc-300 pt-4 text-[11px] text-zinc-700 print:break-inside-avoid">
-            <h2 className="text-[11px] font-semibold uppercase tracking-[0.14em] text-zinc-600">
+            <h2 className="text-[11px] font-semibold uppercase tracking-[0.1em] text-zinc-600">
               Reading this report
             </h2>
             <p>
@@ -522,8 +530,8 @@ export default function VehicleReport() {
 function Fact({ label, value }: { label: string; value: string }) {
   return (
     <div>
-      <dt className="text-[10px] uppercase tracking-wider text-zinc-600">{label}</dt>
-      <dd className="font-medium">{value}</dd>
+      <dt className="text-[10px] font-medium uppercase tracking-[0.06em] text-zinc-600">{label}</dt>
+      <dd className="font-mono text-[12.5px] font-medium">{value}</dd>
     </div>
   )
 }

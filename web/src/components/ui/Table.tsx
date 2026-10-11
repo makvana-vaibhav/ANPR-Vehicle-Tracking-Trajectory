@@ -19,21 +19,21 @@ export function Table({
   bare = false,
   ...rest
 }: TableHTMLAttributes<HTMLTableElement> & { bare?: boolean }) {
-  const table = <table className={`w-full text-sm ${className}`} {...rest} />
+  const table = <table className={`w-full text-[13px] ${className}`} {...rest} />
   if (bare) return table
-  return <div className="overflow-x-auto rounded-md border border-border">{table}</div>
+  return <div className="overflow-x-auto rounded-lg border border-border bg-card">{table}</div>
 }
 
 export function Thead({ children }: { children: ReactNode }) {
   return (
-    <thead className="border-b border-border bg-muted/30 text-left text-[11px] uppercase tracking-wider text-muted-foreground">
+    <thead className="border-b border-border text-left text-[11px] uppercase tracking-[0.06em] text-faint">
       {children}
     </thead>
   )
 }
 
 export function Th({ className = '', ...rest }: ThHTMLAttributes<HTMLTableCellElement>) {
-  return <th className={`px-3 py-2 font-medium ${className}`} {...rest} />
+  return <th className={`px-3 py-2.5 font-medium ${className}`} {...rest} />
 }
 
 export function Td({ className = '', ...rest }: TdHTMLAttributes<HTMLTableCellElement>) {
@@ -43,7 +43,7 @@ export function Td({ className = '', ...rest }: TdHTMLAttributes<HTMLTableCellEl
 export function Tr({ className = '', ...rest }: HTMLAttributes<HTMLTableRowElement>) {
   return (
     <tr
-      className={`border-b border-border/50 transition last:border-0 hover:bg-muted/10 ${className}`}
+      className={`border-b border-border/60 transition last:border-0 hover:bg-secondary/40 ${className}`}
       {...rest}
     />
   )
