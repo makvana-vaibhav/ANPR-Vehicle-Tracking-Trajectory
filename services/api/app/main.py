@@ -36,6 +36,7 @@ from app.routers import (
     health,
     predictions,
     reid,
+    reports,
     streams,
     users,
     vehicles,
@@ -230,6 +231,7 @@ app.include_router(detections.router)
 app.include_router(users.router)
 app.include_router(audit.router)
 app.include_router(vehicles.router)
+app.include_router(reports.router)
 app.include_router(watchlist.router)
 app.include_router(alerts.router)
 app.include_router(analytics.router)

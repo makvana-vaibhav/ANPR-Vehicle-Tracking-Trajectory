@@ -136,6 +136,18 @@ class TestClustering:
         assert hops[0].best_confidence == 0.97
 
 
+    def test_a_visit_is_evidenced_by_its_best_read_not_its_first(self) -> None:
+        """A report shows one crop per visit; it should be the clearest one."""
+        blurred = sighting(RAJKOT, "RAJKOT", T0, confidence=0.61)
+        clear = sighting(RAJKOT, "RAJKOT", T0 + timedelta(seconds=20), confidence=0.97)
+        later = sighting(RAJKOT, "RAJKOT", T0 + timedelta(seconds=40), confidence=0.80)
+
+        (hop,) = cluster_into_hops([blurred, clear, later])
+
+        assert hop.best_detection_id == clear.detection_id
+        assert hop.to_dict()["best_detection_id"] == str(clear.detection_id)
+
+
 class TestLegScoring:
     def test_a_normal_drive_is_not_flagged(self) -> None:
         # Rajkot → Gondal, ~38 km, in an hour: about 38 km/h. Ordinary.

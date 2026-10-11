@@ -550,6 +550,23 @@ export interface RouteHop {
   bearing_deg: number | null
   flags: string[]
   plausible: boolean
+  /** The visit's clearest read: the evidence a report shows for it. */
+  best_detection_id: string | null
+}
+
+/**
+ * A sighting at a camera whose position is not known. A real sighting, so it
+ * is reported, but never placed on the route or used for a distance or speed.
+ */
+export interface UnplacedSighting {
+  detection_id: string
+  camera_id: string
+  camera_code: string
+  camera_name: string
+  city: string | null
+  district: string | null
+  seen_at: string
+  plate_confidence: number
 }
 
 export interface VehicleRoute {
@@ -576,7 +593,9 @@ export interface VehicleRoute {
   confidence: number
   flagged_hop_count: number
   hops: RouteHop[]
+  unplaced_sightings: UnplacedSighting[]
   geometry_note: string
+  unplaced_note: string
 }
 
 export type RouteGeoJSON = GeoJSON.FeatureCollection

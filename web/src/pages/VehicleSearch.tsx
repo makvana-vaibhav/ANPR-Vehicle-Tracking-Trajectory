@@ -18,9 +18,11 @@
  */
 
 import { Fragment, useCallback, useEffect, useState, type FormEvent } from 'react'
+import { useNavigate } from 'react-router-dom'
 
 import PlateCrop from '@/components/PlateCrop'
 import RouteMap from '@/components/RouteMap'
+import UnplacedSightings from '@/components/UnplacedSightings'
 import { useToast } from '@/components/Toast'
 import {
   Badge,
@@ -89,6 +91,7 @@ function duration(seconds: number): string {
 
 export default function VehicleSearch() {
   const toast = useToast()
+  const navigate = useNavigate()
   const [mode, setMode] = useState<'plate' | 'attributes'>('plate')
   const [query, setQuery] = useState('')
   const [plate, setPlate] = useState<string | null>(null)
@@ -180,7 +183,16 @@ export default function VehicleSearch() {
     if (plate) void search(plate, next)
   }
 
+  async function exportCsv(run: () => Promise<string>) {
+    try {
+      toast.success(`Downloaded ${await run()}`)
+    } catch (err) {
+      toast.error(err)
+    }
+  }
+
   const hops = route?.hops ?? []
+  const unplaced = route?.unplaced_sightings ?? []
   // A window spanning midnight makes time-only stamps look out of order
   // (17:49 then 12:32), so the date is shown whenever the route crosses a day.
   const spansDays =
@@ -256,6 +268,17 @@ export default function VehicleSearch() {
         <Button type="submit" disabled={busy}>
           {busy ? 'Searching…' : 'Search'}
         </Button>
+
+        {/* The submission's "detected plates with timestamps" report: every
+            plate read in the chosen window, on every camera. */}
+        <Button
+          type="button"
+          variant="outline"
+          className="ml-auto"
+          onClick={() => void exportCsv(() => api.downloadPlatesReport({ since: since(hours) }))}
+        >
+          Export plate reads (CSV)
+        </Button>
       </form>
 
       {suggestions.length > 0 && !route && (
@@ -296,6 +319,8 @@ export default function VehicleSearch() {
               <p className="text-[11px] text-muted-foreground">
                 {route.hop_count} sighting{route.hop_count === 1 ? '' : 's'} on{' '}
                 {route.camera_count} camera{route.camera_count === 1 ? '' : 's'}
+                {unplaced.length > 0 &&
+                  ` · ${unplaced.length} more where the camera's position is unknown`}
               </p>
             </div>
 
@@ -351,9 +376,35 @@ export default function VehicleSearch() {
                 </span>
               </>
             )}
+
+            {(route.hop_count > 0 || unplaced.length > 0) && (
+              <div className="ml-auto flex gap-2">
+                <Button
+                  variant="outline"
+                  onClick={() =>
+                    void exportCsv(() =>
+                      api.downloadRouteReport(route.plate, { since: since(hours) }),
+                    )
+                  }
+                >
+                  Download CSV
+                </Button>
+                <Button
+                  onClick={() =>
+                    navigate(
+                      `/reports/vehicle/${encodeURIComponent(route.plate)}?since=${encodeURIComponent(since(hours))}`,
+                    )
+                  }
+                >
+                  Printable report
+                </Button>
+              </div>
+            )}
           </section>
 
-          {route.hop_count === 0 ? (
+          {unplaced.length > 0 && <UnplacedSightings sightings={unplaced} note={route.unplaced_note} />}
+
+          {route.hop_count === 0 && unplaced.length > 0 ? null : route.hop_count === 0 ? (
             <>
               <EmptyState
                 title={

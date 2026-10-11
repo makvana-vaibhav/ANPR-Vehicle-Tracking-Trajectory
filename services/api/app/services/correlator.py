@@ -78,6 +78,13 @@ UNOBSERVED_GAP = timedelta(hours=1)
 #: legitimately catch a vehicle at a wide angle.
 HEADING_TOLERANCE_DEG = 100.0
 
+#: A camera whose position is a placeholder: the grid's catalogue names a place
+#: the gazetteer could not find, so onboarding put it at the state's centroid
+#: and said so with this tag. A leg to it would be a distance and a speed
+#: measured to the middle of Gujarat — enough to flag an honest vehicle as an
+#: impossible hop. Its sightings are kept and listed, never placed on a route.
+UNPLACED_TAG = "placement:unknown"
+
 EARTH_RADIUS_M = 6_371_008.8
 
 
@@ -152,6 +159,9 @@ class Hop:
     #: Why this leg is not believed. Empty means nothing was found wrong, which
     #: is weaker than "this leg is correct" — see the module docstring.
     flags: list[str] = field(default_factory=list)
+    #: The sighting read with the most confidence on this visit: the evidence
+    #: a report shows for it.
+    best_detection_id: uuid.UUID | None = None
 
     @property
     def dwell_s(self) -> float:
@@ -186,7 +196,24 @@ class Hop:
             "bearing_deg": round(self.bearing, 1) if self.bearing is not None else None,
             "flags": list(self.flags),
             "plausible": self.plausible,
+            "best_detection_id": (
+                str(self.best_detection_id) if self.best_detection_id else None
+            ),
         }
+
+
+def unplaced_to_dict(sighting: Sighting) -> dict[str, Any]:
+    """A sighting at a camera with no known position — no coordinates given."""
+    return {
+        "detection_id": str(sighting.detection_id),
+        "camera_id": str(sighting.camera_id),
+        "camera_code": sighting.camera_code,
+        "camera_name": sighting.camera_name,
+        "city": sighting.city,
+        "district": sighting.district,
+        "seen_at": sighting.ts.isoformat(),
+        "plate_confidence": round(sighting.plate_confidence, 4),
+    }
 
 
 @dataclass(slots=True)
@@ -197,6 +224,11 @@ class Route:
     hops: list[Hop]
     window_from: datetime | None
     window_to: datetime | None
+    #: Sightings at cameras whose position is not known (`UNPLACED_TAG`, or no
+    #: position at all). Real sightings of this plate, so they are reported —
+    #: a sighting that cannot be placed must be visibly unplaced, not dropped —
+    #: but they take no part in any distance, speed or flag.
+    unplaced: list[Sighting] = field(default_factory=list)
 
     @property
     def camera_count(self) -> int:
@@ -355,11 +387,17 @@ class Route:
             "confidence": self.confidence,
             "flagged_hop_count": len(self.flagged_hops),
             "hops": [hop.to_dict() for hop in self.hops],
+            "unplaced_sightings": [unplaced_to_dict(s) for s in self.unplaced],
             "geometry_note": (
                 "Distances are great-circle between cameras, not road distances. "
                 "Implied speeds are therefore a lower bound on the speed driven. "
                 "average_kmph spans first to last sighting and so includes dwell; "
                 "moving_kmph excludes it."
+            ),
+            "unplaced_note": (
+                "Sightings at cameras whose position is not known are listed under "
+                "unplaced_sightings and are not part of the route: no distance or "
+                "speed can be measured to them."
             ),
         }
 
@@ -385,7 +423,9 @@ def cluster_into_hops(sightings: list[Sighting]) -> list[Hop]:
         ):
             current.departed_at = sighting.ts
             current.sightings += 1
-            current.best_confidence = max(current.best_confidence, sighting.plate_confidence)
+            if sighting.plate_confidence > current.best_confidence:
+                current.best_confidence = sighting.plate_confidence
+                current.best_detection_id = sighting.detection_id
             continue
 
         hops.append(
@@ -401,6 +441,7 @@ def cluster_into_hops(sightings: list[Sighting]) -> list[Hop]:
                 departed_at=sighting.ts,
                 sightings=1,
                 best_confidence=sighting.plate_confidence,
+                best_detection_id=sighting.detection_id,
             )
         )
     return hops
@@ -464,14 +505,20 @@ def score_legs(hops: list[Hop], headings: dict[uuid.UUID, float | None]) -> None
             hop.flags.append("heading_conflict")
 
 
-async def sightings_for(
+async def all_sightings_for(
     session: AsyncSession,
     plate: str,
     since: datetime | None = None,
     until: datetime | None = None,
     limit: int = 5000,
-) -> list[Sighting]:
-    """Every sighting of one plate, with its camera's position."""
+) -> tuple[list[Sighting], list[Sighting]]:
+    """Every sighting of one plate: at placed cameras, and at unplaced ones.
+
+    Unplaced means no position, or a placeholder one (`UNPLACED_TAG`). Those
+    sightings are real and returned, separately, because a route cannot use
+    them: with no position there is the origin of the coordinate system, and
+    with a placeholder there is the middle of the state.
+    """
     location = Camera.location.cast(Geometry)
     query = (
         select(
@@ -486,6 +533,7 @@ async def sightings_for(
             Camera.heading_deg,
             func.ST_Y(location),
             func.ST_X(location),
+            Camera.tags,
         )
         .join(Camera, Camera.id == Detection.camera_id)
         .where(Detection.plate_normalised == plate)
@@ -497,9 +545,10 @@ async def sightings_for(
     if until is not None:
         query = query.where(Detection.ts <= until)
 
-    rows = (await session.execute(query)).all()
-    return [
-        Sighting(
+    placed: list[Sighting] = []
+    unplaced: list[Sighting] = []
+    for row in (await session.execute(query)).all():
+        sighting = Sighting(
             detection_id=row[0],
             ts=row[1],
             plate_confidence=row[2] or 0.0,
@@ -512,11 +561,23 @@ async def sightings_for(
             lat=row[9],
             lon=row[10],
         )
-        # A camera with no position cannot be placed on a route. Including it
-        # would put the vehicle at the origin of the coordinate system.
-        for row in rows
-        if row[9] is not None and row[10] is not None
-    ]
+        if row[9] is None or row[10] is None or UNPLACED_TAG in (row[11] or ()):
+            unplaced.append(sighting)
+        else:
+            placed.append(sighting)
+    return placed, unplaced
+
+
+async def sightings_for(
+    session: AsyncSession,
+    plate: str,
+    since: datetime | None = None,
+    until: datetime | None = None,
+    limit: int = 5000,
+) -> list[Sighting]:
+    """Every sighting of one plate that can be placed on a map."""
+    placed, _unplaced = await all_sightings_for(session, plate, since, until, limit)
+    return placed
 
 
 async def build_route(
@@ -526,11 +587,13 @@ async def build_route(
     until: datetime | None = None,
 ) -> Route:
     """Reconstruct one plate's journey."""
-    sightings = await sightings_for(session, plate, since, until)
+    sightings, unplaced = await all_sightings_for(session, plate, since, until)
     hops = cluster_into_hops(sightings)
     headings = {s.camera_id: s.heading_deg for s in sightings}
     score_legs(hops, headings)
-    return Route(plate=plate, hops=hops, window_from=since, window_to=until)
+    return Route(
+        plate=plate, hops=hops, window_from=since, window_to=until, unplaced=unplaced
+    )
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -597,7 +660,10 @@ async def find_convoys(
     travelling together. The threshold is a parameter because what counts as a
     convoy is an operational judgement, not a fact about the data.
     """
-    subject = await sightings_for(session, plate, since, until)
+    # Placed or not: travelling together is a matter of the same camera at the
+    # same time, and needs no position.
+    placed, unplaced = await all_sightings_for(session, plate, since, until)
+    subject = placed + unplaced
     if not subject:
         return []
 

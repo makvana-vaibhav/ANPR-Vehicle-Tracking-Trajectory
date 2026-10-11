@@ -16,6 +16,7 @@ import LiveAnpr from '@/pages/LiveAnpr'
 import Login from '@/pages/Login'
 import MapView from '@/pages/MapView'
 import Users from '@/pages/Users'
+import VehicleReport from '@/pages/VehicleReport'
 import VehicleSearch from '@/pages/VehicleSearch'
 import Watchlist from '@/pages/Watchlist'
 import RequirePermission from '@/components/RequirePermission'
@@ -56,12 +57,12 @@ function Shell() {
   const landing = NAV_ITEMS.find((item) => can(item.needs))?.to ?? '/no-access'
 
   return (
-    <div className="flex h-screen overflow-hidden bg-background">
+    <div className="flex h-screen overflow-hidden bg-background print:block print:h-auto print:overflow-visible print:bg-white">
       <AppNav />
 
       {/* min-w-0 so a wide table or a map inside a page cannot push the rail
           off the left edge — a flex child defaults to min-content width. */}
-      <main className="flex min-h-0 min-w-0 flex-1 flex-col">
+      <main className="flex min-h-0 min-w-0 flex-1 flex-col print:block">
         <Routes>
           <Route path="/" element={<Navigate to={landing} replace />} />
           <Route
@@ -112,6 +113,17 @@ function Shell() {
                 label="Vehicle search"
               >
                 <VehicleSearch />
+              </RequirePermission>
+            }
+          />
+          <Route
+            path="/reports/vehicle/:plate"
+            element={
+              <RequirePermission
+                anyOf={[PERMISSIONS.searchExecute]}
+                label="Vehicle report"
+              >
+                <VehicleReport />
               </RequirePermission>
             }
           />

@@ -192,6 +192,57 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<T
   return body as T
 }
 
+/**
+ * Fetch an export with the session's token and hand it to the browser as a file.
+ *
+ * A plain link cannot carry the Authorization header, so the file is fetched
+ * here and saved from a blob. Returns the file name the server gave it.
+ */
+export async function downloadExport(
+  path: string,
+  params: Record<string, string | null | undefined> = {},
+  _retried = false,
+): Promise<string> {
+  const query = new URLSearchParams(
+    Object.entries(params).filter((entry): entry is [string, string] => Boolean(entry[1])),
+  )
+  const search = query.toString()
+  const response = await fetch(`${API_BASE_URL}${path}${search ? `?${search}` : ''}`, {
+    headers: accessToken ? { Authorization: `Bearer ${accessToken}` } : {},
+  })
+  if (response.status === 401 && !_retried && refreshToken && (await tryRefresh())) {
+    return downloadExport(path, params, true)
+  }
+  if (!response.ok) {
+    let detail = `Export failed (${response.status})`
+    try {
+      const body: unknown = await response.json()
+      if (body && typeof body === 'object' && typeof (body as { detail?: unknown }).detail === 'string') {
+        detail = (body as { detail: string }).detail
+      }
+    } catch {
+      /* not JSON: keep the status line */
+    }
+    throw new ApiError(detail, response.status, detail)
+  }
+
+  const disposition = response.headers.get('content-disposition') ?? ''
+  const filename = /filename="([^"]+)"/.exec(disposition)?.[1] ?? 'export.csv'
+  const url = URL.createObjectURL(await response.blob())
+  try {
+    const link = document.createElement('a')
+    link.href = url
+    link.download = filename
+    document.body.appendChild(link)
+    link.click()
+    link.remove()
+  } finally {
+    // After the click has been handled, not before it.
+    window.setTimeout(() => URL.revokeObjectURL(url), 1_000)
+  }
+  return filename
+}
+
 async function tryRefresh(): Promise<boolean> {
   if (!refreshToken) return false
   try {
@@ -462,6 +513,15 @@ export interface RouteQuery {
   since?: string
   until?: string
 }
+
+/** One vehicle's route as CSV: every visit in order, and the leg to it. */
+export const downloadRouteReport = (plate: string, query: RouteQuery = {}) =>
+  downloadExport(`/api/v1/reports/vehicle/${encodeURIComponent(plate)}.csv`, { ...query })
+
+/** Every plate read in a window as CSV, optionally for one camera or plate. */
+export const downloadPlatesReport = (
+  query: RouteQuery & { camera_id?: string; plate?: string } = {},
+) => downloadExport('/api/v1/reports/plates.csv', { ...query })
 
 export const getVehicleRoute = (plate: string, query: RouteQuery = {}) => {
   const params = new URLSearchParams(query as Record<string, string>)

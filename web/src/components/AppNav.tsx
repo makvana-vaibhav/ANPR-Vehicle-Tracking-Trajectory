@@ -108,7 +108,7 @@ export default function AppNav() {
   return (
     <nav
       aria-label="Primary"
-      className={`flex shrink-0 flex-col border-r border-border bg-card transition-[width] duration-200 ${
+      className={`flex shrink-0 flex-col border-r border-border bg-card transition-[width] duration-200 print:hidden ${
         collapsed ? 'w-[60px]' : 'w-56'
       }`}
     >
