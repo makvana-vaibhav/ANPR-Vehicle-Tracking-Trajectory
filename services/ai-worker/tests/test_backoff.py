@@ -154,6 +154,34 @@ class TestRefusedLogin:
         assert b.streak == {} and b.not_before == {}
 
 
+class TestAnUnprovenHost:
+    def test_is_asked_by_one_camera_before_the_rest(self) -> None:
+        """A worker starting against a grid that is refusing it spends one
+        login finding out, not one per camera."""
+        b = backoff()
+        assert b.admit("SBX-cam01", GRID, 0.0)
+        assert not b.admit("SBX-cam02", GRID, 0.0)
+        b.opened("SBX-cam01", GRID)
+        assert b.admit("SBX-cam02", GRID, 1.0)
+        assert b.admit("SBX-cam03", GRID, 1.0)
+
+    def test_a_refusal_unproves_it(self) -> None:
+        b = backoff()
+        b.admit("SBX-cam01", GRID, 0.0)
+        b.opened("SBX-cam01", GRID)
+        b.failed("SBX-cam02", GRID, "unauthorized", 10.0)
+        assert b.admit("SBX-cam03", GRID, 131.0)
+        assert not b.admit("SBX-cam04", GRID, 131.0)
+
+    def test_a_camera_down_does_not_unprove_it(self) -> None:
+        b = backoff()
+        b.admit("SBX-cam01", GRID, 0.0)
+        b.opened("SBX-cam01", GRID)
+        b.failed("SBX-cam02", GRID, "not found", 10.0)
+        assert b.admit("SBX-cam03", GRID, 10.0)
+        assert b.admit("SBX-cam04", GRID, 10.0)
+
+
 class TestRotationAsksTheBackoff:
     @staticmethod
     def _streams(*codes: str) -> list[CameraStream]:

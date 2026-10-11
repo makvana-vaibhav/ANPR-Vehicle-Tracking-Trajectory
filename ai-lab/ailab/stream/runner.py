@@ -195,6 +195,7 @@ class StreamRunner:
         realtime: bool = True,
         stop: threading.Event | None = None,
         on_open: Callable[[], None] | None = None,
+        analyse: threading.Event | None = None,
     ) -> dict[str, Any]:
         """Consume the stream until it ends, a limit is reached, or `stop` is set.
 
@@ -207,6 +208,12 @@ class StreamRunner:
         `on_open` is called once the stream has opened, so a supervisor backing
         off a host learns it is answering again without waiting for this run
         to end, which for a camera with no deadline is never.
+
+        `analyse`, when given, gates inference: while it is clear the stream
+        stays open and decoding — so resuming costs no reconnect — but no frame
+        is analysed. This is how a supervisor shares a few inference slots
+        among many cameras without opening and closing their streams, which
+        the organisers' grid answers by refusing our login.
         """
         cfg = self.config
         reader = StreamReader(url, realtime=realtime).start()
@@ -233,6 +240,9 @@ class StreamRunner:
 
         deadline = time.perf_counter() + max_seconds if max_seconds else None
         frame_index = 0
+        # Nothing is in view yet and the tracker is new, so a run that starts
+        # gated has nothing to pause.
+        paused = True
 
         try:
             while True:
@@ -245,6 +255,15 @@ class StreamRunner:
                 if max_frames and self.stats.frames_processed >= max_frames:
                     log.info("frame limit reached")
                     break
+                if analyse is not None and not analyse.is_set():
+                    if not paused:
+                        self._pause_analysis()
+                        paused = True
+                    # The reader goes on decoding and dropping meanwhile, so
+                    # the first frame analysed on resuming is a current one.
+                    analyse.wait(timeout=0.5)
+                    continue
+                paused = False
 
                 captured = reader.read(timeout=2.0)
                 if captured is None:
@@ -336,8 +355,11 @@ class StreamRunner:
     def _new_epoch(self) -> str:
         return f"{self.source.camera_id}.{secrets.token_hex(3)}"
 
-    def _on_discontinuity(self) -> None:
-        """Rebuild all long-lived state after a scene cut."""
+    def _rebuild(self) -> int:
+        """Complete every vehicle in view and start the tracker clean.
+
+        Returns how many vehicles were completed.
+        """
         from ailab.plate.scheduler import CropGate, PlateScheduler
         from ailab.registry import create
 
@@ -353,8 +375,34 @@ class StreamRunner:
         self._reads_by_track.clear()
         self._crops_saved.clear()
         self._labels.clear()
+        return live
+
+    def _on_discontinuity(self) -> None:
+        """Rebuild all long-lived state after a scene cut."""
+        live = self._rebuild()
         self.stats.discontinuities += 1
         log.info("scene discontinuity: completed %d in-view vehicle(s), state rebuilt", live)
+
+    def _pause_analysis(self) -> None:
+        """Stop analysing, with the stream left open.
+
+        To the tracker this is a scene cut: the frames skipped meanwhile are
+        never seen, so a vehicle in view now cannot be followed across the gap.
+        It is completed on the evidence it has, and analysis resumes clean.
+        """
+        live = len(self._live)
+        self._retire_all()
+        if self._batch_had_boxes:
+            # Absence from a batch is how a consumer learns a box has gone,
+            # and only a batch that arrives can say so; this camera is about
+            # to go quiet. Sent before the epoch renews: it belongs to the
+            # run that is ending.
+            self._last_batch_s = 0.0
+            self._emit_track_batch(_Instant(wall_time=datetime.now(UTC)))
+        self._rebuild()
+        log.info(
+            "analysis paused, stream kept open (%d in-view vehicle(s) completed)", live
+        )
 
     def _observe(self, detection: Detection, frame_index: int) -> _LiveTrack | None:
         track_id = detection.track_id
@@ -723,6 +771,16 @@ class StreamRunner:
             stream["events_completed"], 100.0 * reader["drop_rate"],
             reader["frames_decoded"], stream["latency_ms"]["median"],
         )
+
+
+@dataclass(frozen=True, slots=True)
+class _Instant:
+    """The fields of a captured frame a batch needs, for a batch sent between
+    frames — the last word of a camera whose analysis is pausing."""
+
+    wall_time: datetime
+    age_ms: float = 0.0
+    source_t_s: float = 0.0
 
 
 class _NullRunDir:

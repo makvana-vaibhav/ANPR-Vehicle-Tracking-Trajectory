@@ -1,5 +1,10 @@
 """Deciding which cameras get the inference slots, and for how long.
 
+A slot is inference, not a stream. Every camera the worker owns keeps its
+stream open whether or not it holds a slot (see `AiWorker._reconcile`): the
+organisers' grid answers streams opened and closed every few minutes by
+refusing our login, so what rotates is which open streams are analysed.
+
 ## The problem this solves
 
 A worker can analyse roughly as many cameras at once as it has cores to spare —

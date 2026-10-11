@@ -22,6 +22,11 @@ host is paused as a whole. When the pause ends, exactly one camera asks; if it
 opens, every camera on the host resumes, and if it is refused again the pause
 doubles. Thirty cameras become one question every few minutes.
 
+A host this worker has not yet opened a stream on is treated the same way as
+one coming out of a pause: one camera goes first, and the rest follow once it
+is in. A worker starting against a grid that is refusing it therefore spends
+one login finding out, not a dozen.
+
 Pure, like `Rotation`: no threads, no I/O, no clock of its own. The worker
 calls it from its event loop, so it needs no lock.
 """
@@ -62,22 +67,25 @@ class Backoff:
     #: Hosts paused after a rejection, and until when. Past that time a host
     #: stays listed — half-open — until one of its cameras gets through.
     host_paused_until: dict[str, float] = field(default_factory=dict)
-    #: The one camera currently allowed to ask a half-open host.
+    #: The one camera currently allowed to ask a host that is not proven.
     probe: dict[str, str] = field(default_factory=dict)
+    #: Hosts that have let us in since they last refused us. Any other host —
+    #: never tried, or out of a pause — is asked by one camera at a time.
+    proven: set[str] = field(default_factory=set)
 
     def admit(self, code: str, host: str, now: float) -> bool:
         """Whether `code` may be opened now.
 
-        On a half-open host this also makes `code` the probe, so call it only
-        for a camera that will be started if it is admitted.
+        On a host that is not proven this also makes `code` the probe, so call
+        it only for a camera that will be started if it is admitted.
         """
         if now < self.not_before.get(code, 0.0):
             return False
         paused_until = self.host_paused_until.get(host)
-        if paused_until is None:
-            return True
-        if now < paused_until:
+        if paused_until is not None and now < paused_until:
             return False
+        if host in self.proven:
+            return True
         holder = self.probe.get(host)
         if holder is not None and holder != code:
             return False
@@ -92,6 +100,7 @@ class Backoff:
             log.info("%s accepted us again; resuming its cameras", host)
         self.host_streak.pop(host, None)
         self.probe.pop(host, None)
+        self.proven.add(host)
 
     def failed(self, code: str, host: str, reason: str, now: float) -> float:
         """Record a failed open. Returns how long before it is tried again."""
@@ -100,6 +109,7 @@ class Backoff:
             del self.probe[host]
 
         if reason in ACCOUNT_REASONS:
+            self.proven.discard(host)
             if host in self.host_paused_until and not was_probe:
                 # A camera started before the pause began, answering late.
                 # Same incident: escalating on it would double the pause for

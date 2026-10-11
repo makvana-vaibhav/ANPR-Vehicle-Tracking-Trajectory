@@ -980,8 +980,17 @@ class TestNagarNetraIntegrationRules:
                 return None
 
         monkeypatch.setattr(reader_module.cv2, "VideoCapture", Refused)
+        monkeypatch.delenv("AILAB_DECODE_THREADS", raising=False)
         assert StreamReader("rtsp://u:p@grid:8554/stream/cam01")._open() is False
-        assert calls == [("rtsp://u:p@grid:8554/stream/cam01", cv2.CAP_FFMPEG)]
+        assert calls == [
+            (
+                "rtsp://u:p@grid:8554/stream/cam01",
+                cv2.CAP_FFMPEG,
+                # One decoder thread per stream: OpenCV's default is one per
+                # core, which costs memory and latency and buys no frame rate.
+                [cv2.CAP_PROP_N_THREADS, 1],
+            )
+        ]
 
 
 @pytest.fixture
@@ -1163,6 +1172,102 @@ class TestASupervisorCanStopARun:
         assert report["stream"]["frames_processed"] == 3
         assert closed, "the capture was not closed"
         assert opened_after == [0], "on_open must fire once, before the first frame"
+
+
+class TestAnalysisPausesWithTheStreamOpen:
+    """`analyse` is a camera's inference slot.
+
+    Sharing a few slots among many cameras used to mean closing one camera's
+    stream and opening the next. The organisers' grid answered that churn by
+    refusing our login, twice, so the slot now moves and the streams stay up.
+    """
+
+    def test_frames_are_analysed_only_while_the_slot_is_held(
+        self, short_clip: Path, monkeypatch
+    ) -> None:
+        closed: list[bool] = []
+        original_stop = StreamReader.stop
+
+        def recording_stop(reader: StreamReader) -> None:
+            closed.append(True)
+            original_stop(reader)
+
+        monkeypatch.setattr(StreamReader, "stop", recording_stop)
+
+        class _RunnablePipeline(_StubPipeline):
+            _tracker = None
+
+        runner = StreamRunner(
+            RunConfig(),
+            SourceIdentity(camera_id="CAM-DEMO-01"),
+            EventSink(),
+            pipeline=_RunnablePipeline(),  # type: ignore[arg-type]
+        )
+        processed: list[int] = []
+        pauses: list[bool] = []
+        original_pause = runner._pause_analysis
+
+        def record_pause() -> None:
+            pauses.append(True)
+            original_pause()
+
+        monkeypatch.setattr(runner, "_process", lambda _c, i: processed.append(i))
+        monkeypatch.setattr(runner, "_pause_analysis", record_pause)
+        opened, analyse, stop = threading.Event(), threading.Event(), threading.Event()
+        thread = threading.Thread(
+            target=runner.run,
+            args=(str(short_clip),),
+            kwargs={"realtime": True, "stop": stop, "on_open": opened.set,
+                    "analyse": analyse},
+        )
+        thread.start()
+        try:
+            assert opened.wait(5.0)
+            time.sleep(0.3)
+            assert processed == [], "analysed without a slot"
+
+            analyse.set()
+            deadline = time.monotonic() + 3.0
+            while len(processed) < 3 and time.monotonic() < deadline:
+                time.sleep(0.02)
+            assert len(processed) >= 3, "did not analyse once given a slot"
+
+            analyse.clear()
+            time.sleep(0.4)
+            held = len(processed)
+            time.sleep(0.4)
+            assert len(processed) == held, "went on analysing after the slot was taken"
+            assert pauses == [True], "the tracker was not reset across the gap"
+            assert not closed, "taking the slot away closed the stream"
+        finally:
+            stop.set()
+            thread.join(5.0)
+        assert closed, "the stream was not closed when the run was stopped"
+
+    def test_a_pause_clears_the_screen_and_completes_what_was_in_view(self) -> None:
+        events: list[dict] = []
+        runner = _runner(EventSink(on_event=events.append))
+        _live_track(runner, 7, read="GJ03AB1234")
+        runner._emit_track_batch(_capture())
+        before = runner._epoch
+
+        runner._pause_analysis()
+
+        completed = [e for e in events if e["event"] == "vehicle.completed"]
+        batches = [e for e in events if e["event"] == "camera.tracks"]
+        assert completed and completed[0]["run_id"] == before
+        # The camera says it is empty, as the run that is ending: otherwise the
+        # last box outlives the pause on every screen showing this camera.
+        assert batches[-1]["tracks"] == [] and batches[-1]["run_id"] == before
+        assert runner._epoch != before and runner._live == {}
+
+    def test_a_pause_with_nothing_on_screen_says_nothing(self) -> None:
+        events: list[dict] = []
+        runner = _runner(EventSink(on_event=events.append))
+
+        runner._pause_analysis()
+
+        assert events == []
 
 
 class TestBoxesCarryTheirCoordinateSpace:

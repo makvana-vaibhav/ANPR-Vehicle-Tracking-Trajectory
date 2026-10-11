@@ -51,6 +51,7 @@ from urllib.parse import unquote, urlparse, urlunparse
 import cv2
 import numpy as np
 
+from ailab import runtime
 from ailab.logging import get_logger
 
 log = get_logger(__name__)
@@ -365,7 +366,11 @@ class StreamReader:
         # FFmpeg refuses, and the image-sequence one rejects the URL with an
         # error that quotes it whole — credentials included — on stderr, which
         # is the container log. It was doing that on every failed grid open.
-        capture = cv2.VideoCapture(self.source, cv2.CAP_FFMPEG)
+        capture = cv2.VideoCapture(
+            self.source,
+            cv2.CAP_FFMPEG,
+            [cv2.CAP_PROP_N_THREADS, runtime.decode_threads()],
+        )
         if not capture.isOpened():
             capture.release()
             return False

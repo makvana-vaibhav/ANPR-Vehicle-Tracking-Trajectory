@@ -2,8 +2,8 @@
 
 Each camera gets its own thread running the lab's StreamRunner, which reads
 RTSP, tracks vehicles, reads plates and emits events. The supervisor's job is
-narrow and unglamorous: keep the right set of cameras running, restart the ones
-that die, and stop cleanly.
+narrow and unglamorous: keep a stream open for every camera it owns, give the
+inference slots to them in turn, restart the ones that die, and stop cleanly.
 
 Restarting matters more than it sounds. A CCTV stream drops — the encoder
 reboots, the network blips, a technician unplugs something — and a worker that
@@ -66,10 +66,9 @@ class CameraTask:
     started_at: float = field(default_factory=time.perf_counter)
     restarts: int = 0
     last_report: dict[str, Any] = field(default_factory=dict)
-    #: True when the loop ended because its time slice ran out rather than
-    #: because the stream failed. The supervisor treats the two differently:
-    #: one is normal rotation, the other is worth a warning and a backoff.
-    completed_slice: bool = False
+    #: Set while this camera holds an inference slot. Clear, its stream stays
+    #: open and decoding but nothing is analysed. See `Rotation`.
+    analyse: threading.Event = field(default_factory=threading.Event)
     #: True when the stream could not be opened at all. Distinguishes "the far
     #: end is down" from "our inference loop broke", which are different
     #: problems with different owners.
@@ -112,7 +111,12 @@ class AiWorker:
         self.sink = RedisEventSink(
             settings.redis_url, settings.event_stream_key, settings.event_stream_maxlen
         )
+        #: Every camera this worker owns. Each gets a stream, kept open.
+        self._assigned: dict[str, CameraStream] = {}
+        #: Open (or opening) streams, by camera.
         self.tasks: dict[str, CameraTask] = {}
+        #: Which open streams are analysed now. Inference slots are what the
+        #: rotation shares out; the streams themselves are never cycled.
         self.rotation = Rotation(
             slots=settings.ai_worker_max_cameras,
             slice_seconds=settings.ai_worker_slice_seconds,
@@ -221,15 +225,21 @@ class AiWorker:
         )
 
     async def _reconcile(self) -> None:
-        """Make the running set match the set that should be running now."""
-        self.rotation.update_assignment(await self._discover())
-        assigned = self.rotation.assigned
-        self._backoff.retain(frozenset(assigned))
+        """Open a stream for every assigned camera, then share out the analysis.
+
+        The two are separate on purpose. Streams are opened once and kept open,
+        because the organisers' grid answers a camera opened and closed every
+        few minutes by refusing our login — it did, twice, for about fifteen
+        minutes each time. Inference slots are what rotates: a camera's stream
+        stays up while it waits, so its turn costs the far end nothing.
+        """
+        self._assigned = {s.camera_code: s for s in await self._discover()}
+        self._backoff.retain(frozenset(self._assigned))
         now = time.monotonic()
 
         # Cameras that left the fleet, or moved to another worker.
         for code in list(self.tasks):
-            if code not in assigned:
+            if code not in self._assigned:
                 log.info("camera %s no longer assigned; stopping", code)
                 self._stop(code)
 
@@ -240,60 +250,49 @@ class AiWorker:
                 task.open_seen = True
                 self._backoff.opened(code, host_of(task.stream.rtsp_url))
 
-        # Threads that ended — the slice expired, the stream closed, or it
-        # errored. Either way the slot is free and goes back to the rotation
-        # rather than straight back to the same camera, which is what lets a
-        # fleet larger than the slot count get swept.
+        # Threads that ended: the stream would not open, or the loop died.
         for code, task in list(self.tasks.items()):
-            if not task.alive:
-                ran_for = time.perf_counter() - task.started_at
-                host = host_of(task.stream.rtsp_url)
-                if task.completed_slice:
-                    log.info(
-                        "%s finished its %.0fs slice; yielding the slot", code, ran_for
-                    )
-                elif task.unreachable:
-                    # Already logged as a warning by the loop itself. The slot
-                    # goes straight back to the rotation, so an unreachable
-                    # camera costs the fleet a connect attempt, not a slice —
-                    # and the backoff decides when it costs the far end one.
-                    paused_before = self._backoff.host_paused_until.get(host)
-                    delay = self._backoff.failed(code, host, task.reason, now)
-                    if task.reason not in ACCOUNT_REASONS:
-                        log.info("%s will be asked again in %.0fs", code, delay)
-                    elif self._backoff.host_paused_until.get(host) != paused_before:
-                        log.warning(
-                            "%s refused our login; no camera on %s will be opened "
-                            "for %.0fs, then one will ask again",
-                            code,
-                            host,
-                            delay,
-                        )
-                else:
-                    delay = self._backoff.failed(code, host, "exited", now)
+            if task.alive:
+                continue
+            ran_for = time.perf_counter() - task.started_at
+            host = host_of(task.stream.rtsp_url)
+            if task.unreachable:
+                # Already logged as a warning by the loop itself; the backoff
+                # decides when it costs the far end another attempt.
+                paused_before = self._backoff.host_paused_until.get(host)
+                delay = self._backoff.failed(code, host, task.reason, now)
+                if task.reason not in ACCOUNT_REASONS:
+                    log.info("%s will be asked again in %.0fs", code, delay)
+                elif self._backoff.host_paused_until.get(host) != paused_before:
                     log.warning(
-                        "inference loop for %s exited after %.0fs; restarting in %.0fs",
+                        "%s refused our login; no camera on %s will be opened "
+                        "for %.0fs, then one will ask again",
                         code,
-                        ran_for,
+                        host,
                         delay,
                     )
-                self._stop(code)
-
-        # Cameras whose slice is up and which somebody is waiting behind.
-        for code in self.rotation.expired():
-            log.info("rotating %s out; its slice is up and cameras are waiting", code)
+            else:
+                delay = self._backoff.failed(code, host, "exited", now)
+                log.warning(
+                    "stream for %s ended after %.0fs; reopening in %.0fs",
+                    code,
+                    ran_for,
+                    delay,
+                )
             self._stop(code)
 
-        starts = self.rotation.next_up(
-            admit=lambda s: self._backoff.admit(
-                s.camera_code, host_of(s.rtsp_url), now
-            )
+        # Open what is not open, pinned cameras first, one at a time: a worker
+        # opening a dozen grid streams in the same instant is a burst to the
+        # far end, which is what a per-account limiter is there to stop.
+        unopened = sorted(
+            (s for code, s in self._assigned.items() if code not in self.tasks),
+            key=lambda s: (s.camera_code not in self.rotation.pinned, s.camera_code),
         )
-        for i, stream in enumerate(starts):
-            # One at a time. A worker that opens a dozen grid streams in the
-            # same instant looks like a burst to the far end, and is exactly
-            # what a per-account connection limiter is there to stop.
-            if i and self.settings.start_stagger_s > 0:
+        opened_now = 0
+        for stream in unopened:
+            if not self._backoff.admit(stream.camera_code, host_of(stream.rtsp_url), now):
+                continue
+            if opened_now and self.settings.start_stagger_s > 0:
                 try:
                     await asyncio.wait_for(
                         self._shutdown.wait(), timeout=self.settings.start_stagger_s
@@ -302,12 +301,42 @@ class AiWorker:
                 except TimeoutError:
                     pass
             self._start(stream, 0)
+            opened_now += 1
+
+        # Share the inference slots among the streams that are actually up.
+        self.rotation.update_assignment(
+            [t.stream for t in self.tasks.values() if t.opened and t.alive]
+        )
+        for code in self.rotation.expired():
+            self._pause(code)
+        for stream in self.rotation.next_up():
+            self._analyse(stream.camera_code)
 
         self._log_coverage()
 
+    def _analyse(self, code: str) -> None:
+        task = self.tasks.get(code)
+        if task is None:
+            return
+        self.rotation.take_slot(code)
+        task.analyse.set()
+        turn = self.rotation.slice_for(code)
+        log.info(
+            "analysing %s %s",
+            code,
+            f"for {turn:.0f}s" if turn else "continuously",
+        )
+
+    def _pause(self, code: str) -> None:
+        self.rotation.release_slot(code)
+        task = self.tasks.get(code)
+        if task is not None:
+            task.analyse.clear()
+        log.info("pausing analysis of %s; its turn is up and cameras are waiting", code)
+
     def _log_coverage(self) -> None:
         """Say what is running and, honestly, what is not."""
-        total = len(self.rotation.assigned)
+        total = len(self._assigned)
         if not total:
             log.info(
                 "no cameras assigned — the roster is empty for this shard. "
@@ -315,12 +344,13 @@ class AiWorker:
             )
             return
 
+        open_streams = sum(1 for t in self.tasks.values() if t.opened and t.alive)
         sweep = self.rotation.sweep_seconds
         coverage = (
-            f"; {total} cameras across {self.rotation.slots} slots, "
-            f"each watched {self.rotation.slice_seconds:.0f}s every {sweep / 60:.1f} min"
+            f"; {open_streams} streams open, {self.rotation.slots} analysed at a time, "
+            f"each for {self.rotation.slice_seconds:.0f}s every {sweep / 60:.1f} min"
             if sweep > 0
-            else "; every assigned camera runs continuously"
+            else f"; {open_streams} streams open, every one analysed continuously"
         )
         now = time.monotonic()
         for host, left in self._backoff.paused_hosts(now).items():
@@ -334,41 +364,39 @@ class AiWorker:
             coverage += f"; {waiting} camera(s) backing off"
         pool = self._pipelines.stats()
         log.info(
-            "watching %d/%d camera(s): %s · %d events published%s · models built %d, "
-            "reused %d",
-            len(self.tasks),
+            "analysing %d of %d camera(s): %s · %d events published%s · "
+            "pipelines built %d, reused %d",
+            len(self.rotation.started_at),
             total,
-            ", ".join(sorted(self.tasks)),
+            ", ".join(sorted(self.rotation.started_at)),
             self.sink.written,
             coverage,
-            # `built` should settle at the slot count and stop rising. If it
-            # keeps climbing, pipelines are not being returned and the worker
-            # is back to leaking a thread pool per rotation.
+            # One pipeline per open stream; `built` should settle there and
+            # stop rising. If it keeps climbing, pipelines are not being
+            # returned when a stream ends.
             pool["built"],
             pool["reused"],
         )
 
     # ─────────────────────────────────────────────────────────────────
     def _start(self, stream: CameraStream, restarts: int) -> None:
-        stop = threading.Event()
-        slice_seconds = self.rotation.slice_for(stream.camera_code)
+        """Open a camera's stream. It analyses nothing until given a slot."""
+        stop, analyse = threading.Event(), threading.Event()
         thread = threading.Thread(
             target=self._process,
-            args=(stream, stop, slice_seconds),
+            args=(stream, stop, analyse),
             name=f"cam-{stream.camera_code}",
             daemon=True,
         )
         self.tasks[stream.camera_code] = CameraTask(
-            stream=stream, thread=thread, stop=stop, restarts=restarts
+            stream=stream, thread=thread, stop=stop, analyse=analyse, restarts=restarts
         )
-        self.rotation.take_slot(stream.camera_code)
         thread.start()
         log.info(
-            "processing %s [%s] over %s for %s — %s",
+            "opening %s [%s] over %s — %s",
             stream.camera_code,
             stream.label or "unnamed",
             stream.transport,
-            f"{slice_seconds:.0f}s" if slice_seconds else "as long as it runs",
             # Redacted: RTSP credentials travel in the URL, and this line goes
             # to stdout, the container log, and wherever those are shipped.
             redact(stream.rtsp_url),
@@ -388,9 +416,9 @@ class AiWorker:
         return config
 
     def _process(
-        self, stream: CameraStream, stop: threading.Event, slice_seconds: float | None
+        self, stream: CameraStream, stop: threading.Event, analyse: threading.Event
     ) -> None:
-        """One camera's inference loop. Runs on its own thread."""
+        """One camera's stream, analysed while `analyse` is set. Its own thread."""
         source = SourceIdentity(camera_id=stream.camera_code, name=stream.camera_code)
         config = self._config_for(stream)
         # Borrowed, not built. Constructing a Pipeline here loads five ONNX
@@ -412,20 +440,18 @@ class AiWorker:
         try:
             # realtime=True: a live source sets the pace, and falling behind is
             # handled by dropping frames rather than by queueing them. `stop`
-            # is what makes _stop() actually close the capture.
+            # is what makes _stop() actually close the capture; `analyse` is
+            # this camera's inference slot, given and taken by the rotation.
             report = runner.run(
                 stream.rtsp_url,
-                max_seconds=slice_seconds,
                 realtime=True,
                 stop=stop,
                 on_open=mark_open,
+                analyse=analyse,
             )
             task = self._own_task(stream.camera_code, stop)
             if task is not None:
                 task.last_report = report
-                # Returning without an exception, having been given a deadline,
-                # means the deadline is what ended it.
-                task.completed_slice = slice_seconds is not None
         except StreamUnavailable as exc:
             # Expected for a federated camera whose gateway is down. It is one
             # camera's status, not a fault in this worker, so it gets a line
@@ -499,8 +525,9 @@ class AiWorker:
     def status(self) -> dict[str, Any]:
         return {
             "worker": f"{self.settings.ai_worker_index}/{self.settings.ai_worker_count}",
-            "cameras": sorted(self.tasks),
-            "assigned": sorted(self.rotation.assigned),
+            "assigned": sorted(self._assigned),
+            "streams_open": sorted(c for c, t in self.tasks.items() if t.opened and t.alive),
+            "analysing": sorted(self.rotation.started_at),
             "slots": self.rotation.slots,
             # How long before every assigned camera has had a turn. The number
             # an operator needs to answer "could we have missed a vehicle?".

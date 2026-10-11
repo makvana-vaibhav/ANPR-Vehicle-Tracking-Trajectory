@@ -391,17 +391,25 @@ services:
       SANDBOX_RTSP_PASSWORD: ${SANDBOX_RTSP_PASSWORD:-}
       AI_WORKER_INDEX: "0"
       AI_WORKER_COUNT: ${AI_WORKER_COUNT:-1}
-      # Concurrent inference slots. Cameras beyond this are rotated through
-      # the slots, not dropped.
+      # Inference slots: how many of this worker's cameras are analysed at
+      # once. Every camera it owns keeps its stream open whatever this is —
+      # the organisers' grid refuses our login when streams are opened and
+      # closed every few minutes — and the slots rotate among the open ones.
       #
-      # Slots no longer cost CPU: they divide the budget above rather than
-      # each claiming the machine. They used to cost ~1.4 GB of memory each,
-      # because every slot loaded its own five models, which capped a worker
-      # at four cameras. The models are now loaded once per process and
-      # shared (ailab.pipeline._shared), so a slot costs its tracker and a
-      # frame buffer, and twelve cover a third of the organisers' grid with
-      # nothing waiting to rotate in. See docs/PERFORMANCE.md.
-      AI_WORKER_MAX_CAMERAS: ${AI_WORKER_MAX_CAMERAS:-12}
+      # Each slot is about one core, because a camera thread analyses frames
+      # as fast as it can, and every open stream costs about a fifth of a core
+      # to decode whether or not it is analysed. Measured on the 10-core M5
+      # with the organisers' 1080p streams, at night:
+      #   all 31 open, all analysed   ~10 cores, 0.3-1.2 fps per camera,
+      #                               89-95% of frames dropped, 2 per vehicle
+      #   all 31 open, 2 per worker   ~10 cores (six analysed, ~6 decoding)
+      #   6 open, 2 per worker        ~6 cores, ~2.2 fps per camera
+      # So on this laptop the number of open streams matters as much as the
+      # slots; narrow a worker with AI_WORKER_CAMERAS_1/2/3 to hold fewer.
+      # Memory is no longer the limit: models are shared
+      # (ailab.pipeline._shared) and each stream decodes on one thread
+      # (ailab.runtime.decode_threads), ~3 GB for all 31 streams.
+      AI_WORKER_MAX_CAMERAS: ${AI_WORKER_MAX_CAMERAS:-2}
       # How long a camera holds a slot before yielding to one that is waiting.
       AI_WORKER_SLICE_SECONDS: ${AI_WORKER_SLICE_SECONDS:-45}
       # The recorded fallback camera never yields its slot: when the grid

@@ -173,6 +173,21 @@ def apply_opencv_threads() -> int:
     return threads
 
 
+def decode_threads() -> int:
+    """Threads FFmpeg may use to decode one stream. One, unless overridden.
+
+    OpenCV's default is one per core, per stream, which buys nothing here: a
+    camera delivers at most 25 frames a second and one core decodes far faster
+    than that. What it does cost is memory, because frame-threaded decoding
+    keeps a frame in flight per thread, and latency, for the same reason.
+    Measured on six copies of a 720p stream: auto 540 MB and 64 threads, one
+    thread 141 MB and 4 threads, at the same frame rate and the same CPU. With
+    every grid camera's stream held open, that difference is gigabytes.
+    """
+    override = os.environ.get("AILAB_DECODE_THREADS", "")
+    return int(override) if override.isdigit() and int(override) > 0 else 1
+
+
 def describe() -> dict[str, object]:
     """The resolved plan, for logs and run manifests."""
     return {
@@ -181,5 +196,6 @@ def describe() -> dict[str, object]:
         "pipelines": concurrency(),
         "threads_per_model": threads_per_model(),
         "opencv_threads": opencv_threads(),
+        "decode_threads": decode_threads(),
         "reserved": RESERVED_THREADS,
     }
