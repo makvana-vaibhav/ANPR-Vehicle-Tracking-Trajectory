@@ -453,13 +453,19 @@ class AiWorker:
             return
 
         open_streams = sum(1 for t in self.tasks.values() if t.opened and t.alive)
+        # Open but not in the rotation: watched a while ago, kept open so that
+        # clicking back costs the grid no new session, and not analysed.
+        lingering = open_streams - len(self.rotation.assigned)
         sweep = self.rotation.sweep_seconds
         coverage = (
             f"; {open_streams} streams open, {self.rotation.slots} analysed at a time, "
             f"each for {self.rotation.slice_seconds:.0f}s every {sweep / 60:.1f} min"
             if sweep > 0
-            else f"; {open_streams} streams open, every one analysed continuously"
+            else f"; {open_streams} streams open, "
+            f"{len(self.rotation.assigned)} analysed continuously"
         )
+        if lingering > 0:
+            coverage += f", {lingering} kept open unanalysed since leaving the screen"
         if self._focus:
             coverage += f"; on screen: {', '.join(sorted(self._focus))}"
         now = time.monotonic()
