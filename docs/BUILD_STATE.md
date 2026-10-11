@@ -981,6 +981,60 @@ console errors.
 
 ---
 
+## The grid refuses churn, and one laptop cannot decode it all ✅
+
+11 Oct, branch `sentinel-gj`, for the Sentinel live test on the organisers' grid.
+
+**The refusals.** Three times that evening the grid answered every RTSP login with
+401 for between two and fifteen minutes while the portal accepted the same account.
+Each followed a restart of the workers; the third followed just two logins. Our
+side cannot see what the grid counts — ask the organisers before relying on any
+theory. What made it worse is known: the worker re-opened every refused camera on
+every 20 s pass plus a second connection to diagnose it, over a hundred failed
+logins a minute from one address.
+
+- [x] `ai_worker/backoff.py` — a refused login pauses the whole host (120 s
+      doubling to 15 min) and one camera probes when the pause ends; a host not
+      yet proven is asked by one camera first; other failures back off per
+      camera, 2 s doubling to 30 s
+- [x] `diagnose()` answers the login challenge (Digest when offered), so
+      "unauthorized" means the credentials were refused and nothing else
+- [x] `StreamRunner.run(stop=…)` — stopping a camera closes its capture; before,
+      the thread kept the session open until the process died. Shutdown 36 s →
+      4 s, exit 137 → 0
+- [x] Captures open with FFmpeg only: OpenCV's image-sequence fallback printed
+      the credentialed URL into the container log on every failed open
+
+**The CPU.** Measured on the 10-core M5 with the grid's 1080p streams, at night:
+
+| Setup | Worker CPU | Per camera | Grid plates/min |
+|---|---|---|---|
+| all 31 open, all analysed | ~10 cores | 0.3–1.2 fps, 2 frames per vehicle | 0.3 |
+| all 31 open, 6 analysed | ~10 cores | decode alone ≈ 0.2 core per open stream | — |
+| 4 always on + the camera on screen | **4.4–5.6 cores** | 5–6 frames per vehicle | **2.1–2.8** |
+
+- [x] Analysis rotates, streams do not: `StreamRunner.run(analyse=…)` pauses
+      inference with the stream left open (a scene cut to the tracker, and one
+      empty box batch so no overlay keeps a box)
+- [x] `AI_WORKER_ALWAYS_ON` — the short list kept open and analysed; here
+      CAM-DEMO-01, SBX-cam10, SBX-cam21, SBX-cam22 (the three grid cameras that
+      read most plates that night), set in the local `.env`
+- [x] Focus — Live ANPR heartbeats the camera on screen (`useCameraFocus` →
+      `POST /cameras/{id}/focus` → `app/services/focus.py`); its worker opens it
+      if need be and analyses it first. Measured on SBX-cam18: analysing 3 s
+      after opening, paused 45 s after leaving the screen, stream closed 5 min
+      after that. Not audited per beat; opening the stream already is
+- [x] One decoder thread per stream (`ailab.runtime.decode_threads`): 541 → 141
+      MB and 64 → 4 threads on six streams at the same frame rate; all worker
+      memory with 31 streams open ~6 → ~3 GB
+
+**Open:** the grid's limit itself; night and blur handling on the grid's cameras
+(at 22:00, 8 of 149 grid vehicles completed in four minutes yielded a plate);
+why one analysed 1080p frame costs ~0.4 core-seconds with a nano detector —
+profile it before adding cameras. Runbook: `docs/PANIC.md` §2a.
+
+---
+
 ## Phase 10 — Scale profile & the 80,000-camera proof ✅
 
 - [x] `docker-compose.scale.yml` — API stops ingesting (`INGEST_ENABLED=false`),
