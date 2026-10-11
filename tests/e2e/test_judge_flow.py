@@ -200,6 +200,12 @@ class TestMomentThree:
             if entry["plate_normalised"] == plate:
                 await client.delete(f"/api/v1/watchlist/{entry['id']}", headers=admin)
 
+        # Only an alert raised after this moment can be the one under test. A
+        # plate the pipeline keeps reading also collects trajectory-anomaly
+        # alerts at their own priorities (medium for a slow leg, high for an
+        # impossible hop), and taking "the newest alert for this plate" read
+        # one of those as a mis-prioritised watchlist hit, twice.
+        started = datetime.now(UTC) - timedelta(seconds=5)
         created = await client.post(
             "/api/v1/watchlist",
             headers=admin,
@@ -218,13 +224,21 @@ class TestMomentThree:
             while time.monotonic() < deadline:
                 alerts = (
                     await client.get(
-                        f"/api/v1/alerts?plate={plate}&limit=1", headers=admin
+                        f"/api/v1/alerts?plate={plate}&limit=50", headers=admin
                     )
                 ).json()
-                if alerts["total"] > 0:
-                    alert = alerts["items"][0]
-                    assert alert["priority"] == "critical"
-                    assert alert["alert_type"] == "watchlist_hit"
+                hit = next(
+                    (
+                        a
+                        for a in alerts["items"]
+                        if a["alert_type"] == "watchlist_hit"
+                        and datetime.fromisoformat(a["created_at"].replace("Z", "+00:00"))
+                        >= started
+                    ),
+                    None,
+                )
+                if hit is not None:
+                    assert hit["priority"] == "critical"
                     return
                 time.sleep(5)
             pytest.fail(f"{plate} was watchlisted but raised no alert within 180 s")
