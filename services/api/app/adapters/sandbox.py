@@ -328,8 +328,11 @@ def _camera_name(item: dict[str, Any], external_id: str) -> str:
         # Harmless, but the camera code already carries the id.
         cleaned = location.lstrip("0123456789 -_.").strip()
         return cleaned or location
+    # Since October the catalogue carries only id and name, and the name holds
+    # what location used to ("06 Timbavadi gate-Junagadh"), index and all.
     name = str(pick(item, "name") or "").strip()
-    return name or f"Sandbox camera {external_id}"
+    cleaned = name.lstrip("0123456789 -_.").strip() if name[:1].isdigit() else name
+    return cleaned or name or f"Sandbox camera {external_id}"
 
 
 def _extract_resolution(item: dict[str, Any]) -> str | None:

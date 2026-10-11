@@ -108,13 +108,24 @@ else
     fail "only ${FLEET:-0} cameras — did the seed load data/seed/cameras.csv?"
 fi
 
-# The organisers' grid from the previous brief. Opt-in, because its host is not
-# reachable and SANDBOX_BASE_URL is unset by default: running it unconditionally
-# spent time and printed a warning on every single demo for no benefit.
-if [ -n "${SANDBOX_BASE_URL:-}" ]; then
-    docker compose exec -T api python /app/scripts/sync_sandbox.py 2>/dev/null \
-        | grep -E "created|updated|unchanged" | sed 's/^/  /' \
-        || warn "grid sync did not report"
+# The organisers' camera grid: the government feeds the live test is scored
+# on. On by default. SANDBOX_SYNC=0 skips it, for a demo with no network that
+# runs on the recorded camera alone.
+#
+# This used to be opt-in and, when opted in, passed no --base-url to a script
+# that required one, so it failed silently on every run and the grid was never
+# onboarded by `make demo` at all.
+step "The organisers' camera grid"
+if [ "${SANDBOX_SYNC:-1}" = "0" ]; then
+    warn "skipped (SANDBOX_SYNC=0) — only the recorded camera will play"
+elif GRID_OUT=$(docker compose exec -T api python /app/scripts/sync_sandbox.py 2>&1); then
+    printf '%s\n' "$GRID_OUT" | grep -E "usable transport|cameras, |created [0-9]|placed from|not identifiable" \
+        | sed 's/^ */  /' || true
+    ok "grid cameras onboarded"
+else
+    printf '%s\n' "$GRID_OUT" | grep -E "could not read|catalogue returned|rejected|reason" | head -3 \
+        | sed 's/^ */  /' || true
+    warn "grid sync failed — cameras already registered keep their last known endpoints"
     docker compose exec -T api python /app/scripts/retarget_grid.py 2>/dev/null \
         | grep -E "grid cameras retargeted" | sed 's/^/  /' || true
 fi

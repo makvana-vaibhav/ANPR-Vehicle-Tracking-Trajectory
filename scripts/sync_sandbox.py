@@ -1,20 +1,19 @@
 #!/usr/bin/env python3
-"""Onboard the hosted grid camera grid into the registry.
+"""Onboard the organisers' camera grid into the registry.
 
-Reads the organisers' catalogue at ``GET <base>/api/ingest`` and creates or
-updates one camera row per entry, carrying the coordinates the catalogue
-publishes. That is the answer to "how do I know where a camera is": we do not
-guess it, and we do not invent it — the catalogue is the source of truth, and
-cameras without coordinates are recorded as such rather than dropped onto the
-map somewhere plausible.
+Reads the organisers' catalogue (``/cameras.json``, formerly ``/api/ingest``)
+and creates or updates one camera row per entry. That is the answer to "how do
+I know where a camera is": we do not guess it, and we do not invent it. The
+catalogue is the source of truth; where it names a town we place the camera at
+that town and say so, and cameras we cannot place are recorded as such rather
+than dropped onto the map somewhere plausible.
 
 The integration guide is explicit that "camera ids and the set of available
 cameras can change", so this is a re-sync rather than a one-off import: run it
 again and it reconciles.
 
-    python scripts/sync_sandbox.py --base-url https://<sandbox-host>
-
-Nothing here is specific to a host; supply the one the organisers give you.
+    python scripts/sync_sandbox.py              # host from SANDBOX_BASE_URL
+    python scripts/sync_sandbox.py --dry-run    # read and report, write nothing
 """
 
 from __future__ import annotations
@@ -29,16 +28,26 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "services" / "ap
 from sqlalchemy import select  # noqa: E402
 
 from app.adapters.base import AdapterError  # noqa: E402
-from app.adapters.sandbox import HostedGridAdapter  # noqa: E402
+from app.adapters.sandbox import (  # noqa: E402
+    DEFAULT_MEDIA_HOST,
+    RTSP_PORT,
+    HostedGridAdapter,
+)
+from app.core.config import settings  # noqa: E402
 from app.db.session import SessionLocal  # noqa: E402
-from app.models.enums import CameraStatus, CameraType, Protocol  # noqa: E402
-from app.models.registry import Camera, VmsInstance  # noqa: E402
+from app.models.enums import CameraStatus, CameraType, Protocol, VmsVendor  # noqa: E402
+from app.models.registry import Camera, Department, VmsInstance  # noqa: E402
+from app.services import grid_session  # noqa: E402
 
 VMS_NAME = "Hosted Camera Grid"
 CODE_PREFIX = "SBX"
-GAZETTEER = (
-    Path(__file__).resolve().parent.parent / "data" / "seed" / "gujarat_places.csv"
-)
+# The seed data is mounted at /data/seed in the containers, not beside the
+# script. Resolving only beside the script found nothing in the API container,
+# so every camera synced from there was left unplaced. Same rule as seed.py.
+SEED_DIR = Path("/data/seed")
+if not SEED_DIR.exists():  # running outside the container
+    SEED_DIR = Path(__file__).resolve().parent.parent / "data" / "seed"
+GAZETTEER = SEED_DIR / "gujarat_places.csv"
 
 #: `cameras.location` is NOT NULL, so a camera we cannot place still needs a
 #: point. It gets the state centroid and the tag `placement:unknown` — the tag
@@ -56,6 +65,74 @@ def load_gazetteer() -> list[dict[str, str]]:
     with GAZETTEER.open(encoding="utf-8") as handle:
         rows = [line for line in handle if not line.startswith("#")]
     return list(csv.DictReader(rows))
+
+
+#: Department codes for words that name the owner outright. A camera called
+#: "Rajkot Bus Port" belongs to GSRTC and one at a gram panchayat to the
+#: Panchayat department; a bare junction name says nothing about who runs it,
+#: so it matches nothing here and stays unattributed rather than guessed.
+OWNER_WORDS: tuple[tuple[str, str], ...] = (
+    ("bus port", "GSRTC"),
+    ("bus stand", "GSRTC"),
+    ("bus station", "GSRTC"),
+    ("depot", "GSRTC"),
+    ("gsrtc", "GSRTC"),
+    ("panchayat", "PANCHAYAT"),
+    ("hospital", "HEALTH"),
+    ("phc", "HEALTH"),
+    ("chc", "HEALTH"),
+    ("rlvd", "POLICE"),
+    ("police", "POLICE"),
+    ("municipal", "MUNICIPAL"),
+    ("corporation", "MUNICIPAL"),
+)
+
+
+def owner_of(item, departments: dict[str, object]) -> tuple[object | None, str]:
+    """The department a grid camera belongs to, and where that answer came from.
+
+    The catalogue wins when it says. Otherwise only a word that names the owner
+    outright counts; anything else is left unattributed and tagged as such.
+    """
+    published = next(
+        (
+            str(item.raw.get(key)).strip()
+            for key in ("department", "dept", "owner", "agency")
+            if item.raw.get(key)
+        ),
+        "",
+    )
+    if published:
+        wanted = published.upper()
+        for code, department_id in departments.items():
+            if code == wanted or wanted.startswith(code):
+                return department_id, "catalogue"
+        return None, "catalogue-unmatched"
+
+    text = f"{item.raw.get('location') or ''} {item.name}".lower()
+    for word, code in OWNER_WORDS:
+        if word in text and code in departments:
+            return departments[code], "name"
+    return None, "none"
+
+
+def location_text(item) -> str:
+    """The grid's own words for where a camera is.
+
+    Its ``location`` field when it publishes one. Since October the catalogue
+    carries only ``id`` and ``name``, and the name holds the same text
+    ("06 Timbavadi gate-Junagadh"), so it is the fallback. Reading ``location``
+    alone placed every camera at the state centroid, off the map.
+    """
+    return str(
+        item.raw.get("location") or item.raw.get("name") or item.name or ""
+    ).strip()
+
+
+def without_index(text: str) -> str:
+    """Drop the grid's own running number ("06 Timbavadi gate" -> "Timbavadi gate")."""
+    cleaned = text.lstrip("0123456789 -_.").strip()
+    return cleaned or text
 
 
 def place(location: str, gazetteer: list[dict[str, str]]) -> dict[str, str] | None:
@@ -80,13 +157,16 @@ async def reachable_transport(base_url: str, cameras: list) -> str:
     registering RTSP URLs that will time out on every camera.
     """
     import asyncio
-    from urllib.parse import urlparse
 
     import httpx
 
-    host = urlparse(base_url).hostname or base_url
+    # RTSP is served from the media host, never the CDN: probing 8554 on the
+    # catalogue's host reports a working grid as unreachable.
+    host = settings.sandbox_media_host or DEFAULT_MEDIA_HOST
     try:
-        _r, w = await asyncio.wait_for(asyncio.open_connection(host, 8554), timeout=8)
+        _r, w = await asyncio.wait_for(
+            asyncio.open_connection(host, RTSP_PORT), timeout=8
+        )
         w.close()
         await w.wait_closed()
         return "rtsp"
@@ -98,8 +178,10 @@ async def reachable_transport(base_url: str, cameras: list) -> str:
         url = sample.raw["_hls"]
         url = url if url.startswith("http") else f"{base_url.rstrip('/')}{url}"
         try:
+            # HLS sits behind the same login as the catalogue.
+            headers = await grid_session.session.headers()
             async with httpx.AsyncClient(timeout=10, follow_redirects=True) as client:
-                response = await client.get(url)
+                response = await client.get(url, headers=headers)
             if response.status_code == 200 and "#EXTM3U" in response.text:
                 return "hls"
         except httpx.HTTPError:
@@ -110,7 +192,7 @@ async def reachable_transport(base_url: str, cameras: list) -> str:
 async def sync(base_url: str, dry_run: bool = False) -> int:
     adapter = HostedGridAdapter(name=VMS_NAME, base_url=base_url)
 
-    print(f"reading catalogue from {base_url.rstrip('/')}/api/ingest ...")
+    print(f"reading catalogue from {base_url.rstrip('/')} ...")
     try:
         discovered = await adapter.list_cameras()
     except AdapterError as exc:
@@ -153,9 +235,9 @@ async def sync(base_url: str, dry_run: bool = False) -> int:
     if dry_run:
         print("\n(dry run — nothing written)")
         for camera in discovered:
-            hit = place(camera.raw.get("location", ""), gazetteer)
+            hit = place(location_text(camera), gazetteer)
             where = f"{hit['place']} ({hit['precision']})" if hit else "UNPLACED"
-            print(f"  {camera.external_id:>4}  {camera.name[:34]:34}  {where:26}")
+            print(f"  {camera.external_id:>5}  {camera.name[:38]:38}  {where:26}")
         return 0
 
     created = updated = skipped = from_gazetteer = 0
@@ -168,7 +250,7 @@ async def sync(base_url: str, dry_run: bool = False) -> int:
         if vms is None:
             vms = VmsInstance(
                 name=VMS_NAME,
-                vendor="nagarnetra",
+                vendor=VmsVendor.HOSTED_GRID.value,
                 adapter_type="hosted_grid",
                 base_url=base_url,
                 # A pointer, never a secret: see CLAUDE.md on credentials_ref.
@@ -180,6 +262,11 @@ async def sync(base_url: str, dry_run: bool = False) -> int:
             print(f"  created VMS instance {vms.id}")
         else:
             vms.base_url = base_url
+
+        departments = {
+            department.code: department.id
+            for department in (await session.scalars(select(Department))).all()
+        }
 
         for item in discovered:
             code = f"{CODE_PREFIX}-{item.external_id.zfill(5)}"
@@ -196,7 +283,7 @@ async def sync(base_url: str, dry_run: bool = False) -> int:
             precision = "exact" if lat is not None else None
             hit_place = None
             if lat is None:
-                hit_place = place(item.raw.get("location", ""), gazetteer)
+                hit_place = place(location_text(item), gazetteer)
                 if hit_place:
                     lat, lon = float(hit_place["lat"]), float(hit_place["lon"])
                     precision = hit_place["precision"]
@@ -215,7 +302,12 @@ async def sync(base_url: str, dry_run: bool = False) -> int:
                 item.stream_url if transport != "hls" else (hls or item.stream_url)
             )
 
-            raw_location = str(item.raw.get("location") or "").strip()
+            raw_location = without_index(location_text(item))
+            department_id, department_source = owner_of(item, departments)
+            if department_id is None and camera is not None and camera.department_id:
+                # Set by an operator after an earlier sync; a catalogue that
+                # says nothing is no reason to undo it.
+                department_id, department_source = camera.department_id, "operator"
             fields = {
                 "camera_code": code,
                 "name": item.name,
@@ -240,6 +332,7 @@ async def sync(base_url: str, dry_run: bool = False) -> int:
                 # the junction name the organisers use.
                 "junction": raw_location[:200] or None,
                 "address": raw_location[:400] or None,
+                "department_id": department_id,
                 "anpr_enabled": True,
             }
             if hit_place is not None:
@@ -257,6 +350,9 @@ async def sync(base_url: str, dry_run: bool = False) -> int:
                 f"grid-id:{item.external_id}",
                 f"transport:{transport}",
                 f"placement:{precision or 'none'}",
+                # Who says this camera is that department's: the grid, a word
+                # in its name, an operator, or nobody.
+                f"department-source:{department_source}",
             ]
 
             if camera is None:
@@ -302,8 +398,11 @@ def main() -> int:
     )
     parser.add_argument(
         "--base-url",
-        required=True,
-        help="sandbox host, e.g. https://<host> (no /api/ingest)",
+        # The value already lives in settings (SANDBOX_BASE_URL). Requiring it
+        # again on the command line is why `make demo`, which passed nothing,
+        # never onboarded the grid at all.
+        default=settings.sandbox_base_url,
+        help="sandbox host, e.g. https://<host>; defaults to SANDBOX_BASE_URL",
     )
     parser.add_argument(
         "--dry-run",

@@ -12,7 +12,7 @@ why the platform looked broken while the grid was working:
 
 The RTSP credentials are not accepted by the CDN — Basic auth there returns a
 302 to the login page. The CDN wants the form POST that a browser makes, and
-gives back a `nagarnetra=` cookie.
+gives back a `sentinel=` cookie.
 
 So the API logs in once, keeps the cookie, and re-logs when it stops working.
 This is the only place in the platform that holds those credentials.
@@ -29,6 +29,8 @@ consumer of this grid with credentials the organisers issued.
 from __future__ import annotations
 
 import asyncio
+import html
+import re
 from datetime import UTC, datetime, timedelta
 
 import httpx
@@ -51,6 +53,39 @@ BROWSER_UA = (
 SESSION_TTL = timedelta(hours=6)
 
 LOGIN_PATH = "/auth/login"
+
+#: The session cookie the grid sets on a successful login. The organisers'
+#: system is called Sentinel and the name is theirs, not ours: a rename of
+#: this product once rewrote it too, and every login was then reported as
+#: rejected while the grid was accepting them.
+SESSION_COOKIE = "sentinel"
+
+#: Words that mark the sentence explaining a refused login.
+_REASON_WORDS = (
+    "invalid",
+    "incorrect",
+    "wrong",
+    "denied",
+    "restricted",
+    "locked",
+    "disabled",
+    "expired",
+    "not allowed",
+    "try again",
+    "too many",
+)
+
+
+def rejection_reason(page: str) -> str | None:
+    """The sentence on a re-rendered login page that says why it was refused."""
+    text = re.sub(r"(?is)<(script|style)\b.*?</\1>", " ", page or "")
+    # Split on tags, not lines: a message wrapped across lines in the markup
+    # is still one message.
+    for block in re.split(r"(?s)<[^>]+>", text):
+        sentence = " ".join(html.unescape(block).split())
+        if sentence and any(word in sentence.lower() for word in _REASON_WORDS):
+            return sentence[:200]
+    return None
 
 
 class GridSession:
@@ -96,16 +131,21 @@ class GridSession:
             return None
 
         # A successful login redirects; a rejected one renders the form again.
-        cookie = response.cookies.get("nagarnetra")
+        cookie = response.cookies.get(SESSION_COOKIE)
         if not cookie:
+            # The re-rendered form says why, and it is not always the
+            # password: in September it read "The system is in restricted
+            # mode right now". Lead with the grid's own words.
+            reason = rejection_reason(response.text)
             log.warning(
                 "grid.login_rejected",
                 status=response.status_code,
-                detail="no session cookie was set — check SANDBOX_RTSP_* credentials",
+                reason=reason or "the grid gave no reason",
+                hint="check SANDBOX_RTSP_* credentials only if the reason is about them",
             )
             return None
 
-        self._cookie = f"nagarnetra={cookie}"
+        self._cookie = f"{SESSION_COOKIE}={cookie}"
         self._obtained_at = datetime.now(UTC)
         log.info("grid.login_ok", status=response.status_code)
         return self._cookie
