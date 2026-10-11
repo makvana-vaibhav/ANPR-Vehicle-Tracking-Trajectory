@@ -60,34 +60,47 @@ make down && make demo
 
 This is the most likely failure and it is almost always the worker.
 
+There are three workers (`make ai-multi`); each owns a third of the cameras.
+
 ```bash
-docker logs contrail-ai-worker --tail 20
+for w in contrail-ai-worker contrail-ai-worker-2 contrail-ai-worker-3; do docker logs $w --tail 3; done
 ```
 
 | Log says | Do |
 |---|---|
-| `watching N/31 …` | It is working. Give it 60 s — the clip loops |
-| `not started — the far end rejected our credentials` | Grid credentials expired. §2a |
+| `analysing N of M camera(s): …` | It is working. Give it 60 s — the clip loops |
+| `refused our login; no camera on … will be opened for Ns` | **Nothing.** §2a |
 | `no cameras assigned` | The roster is empty. §2b |
-| Nothing / container missing | `docker compose --profile ai up -d ai-worker` |
+| Nothing / container missing | `make ai-multi` |
 
-**Restart it:**
-```bash
-docker compose --profile ai up -d --force-recreate ai-worker
-```
-Then wait **60 seconds** — it probes transports and connects before reading.
+Plates are read continuously on **CAM-DEMO-01, SBX-cam10, SBX-cam21 and
+SBX-cam22** (`AI_WORKER_ALWAYS_ON` in `.env`). Any other camera is analysed
+only while it is open on **Live ANPR** — it starts within about 3 seconds of
+opening it. A grid camera with no boxes that is *not* open there is working
+as intended.
 
-### 2a. Grid credentials rejected
+**Do not restart the workers to "fix" something.** Every restart reopens grid
+sessions, and on 11 Oct the grid refused our login after every restart.
+Restart only a container that is missing or has crashed.
 
-Only affects the 30 grid cameras. **CAM-DEMO still works** — demo on that and
-say the federated grid's session has lapsed, which is a true and unremarkable
-thing to happen to somebody else's gateway.
+### 2a. The grid refused our login
 
-To fix: check `SANDBOX_RTSP_USERNAME` / `SANDBOX_RTSP_PASSWORD` in `.env`, then
-```bash
-docker compose up -d --force-recreate api ingest ai-worker
-```
-`restart` does **not** reload `.env` — it must be `up -d --force-recreate`.
+Only affects the grid cameras. **CAM-DEMO still works** — demo on that.
+
+The grid refuses our login for a few minutes when sessions come and go — it
+happened three times on 11 Oct, each time just after a restart, and lasted
+between two and fifteen minutes. The workers handle it themselves: one login
+attempt per pause (2, 4, 8, then 15 min), and they resume on their own the
+moment it is accepted (`… accepted us again; resuming its cameras`). Anything
+you restart makes it worse.
+
+Say: *"The organisers' grid is rate-limiting our account after a reconnect.
+We back off and retry once every few minutes rather than hammering it — it
+comes back by itself."*
+
+Only if it is still refusing after 20 minutes: check `SANDBOX_RTSP_USERNAME` /
+`SANDBOX_RTSP_PASSWORD` in `.env` against the portal, then call the
+organisers' helpdesk (+91 95370 89982).
 
 ### 2b. The roster is empty
 
@@ -206,14 +219,18 @@ running can still assess the engineering.
 
 ## 9. Before you start — the two-minute check
 
-Run this **before** the judges arrive, not while they watch:
+Run this **at least 20 minutes before** the judges arrive, not while they
+watch:
 
 ```bash
 make demo        # brings everything up and verifies it
 ```
 
 It reports every step and tells you what is wrong. If it ends with
-**"Demo ready"** and no warnings, you are fine.
+**"Demo ready"** and no warnings, you are fine. The 20 minutes are for the
+grid: it has refused our login for up to fifteen minutes after the workers
+connect (§2a), and that should be over before anyone is watching. After that,
+**leave the stack running** — no restarts between sessions.
 
 Then open the browser, sign in, and confirm:
 
