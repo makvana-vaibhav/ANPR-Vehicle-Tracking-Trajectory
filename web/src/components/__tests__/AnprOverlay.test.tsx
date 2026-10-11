@@ -15,6 +15,7 @@ import AnprOverlay, {
   HOLD_BLIND_MS,
   HOLD_SYNCED_MS,
 } from '@/components/AnprOverlay'
+import { trackBoxKey } from '@/lib/events'
 import type { LiveTrackBatchEvent, LiveTrackBox, LiveVehicleEvent } from '@/lib/types'
 
 // jsdom has no ResizeObserver, and the overlay needs one to learn its own size.
@@ -173,13 +174,15 @@ async function tick(ms: number) {
 
 /** Where a track's vehicle rectangle actually landed, in element px. */
 function vehicleLeft(container: HTMLElement, trackId = 7): number {
-  const el = container.querySelector(`[data-anpr-track="${CAMERA}:${trackId}"] > div`)
+  const key = trackBoxKey(CAMERA, undefined, trackId)
+  const el = container.querySelector(`[data-anpr-track="${key}"] > div`)
   const left = (el as HTMLElement | null)?.style.left
   return left === undefined ? Number.NaN : Number.parseFloat(left)
 }
 
 function tierOf(container: HTMLElement, trackId = 7): string | null {
-  const el = container.querySelector(`[data-anpr-track="${CAMERA}:${trackId}"]`)
+  const key = trackBoxKey(CAMERA, undefined, trackId)
+  const el = container.querySelector(`[data-anpr-track="${key}"]`)
   return el?.getAttribute('data-anpr-tier') ?? null
 }
 
@@ -339,6 +342,61 @@ describe('AnprOverlay', () => {
       await tick(20)
 
       expect(container.querySelector('[data-anpr-track]')).not.toBeNull()
+    })
+
+    it('takes a read plate off the road once the detector has lost the car', async () => {
+      // The worker holds a vehicle in its batches for a while after its last
+      // detection, at its last position, to bridge an occlusion. Drawn as
+      // live, a read plate's label hung over empty road after the car had
+      // driven out of shot.
+      const { rerender } = render(
+        <AnprOverlay batch={batch([box({ plate: 'GJ03AB1234' })])} camera={CAMERA} />,
+      )
+      await tick(20)
+      expect(screen.getByText('GJ03AB1234')).toBeDefined()
+
+      const lost = { ...box({ plate: 'GJ03AB1234' }), seen_ago_s: 0.9 }
+      rerender(
+        <AnprOverlay batch={batch([lost], { capturedAt: START + 200 })} camera={CAMERA} />,
+      )
+      await tick(20)
+
+      expect(screen.queryByText('GJ03AB1234')).toBeNull()
+    })
+
+    it('keeps drawing a vehicle the detector missed for only a moment', async () => {
+      const glimpse = { ...box({ plate: 'GJ03AB1234' }), seen_ago_s: 0.1 }
+      render(<AnprOverlay batch={batch([glimpse])} camera={CAMERA} />)
+      await tick(20)
+
+      expect(screen.getByText('GJ03AB1234')).toBeDefined()
+    })
+
+    it("does not give a new tracker run's car an old run's box", async () => {
+      // Track ids restart whenever the tracker is rebuilt — every rotation and
+      // every loop of a recording — so track 7 of the next run is a different
+      // car from track 7 of this one, and must not inherit its reading.
+      const { container, rerender } = render(
+        <AnprOverlay
+          batch={{ ...batch([box({ x1: 100, plate: 'GJ03AB1234' })]), run_id: 'cam.aaaaaa' }}
+          camera={CAMERA}
+        />,
+      )
+      await tick(20)
+
+      rerender(
+        <AnprOverlay
+          batch={{ ...batch([box({ x1: 900 })], { capturedAt: START + 200 }), run_id: 'cam.bbbbbb' }}
+          camera={CAMERA}
+        />,
+      )
+      await tick(20)
+
+      const fresh = container.querySelector(
+        `[data-anpr-track="${trackBoxKey(CAMERA, 'cam.bbbbbb', 7)}"]`,
+      )
+      expect(fresh?.getAttribute('data-anpr-tier')).toBe('located')
+      expect(screen.queryByText('GJ03AB1234')).toBeNull()
     })
 
     it('draws one box per track, not one per batch', async () => {

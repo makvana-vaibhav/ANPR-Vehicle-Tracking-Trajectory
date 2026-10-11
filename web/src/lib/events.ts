@@ -19,12 +19,15 @@ import type { LiveEvent, LiveTrackBatchEvent, LiveVehicleEvent } from '@/lib/typ
  *
  * `track_ids[0]` is the tracker's own identity for the vehicle and is stable
  * until it retires. The camera code is included because track ids are only
- * unique within the camera that issued them.
+ * unique within the camera that issued them, and the run because they restart
+ * at 1 whenever the tracker is rebuilt — every rotation, and every time a
+ * recording loops. Without the run, a new car inherited an old car's key and
+ * the old car's reading silently disappeared from the plate feed.
  */
 export function liveTrackKey(event: LiveVehicleEvent): string {
   const camera = event.source?.camera_id ?? ''
   const track = event.vehicle?.track_ids?.[0]
-  return `${camera}:${track ?? `v${event.vehicle?.vehicle_id}`}`
+  return `${camera}:${event.run_id ?? ''}:${track ?? `v${event.vehicle?.vehicle_id}`}`
 }
 
 /**
@@ -57,8 +60,8 @@ export function isTrackBatch(event: LiveEvent): event is LiveTrackBatchEvent {
  *
  * Both channels describe the same vehicles, and a box must not be drawn twice
  * because two messages arrived about one car. Track ids are unique only within
- * the camera that issued them, hence the camera code.
+ * the camera and tracker run that issued them, hence both.
  */
-export function trackBoxKey(cameraId: string, trackId: number): string {
-  return `${cameraId}:${trackId}`
+export function trackBoxKey(cameraId: string, runId: string | undefined, trackId: number): string {
+  return `${cameraId}:${runId ?? ''}:${trackId}`
 }

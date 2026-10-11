@@ -451,10 +451,13 @@ class _StubPipeline:
 
 @dataclass
 class _FakeCapture:
-    """The two fields `_emit_track_batch` reads off a captured frame."""
+    """The fields `_emit_track_batch` reads off a captured frame."""
 
     wall_time: datetime
     age_ms: float
+    #: Stream time of the frame. 0.4 is the frame `_live_track` observes its
+    #: vehicle on, so by default every box is "seen in this frame".
+    source_t_s: float = 0.4
 
 
 def _runner(sink: EventSink, batch_s: float = 0.2) -> StreamRunner:
@@ -509,11 +512,72 @@ def _live_track(
     return track
 
 
-def _capture() -> _FakeCapture:
+def _capture(source_t_s: float = 0.4) -> _FakeCapture:
     return _FakeCapture(
         wall_time=datetime(2026, 9, 12, 10, 31, 4, 200000, tzinfo=UTC),
         age_ms=271.4,
+        source_t_s=source_t_s,
     )
+
+
+class TestHeldBoxesSayHowOldTheyAre:
+    """A box the detector did not find in this frame says when it last did.
+
+    The runner keeps a vehicle drawable for `retire_after_s` after its last
+    detection, to bridge an occlusion. That is also exactly what a car that
+    has driven out of shot looks like, and an overlay drawing it as live left
+    a read plate hanging over empty road.
+    """
+
+    def test_a_vehicle_found_in_this_frame_carries_nothing_extra(self) -> None:
+        events: list[dict] = []
+        runner = _runner(EventSink(on_event=events.append))
+        _live_track(runner, 7, read="GJ03AB1234")
+
+        runner._emit_track_batch(_capture(source_t_s=0.4))
+
+        assert "seen_ago_s" not in events[0]["tracks"][0]
+
+    def test_a_held_vehicle_says_how_long_ago_it_was_seen(self) -> None:
+        events: list[dict] = []
+        runner = _runner(EventSink(on_event=events.append))
+        _live_track(runner, 7, read="GJ03AB1234")
+
+        runner._emit_track_batch(_capture(source_t_s=1.3))
+
+        assert events[0]["tracks"][0]["seen_ago_s"] == 0.9
+
+
+class TestRunIdentity:
+    """Track ids restart whenever the tracker is rebuilt.
+
+    So `camera:track_id` named a different car after every rotation and every
+    loop of a recording, and a consumer keyed on it handed one car's row to the
+    next. `run_id` names the tracker run and changes with it.
+    """
+
+    def test_events_carry_this_runs_name(self) -> None:
+        events: list[dict] = []
+        runner = _runner(EventSink(on_event=events.append))
+        _live_track(runner, 7)
+
+        runner._emit_track_batch(_capture())
+
+        assert runner._epoch.startswith("CAM-DEMO-01.")
+        assert events[0]["run_id"] == runner._epoch
+
+    def test_a_scene_cut_starts_a_new_run_after_closing_the_old_one(self) -> None:
+        events: list[dict] = []
+        runner = _runner(EventSink(on_event=events.append))
+        _live_track(runner, 7, read="GJ03AB1234")
+        before = runner._epoch
+
+        runner._on_discontinuity()
+
+        assert runner._epoch != before
+        completed = [e for e in events if e["event"] == "vehicle.completed"]
+        # The vehicles the cut retired belong to the run that is ending.
+        assert completed and all(e["run_id"] == before for e in completed)
 
 
 class TestTheLiveBoxesChannel:

@@ -21,6 +21,7 @@ capacity are directly measurable rather than entangled with its neighbours.
 
 from __future__ import annotations
 
+import secrets
 import time
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -158,6 +159,12 @@ class StreamRunner:
         self.stats = StreamStats()
 
         self._live: dict[int, _LiveTrack] = {}
+        #: Names this run of the tracker on every event. Track ids restart at 1
+        #: whenever the tracker is rebuilt (a new run after rotation, or a scene
+        #: cut when a recording loops), so `camera:track_id` alone collided: a
+        #: new car took over an old car's row in the plate feed, and the old
+        #: reading vanished from the screen. Renewed at every rebuild.
+        self._epoch = self._new_epoch()
         # (width, height) of the frames being analysed, learned from the first
         # one. Every bbox the runner emits is in this space, so it travels with
         # the event — a consumer drawing the boxes cannot scale them otherwise.
@@ -306,6 +313,9 @@ class StreamRunner:
         self._emit_track_batch(captured)
         self._retire_stale(captured)
 
+    def _new_epoch(self) -> str:
+        return f"{self.source.camera_id}.{secrets.token_hex(3)}"
+
     def _on_discontinuity(self) -> None:
         """Rebuild all long-lived state after a scene cut."""
         from ailab.plate.scheduler import CropGate, PlateScheduler
@@ -313,6 +323,8 @@ class StreamRunner:
 
         live = len(self._live)
         self._retire_all()
+        # After the retirements, which belong to the run that is ending.
+        self._epoch = self._new_epoch()
         self.pipeline._tracker = create(
             "tracker", self.config.tracker.engine, self.config.tracker, self._fps
         )
@@ -415,7 +427,7 @@ class StreamRunner:
                     self.source,
                     kind="vehicle.observed",
                     latency_ms=captured.age_ms,
-                    run_id=self.source.camera_id,
+                    run_id=self._epoch,
                     frame_size=self._frame_size,
                     live_bbox=self._latest_bbox(track),
                     captured_at=captured.wall_time,
@@ -483,6 +495,12 @@ class StreamRunner:
             boxes.append(
                 LiveTrackBox(
                     track_id=track_id,
+                    # How long ago this frame's view of the vehicle was taken.
+                    # Zero when the detector found it in this very frame; above
+                    # zero while the box is only being held over a brief
+                    # occlusion, which is also exactly what a car that has left
+                    # looks like for the first `retire_after_s`.
+                    seen_ago_s=max(0.0, captured.source_t_s - track.last_seen_s),
                     class_name=track.class_name,
                     bbox=bbox,
                     plate_bbox=self._anchored_plate(
@@ -514,7 +532,7 @@ class StreamRunner:
                 frame_size=self._frame_size,
                 captured_at=captured.wall_time,
                 latency_ms=captured.age_ms,
-                run_id=self.source.camera_id,
+                run_id=self._epoch,
             )
         )
 
@@ -618,7 +636,7 @@ class StreamRunner:
                 self.source,
                 kind="vehicle.completed",
                 latency_ms=latency_ms,
-                run_id=self.source.camera_id,
+                run_id=self._epoch,
                 frame_size=self._frame_size,
                 # The last place the vehicle was seen before it was retired.
                 # An overlay uses this to clear the box at the right moment

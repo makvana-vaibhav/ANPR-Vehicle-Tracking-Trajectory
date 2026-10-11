@@ -183,6 +183,18 @@ const CLOCK_SANITY_MS = 10_000
  */
 const CONFIRM_CONFIDENCE = 0.8
 
+/**
+ * A vehicle the detector has not found for longer than this is treated as gone.
+ *
+ * The worker keeps a vehicle in its batches for `retire_after_s` (1.5 s) after
+ * its last detection, at its last position, to bridge a brief occlusion. Drawn
+ * like a live box, that left a read plate's label hanging over empty road for
+ * well over a second after the car had driven out of shot. A box the detector
+ * has lost is retired here instead: it fades from where the car last actually
+ * was, and its label goes at once.
+ */
+const COAST_HIDE_S = 0.3
+
 /** Above this shared area, two boxes are treated as the same vehicle. */
 const SAME_VEHICLE_OVERLAP = 0.55
 
@@ -670,7 +682,10 @@ export default function AnprOverlay({
 
     const present = new Set<string>()
     for (const entry of batch.tracks) {
-      const key = trackBoxKey(cameraId, entry.track_id)
+      // Held over from an earlier frame rather than seen in this one. Left out
+      // of `present`, so the sweep below retires it like a vehicle that left.
+      if (typeof entry.seen_ago_s === 'number' && entry.seen_ago_s > COAST_HIDE_S) continue
+      const key = trackBoxKey(cameraId, batch.run_id, entry.track_id)
       present.add(key)
 
       // Every localisation the worker sends is drawn. There is deliberately no
@@ -941,6 +956,9 @@ export default function AnprOverlay({
               a.key !== b.key ||
               a.plate !== b.plate ||
               a.tier !== b.tier ||
+              // Retiring changes what is drawn (the label goes) without moving
+              // the box, so it has to count as a change on its own.
+              a.retired !== b.retired ||
               !sameBox(a.drawn, b.drawn) ||
               Math.abs(a.opacity - b.opacity) > 0.02
             ) {
@@ -1093,7 +1111,7 @@ export default function AnprOverlay({
                   still in the feed beside the video with its full evidence; it
                   just does not get text drawn over live traffic while it is
                   still moving between candidates. */}
-              {read && (
+              {read && !item.retired && (
                 <div
                   className="absolute flex items-baseline gap-2 whitespace-nowrap rounded-[3px] bg-white px-2 py-1 font-mono text-[15px] font-bold leading-none tracking-wide text-black shadow-[0_2px_10px_rgba(0,0,0,0.45)]"
                   style={{

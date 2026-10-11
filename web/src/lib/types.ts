@@ -334,6 +334,12 @@ export interface AlertPage {
  */
 export interface LiveVehicleEvent {
   event: 'vehicle.observed' | 'vehicle.completed'
+  /**
+   * Which run of the worker's tracker issued this event. Track ids restart at
+   * 1 whenever the tracker is rebuilt, so a track id only identifies a vehicle
+   * together with this. Absent from events of a worker that predates it.
+   */
+  run_id?: string
   /** When the worker emitted this. Later than `captured_at` by the pipeline. */
   event_time: string
   /**
@@ -466,6 +472,12 @@ export interface LiveTrackBox {
   grammar_valid?: boolean
   ambiguous?: boolean
   corrected_from?: string
+  /**
+   * Seconds since the detector last found this vehicle. Absent when it was
+   * found in this batch's own frame; present while its box is only being held
+   * at its last position, over an occlusion or after it has left.
+   */
+  seen_ago_s?: number
 }
 
 /**
@@ -494,6 +506,8 @@ export interface LiveTrackBatchEvent {
   /** Capture-to-publish for this batch, in milliseconds. */
   latency_ms?: number
   source: { camera_id: string; name?: string }
+  /** The tracker run its track ids belong to. See `LiveVehicleEvent.run_id`. */
+  run_id?: string
   /** The space the coordinates are in. Without it they cannot be scaled. */
   frame?: { width: number; height: number } | null
   tracks: LiveTrackBox[]

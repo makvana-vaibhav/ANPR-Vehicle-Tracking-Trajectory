@@ -170,6 +170,10 @@ class LiveTrackBox:
     grammar_valid: bool = False
     ambiguous: bool = False
     corrected_from: str | None = None
+    #: Source seconds since the detector last found this vehicle. Zero means
+    #: it was found in the batch's own frame; anything above that is a box held
+    #: at the vehicle's last position, over an occlusion or after it has left.
+    seen_ago_s: float = 0.0
 
     def to_dict(self) -> dict[str, Any]:
         """The compact form.
@@ -202,6 +206,8 @@ class LiveTrackBox:
             entry["ambiguous"] = self.ambiguous
             if self.corrected_from:
                 entry["corrected_from"] = self.corrected_from
+        if self.seen_ago_s > 0.0:
+            entry["seen_ago_s"] = round(self.seen_ago_s, 2)
         return entry
 
 
