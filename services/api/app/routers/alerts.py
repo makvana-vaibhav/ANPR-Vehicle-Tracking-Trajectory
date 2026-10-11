@@ -8,15 +8,15 @@ mistakes cannot be audited, and those mistakes are the data that improves it.
 from __future__ import annotations
 
 import uuid
-from typing import Annotated
+from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
-from sqlalchemy import func, select
+from sqlalchemy import case, func, select
 
 from app.api.deps import CurrentUserDep, DbSession
 from app.core.logging import get_logger
 from app.core.rbac import Permission, permissions_for, require_permission
-from app.models.enums import AlertStatus
+from app.models.enums import AlertStatus, AlertType, Priority
 from app.models.intelligence import Alert, Detection
 from app.schemas.intelligence import AlertOut, AlertPage, AlertTransition
 from app.services import alerts as alert_service
@@ -35,6 +35,22 @@ TRANSITION_PERMISSION = {
     AlertStatus.FALSE_POSITIVE.value: Permission.ALERT_CLOSE,
 }
 
+#: The triage order (`sort=priority`): severity first, and within a severity a
+#: watchlist hit — a known vehicle, read now — before anything inferred. With
+#: newest-first alone, a critical hit sat below every camera that had gone
+#: dark since; an alarm queue is sorted by what needs a person first.
+_PRIORITY_RANK = case(
+    {
+        Priority.CRITICAL.value: 0,
+        Priority.HIGH.value: 1,
+        Priority.MEDIUM.value: 2,
+        Priority.LOW.value: 3,
+    },
+    value=Alert.priority,
+    else_=4,
+)
+_WATCHLIST_FIRST = case({AlertType.WATCHLIST_HIT.value: 0}, value=Alert.alert_type, else_=1)
+
 
 @router.get(
     "",
@@ -48,6 +64,10 @@ async def list_alerts(
     plate: Annotated[str | None, Query(description="Exact normalised plate")] = None,
     camera_id: Annotated[uuid.UUID | None, Query()] = None,
     open_only: Annotated[bool, Query(description="Only alerts still needing action")] = False,
+    sort: Annotated[
+        Literal["recent", "priority"],
+        Query(description="recent: newest first. priority: severity, watchlist hits, newest"),
+    ] = "recent",
     limit: Annotated[int, Query(ge=1, le=200)] = 50,
     offset: Annotated[int, Query(ge=0)] = 0,
 ) -> AlertPage:
@@ -78,9 +98,12 @@ async def list_alerts(
         count_query = count_query.where(condition)
 
     total = (await session.execute(count_query)).scalar_one()
-    result = await session.execute(
-        query.order_by(Alert.created_at.desc()).limit(limit).offset(offset)
+    order = (
+        (_PRIORITY_RANK, _WATCHLIST_FIRST, Alert.created_at.desc())
+        if sort == "priority"
+        else (Alert.created_at.desc(),)
     )
+    result = await session.execute(query.order_by(*order).limit(limit).offset(offset))
     alerts = list(result.scalars().all())
     return AlertPage(
         items=await _with_crops(session, alerts),

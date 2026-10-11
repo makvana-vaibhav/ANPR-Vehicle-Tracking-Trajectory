@@ -100,7 +100,9 @@ export default function Alerts() {
 
   const load = useCallback(async () => {
     try {
-      const page = await api.getAlerts({ open_only: openOnly, limit: 100 })
+      // Triage order: what needs a person first, a watchlist hit before
+      // anything inferred — not merely what happened last.
+      const page = await api.getAlerts({ open_only: openOnly, sort: 'priority', limit: 100 })
       setAlerts(page.items)
     } catch (err) {
       toast.error(err)
@@ -216,7 +218,7 @@ export default function Alerts() {
               {alerts.length} {openOnly ? 'open' : 'total'}
             </span>
             <span className="text-muted-foreground/40">·</span>
-            <span>raised automatically when a watched plate is read</span>
+            <span>most severe first; within a severity, watchlist hits lead</span>
           </>
         }
         actions={

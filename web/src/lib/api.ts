@@ -488,6 +488,8 @@ export interface AlertQuery {
   plate?: string
   camera_id?: string
   open_only?: boolean
+  /** recent: newest first. priority: severity, then watchlist hits, then newest. */
+  sort?: 'recent' | 'priority'
   limit?: number
   offset?: number
 }

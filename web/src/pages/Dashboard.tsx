@@ -85,7 +85,7 @@ export default function Dashboard() {
       setReadsToday(detectionPage.total)
 
       if (maySeeAlerts) {
-        setOpenAlerts((await api.getAlerts({ open_only: true, limit: 20 })).items)
+        setOpenAlerts((await api.getAlerts({ open_only: true, sort: 'priority', limit: 20 })).items)
       } else {
         setOpenAlerts([])
       }

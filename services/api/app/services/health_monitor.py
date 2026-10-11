@@ -25,6 +25,7 @@ import asyncio
 import uuid
 from collections import defaultdict
 from datetime import UTC, datetime
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -37,6 +38,9 @@ from app.core.logging import get_logger
 from app.models.enums import AlertType, CameraStatus, Priority
 from app.models.intelligence import Alert
 from app.models.registry import Camera, CameraHealth
+
+#: Notes on alerts are read by operators, in IST.
+IST = ZoneInfo("Asia/Kolkata")
 
 log = get_logger("api.health_monitor")
 
@@ -169,6 +173,64 @@ async def _raise_camera_down_alert(
     )
 
 
+async def _resolve_recovered(
+    session: AsyncSession, online: list[uuid.UUID], vms_reachable: set[uuid.UUID]
+) -> int:
+    """Close the camera-down alerts of cameras that are reachable again.
+
+    Nothing used to: an alert raised when a camera went dark stayed open after
+    it came back, so the alert queue went on saying a camera was unreachable
+    beside a fleet screen showing it online — the kind of contradiction that
+    teaches an operator to stop believing either. An integration alert closes
+    once any camera behind that integration answers again.
+
+    Closed through the same transition an operator uses, with a note saying
+    the system did it and when, so the record shows why it is no longer open.
+    """
+    from app.services import alerts as alerts_service
+
+    open_statuses = ("new", "acknowledged", "dispatched")
+    stamp = datetime.now(UTC).astimezone(IST).strftime("%d %b %H:%M")
+    found: list[tuple[Alert, str]] = []
+    if online:
+        for alert in (
+            await session.scalars(
+                select(Alert).where(
+                    Alert.alert_type == AlertType.CAMERA_DOWN.value,
+                    Alert.status.in_(open_statuses),
+                    Alert.camera_id.in_(online),
+                )
+            )
+        ).all():
+            found.append((alert, f"Closed automatically: the camera was reachable again at {stamp} IST."))
+    for vms_id in vms_reachable:
+        for alert in (
+            await session.scalars(
+                select(Alert).where(
+                    Alert.alert_type == AlertType.CAMERA_DOWN.value,
+                    Alert.status.in_(open_statuses),
+                    Alert.camera_id.is_(None),
+                    Alert.notes.like(f"%vms:{vms_id}%"),
+                )
+            )
+        ).all():
+            found.append(
+                (
+                    alert,
+                    "Closed automatically: cameras behind this integration were "
+                    f"reachable again at {stamp} IST.",
+                )
+            )
+
+    for alert, note in found:
+        try:
+            await alerts_service.transition(session, alert, to="closed", user_id=None, notes=note)
+        except alerts_service.InvalidTransition:
+            continue
+        log.info("health.alert_resolved", alert_id=str(alert.id), camera_id=str(alert.camera_id))
+    return len(found)
+
+
 async def _raise_integration_alerts(session: AsyncSession, failures: dict[uuid.UUID, int]) -> int:
     """Raise one alert per unreachable VMS, however many cameras it holds.
 
@@ -270,6 +332,11 @@ async def sweep(
             integration_failures[camera.vms_id] = integration_failures.get(camera.vms_id, 0) + 1
 
     alerts += await _raise_integration_alerts(session, integration_failures)
+    resolved = await _resolve_recovered(
+        session,
+        [camera.id for camera, _probe in results if camera.status == CameraStatus.ONLINE.value],
+        {camera.vms_id for camera, probe in results if probe.reachable and camera.vms_id},
+    )
 
     await session.commit()
 
@@ -279,6 +346,7 @@ async def sweep(
         "offline": offline,
         "changed": changed,
         "alerts": alerts,
+        "resolved": resolved,
     }
     log.info("health.sweep_complete", **summary)
     return summary
