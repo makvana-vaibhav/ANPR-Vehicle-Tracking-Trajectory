@@ -68,6 +68,19 @@ BASELINE_LOOKBACK = timedelta(days=30)
 #: been the anomaly, and two is not enough to call anything a pattern.
 RARE_TRANSITION_SAMPLES = 3
 
+#: "Rare" only means something once the fleet has routes to compare against.
+#: Until this many distinct vehicles have journeys on file, every transition
+#: is unseen by construction, and calling each one rare raised an alert for
+#: almost every cross-camera link: the 2,000-alert flood on the SIH demo, and
+#: the same again on a grid with one day of history. Below it the honest
+#: answer is "not enough history", which raises nothing.
+MIN_FLEET_HISTORY_PLATES = 30
+
+#: Cameras whose footage is a recording on a loop. Every revisit there is the
+#: clip starting over, and every timing is the edit's, not the traffic's, so
+#: no leg touching one is scored at all.
+RECORDED_TAG = "recorded-footage"
+
 #: A transition needs at least this many prior *timed* samples before "how
 #: long does this normally take" is a distribution rather than a guess.
 #: Matches MIN_BASELINE_SAMPLES in analytics.py, deliberately — the same
@@ -139,6 +152,27 @@ WHERE from_camera IS NOT NULL AND plausible
 """
 
 
+async def recorded_cameras(session: AsyncSession) -> frozenset[str]:
+    """Codes of cameras replaying recorded footage. See `RECORDED_TAG`."""
+    rows = await session.execute(
+        text("SELECT camera_code FROM cameras WHERE :tag = ANY(tags)"), {"tag": RECORDED_TAG}
+    )
+    return frozenset(code for (code,) in rows)
+
+
+async def _history_depth(session: AsyncSession, since: datetime) -> int:
+    """Distinct vehicles with a journey on file in the lookback."""
+    return (
+        await session.execute(
+            text(
+                "SELECT count(DISTINCT plate_normalised) FROM vehicle_tracks "
+                "WHERE created_at >= :since"
+            ),
+            {"since": since},
+        )
+    ).scalar_one()
+
+
 async def _load_baselines(
     session: AsyncSession, since: datetime
 ) -> dict[tuple[str, str], TransitionBaseline]:
@@ -160,7 +194,12 @@ async def _load_baselines(
 
 
 def _score_leg(
-    from_camera: str, to_camera: str, hop: Hop, baseline: TransitionBaseline | None
+    from_camera: str,
+    to_camera: str,
+    hop: Hop,
+    baseline: TransitionBaseline | None,
+    *,
+    established: bool = True,
 ) -> list[Reason]:
     label = f"{from_camera} → {to_camera}"
 
@@ -178,7 +217,7 @@ def _score_leg(
 
     reasons: list[Reason] = []
     seen = baseline.plates if baseline else 0
-    if seen < RARE_TRANSITION_SAMPLES:
+    if established and seen < RARE_TRANSITION_SAMPLES:
         reasons.append(
             Reason(
                 "rare_transition",
@@ -217,7 +256,12 @@ def _score_leg(
 
 
 async def evaluate_new_hops(
-    session: AsyncSession, route: Route, new_hops: list[Hop], *, now: datetime | None = None
+    session: AsyncSession,
+    route: Route,
+    new_hops: list[Hop],
+    *,
+    now: datetime | None = None,
+    recorded: frozenset[str] = frozenset(),
 ) -> list[Reason]:
     """Score only the hops added since the journey's last snapshot.
 
@@ -237,6 +281,7 @@ async def evaluate_new_hops(
 
     since = (now or datetime.now(UTC)) - BASELINE_LOOKBACK
     baselines = await _load_baselines(session, since)
+    established = await _history_depth(session, since) >= MIN_FLEET_HISTORY_PLATES
 
     all_hops = route.hops
     start_index = len(all_hops) - len(new_hops)
@@ -248,8 +293,18 @@ async def evaluate_new_hops(
             # The first hop in a route has no leg into it — nothing to score.
             continue
         previous_hop = all_hops[index - 1]
+        if previous_hop.camera_code in recorded or hop.camera_code in recorded:
+            continue
         baseline = baselines.get((previous_hop.camera_code, hop.camera_code))
-        reasons.extend(_score_leg(previous_hop.camera_code, hop.camera_code, hop, baseline))
+        reasons.extend(
+            _score_leg(
+                previous_hop.camera_code,
+                hop.camera_code,
+                hop,
+                baseline,
+                established=established,
+            )
+        )
 
     if reasons:
         log.info(

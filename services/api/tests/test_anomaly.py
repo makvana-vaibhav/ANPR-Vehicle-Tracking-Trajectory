@@ -121,6 +121,32 @@ async def _baseline_track(index: int, a: str, b: str, arrived: datetime, elapsed
     )
 
 
+async def _established_fleet(arrived: datetime) -> None:
+    """Enough distinct vehicles on file for "rare" to mean something.
+
+    Their journeys are on a route of their own (CAM-X to CAM-Y), so they make
+    the fleet's history deep without being a baseline for any leg under test.
+    """
+    async with SessionLocal() as session:
+        for index in range(anomaly.MIN_FLEET_HISTORY_PLATES):
+            created = arrived - timedelta(days=1, minutes=index)
+            session.add(
+                VehicleTrack(
+                    id=uuid.uuid4(),
+                    plate_normalised=_plate(f"FLEET{index}"),
+                    hops={
+                        "hops": [
+                            _hop_json("CAM-X", created - timedelta(minutes=5), elapsed_s=300.0),
+                            _hop_json("CAM-Y", created, elapsed_s=300.0),
+                        ]
+                    },
+                    hop_count=2,
+                    created_at=created,
+                )
+            )
+        await session.commit()
+
+
 async def _cleanup() -> None:
     # Three explicit statements rather than a loop over table names: an
     # f-string building a table name into SQL is a lint-flagged shape
@@ -164,8 +190,9 @@ async def cameras() -> list[dict]:
 class TestScoring:
     """Pure scoring: hand-built hops, real `vehicle_tracks` for the baseline."""
 
-    async def test_rare_transition_with_no_prior_history(self) -> None:
+    async def test_rare_transition_in_an_established_fleet(self) -> None:
         arrived = WINDOW_START + timedelta(minutes=20)
+        await _established_fleet(arrived)
         route = Route(
             plate=_plate("RARE"),
             hops=[_hop("CAM-A", arrived - timedelta(minutes=5)), _hop("CAM-B", arrived)],
@@ -178,6 +205,41 @@ class TestScoring:
         assert len(reasons) == 1, "the first hop in a route has no leg to score"
         assert reasons[0].factor == "rare_transition"
         assert "0 vehicle" in reasons[0].detail
+
+    async def test_no_rare_verdict_before_the_fleet_has_history(self) -> None:
+        """With no journeys on file every transition is unseen by construction.
+        Calling each one rare flooded the alert queue; the honest answer is
+        that there is not enough history yet, which raises nothing."""
+        arrived = WINDOW_START + timedelta(minutes=20)
+        route = Route(
+            plate=_plate("COLD"),
+            hops=[_hop("CAM-A", arrived - timedelta(minutes=5)), _hop("CAM-B", arrived)],
+            window_from=None,
+            window_to=None,
+        )
+
+        assert await self._evaluate(route, route.hops, now=arrived) == []
+
+    async def test_legs_on_recorded_footage_are_not_scored(self) -> None:
+        """A recording on a loop makes every revisit the clip restarting and
+        every timing the edit's, so not even an impossible hop counts there."""
+        arrived = WINDOW_START + timedelta(minutes=20)
+        route = Route(
+            plate=_plate("RECORDED"),
+            hops=[
+                _hop("CAM-A", arrived - timedelta(seconds=2)),
+                _hop("CAM-B", arrived, elapsed_s=2.0, implied_kmph=5_400.0, plausible=False),
+            ],
+            window_from=None,
+            window_to=None,
+        )
+
+        async with SessionLocal() as session:
+            reasons = await anomaly.evaluate_new_hops(
+                session, route, route.hops, now=arrived, recorded=frozenset({"CAM-A"})
+            )
+
+        assert reasons == []
 
     async def test_not_rare_once_three_distinct_vehicles_have_made_it(self) -> None:
         arrived = WINDOW_START + timedelta(minutes=20)
@@ -251,6 +313,7 @@ class TestScoring:
         has none. Passing only the C hop as "new" must not re-flag A->B —
         that leg was already scored on a previous snapshot cycle."""
         arrived = WINDOW_START + timedelta(minutes=20)
+        await _established_fleet(arrived)
         for i in range(5):
             await _baseline_track(i, "CAM-A", "CAM-B", arrived - timedelta(days=i + 1), elapsed_s=300.0)
 
@@ -392,13 +455,33 @@ class TestSnapshotWiring:
         monkeypatch.setattr(route_history, "MAX_PLATES_PER_CYCLE", 10_000)
         plate = _plate("WIRING")
         now = datetime.now(UTC)
-        a, b = cameras[0], cameras[1]
+        # Two live cameras in different towns, seen a minute apart: a leg no
+        # vehicle could drive. That is a finding whatever the fleet's history,
+        # and it rules out the recorded camera, whose legs are never scored.
+        async with SessionLocal() as session:
+            pair = (
+                await session.execute(
+                    text(
+                        "SELECT a.id AS a_id, b.id AS b_id FROM cameras a"
+                        " JOIN cameras b ON a.camera_code < b.camera_code"
+                        " WHERE NOT ('recorded-footage' = ANY(a.tags))"
+                        " AND NOT ('recorded-footage' = ANY(b.tags))"
+                        " AND NOT ('placement:unknown' = ANY(a.tags))"
+                        " AND NOT ('placement:unknown' = ANY(b.tags))"
+                        " AND ST_Distance(a.location::geography, b.location::geography) > 50000"
+                        " ORDER BY a.camera_code, b.camera_code LIMIT 1"
+                    )
+                )
+            ).mappings().first()
+        if pair is None:
+            pytest.skip("needs two live cameras more than 50 km apart — run the grid sync")
+        a, b = {"id": pair["a_id"]}, {"id": pair["b_id"]}
 
         async with SessionLocal() as session:
             session.add(
                 Detection(
                     id=uuid.uuid4(),
-                    ts=now - timedelta(minutes=25),
+                    ts=now - timedelta(minutes=6),
                     camera_id=a["id"],
                     track_id=f"anomaly-test-{uuid.uuid4().hex[:8]}",
                     plate_normalised=plate,

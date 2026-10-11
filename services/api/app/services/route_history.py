@@ -100,6 +100,9 @@ async def snapshot(session: AsyncSession) -> dict[str, Any]:
 
     persisted = unchanged = skipped = 0
     raised: list[dict[str, Any]] = []
+    # Once per cycle, not per journey: the set changes only when a camera is
+    # onboarded or retired.
+    recorded = await anomaly.recorded_cameras(session)
     for plate, _cameras in candidates:
         route = await correlator.build_route(session, plate, since=since)
         # A route needs two hops to be a path; persist_route agrees and would
@@ -128,7 +131,7 @@ async def snapshot(session: AsyncSession) -> dict[str, Any]:
         # exclude "the advance about to be written", so scoring after
         # persist_route would let this journey's own newest leg count toward
         # the history it is being measured against.
-        reasons = await anomaly.evaluate_new_hops(session, route, new_hops)
+        reasons = await anomaly.evaluate_new_hops(session, route, new_hops, recorded=recorded)
 
         if await correlator.persist_route(session, route) is not None:
             persisted += 1
