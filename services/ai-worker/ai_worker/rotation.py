@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import logging
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 
 from ai_worker.discovery import CameraStream
@@ -113,13 +114,19 @@ class Rotation:
         # first, so the longest-running camera is the first to step aside.
         return [code for _started, code in candidates[: len(waiting)]]
 
-    def next_up(self) -> list[CameraStream]:
+    def next_up(
+        self, admit: Callable[[CameraStream], bool] | None = None
+    ) -> list[CameraStream]:
         """Cameras that should be started now, to fill free slots.
 
         Pinned cameras first — they are pinned because they matter — then the
         cameras that have had the fewest slices, so a fleet larger than the
         slot count is swept evenly rather than favouring whichever codes sort
         first.
+
+        `admit` is asked in that order and only until the slots are full, so a
+        camera it turns away — one backing off — leaves its place to the next
+        in line instead of costing a slot. See `ai_worker.backoff`.
         """
         free = self.slots - len(self.started_at)
         if free <= 0:
@@ -137,7 +144,13 @@ class Rotation:
                 s.camera_code,
             )
         )
-        return idle[:free]
+        chosen: list[CameraStream] = []
+        for stream in idle:
+            if len(chosen) == free:
+                break
+            if admit is None or admit(stream):
+                chosen.append(stream)
+        return chosen
 
     def take_slot(self, code: str, now: float | None = None) -> None:
         self.started_at[code] = time.monotonic() if now is None else now

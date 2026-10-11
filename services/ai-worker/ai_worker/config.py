@@ -75,8 +75,18 @@ class WorkerSettings(BaseSettings):
     ai_models_dir: str = "/models"
     # Rediscover publishing cameras this often.
     discovery_interval_s: float = 20.0
-    # Wait this long before reopening a stream that failed.
-    restart_delay_s: float = 5.0
+    # Wait this long before reopening a stream that failed, doubling on each
+    # further failure up to the max: the grid's guide asks for ~2s rising to
+    # ~30s. See ai_worker.backoff.
+    restart_delay_s: float = 2.0
+    restart_delay_max_s: float = 30.0
+    # After the far end rejects our login, no camera on that host is opened
+    # for this long; then one asks, and the pause doubles if it is refused.
+    auth_pause_s: float = 120.0
+    auth_pause_max_s: float = 900.0
+    # Seconds between opening one stream and the next, so a worker starting a
+    # dozen cameras does not hit the far end with them all at once.
+    start_stagger_s: float = 1.0
 
     log_level: str = "INFO"
 

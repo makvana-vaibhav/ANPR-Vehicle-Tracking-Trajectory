@@ -34,6 +34,10 @@ import os
 # detector instead of the transport.
 os.environ.setdefault("OPENCV_FFMPEG_CAPTURE_OPTIONS", "rtsp_transport;tcp")
 
+import base64
+import hashlib
+import re
+import secrets
 import socket
 import threading
 import time
@@ -42,7 +46,7 @@ import urllib.request
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
-from urllib.parse import urlparse, urlunparse
+from urllib.parse import unquote, urlparse, urlunparse
 
 import cv2
 import numpy as np
@@ -123,19 +127,25 @@ def diagnose(url: str, timeout: float = 6.0) -> str:
         return "unknown"
 
     port = port or 554
+    target = _without_credentials(url)
+    user = unquote(parsed.username) if parsed.username is not None else None
+    secret = unquote(parsed.password or "")
     try:
         with socket.create_connection((host, port), timeout=timeout) as sock:
             sock.settimeout(timeout)
             # A DESCRIBE is the first request any RTSP client makes, and it is
             # what returns 401 when the server wants credentials.
-            request = (
-                f"DESCRIBE {url} RTSP/1.0\r\n"
-                "CSeq: 1\r\n"
-                "User-Agent: nagarnetra/diagnose\r\n"
-                "Accept: application/sdp\r\n\r\n"
-            )
-            sock.sendall(request.encode("ascii"))
-            status = sock.recv(256).decode("latin-1", "replace").split("\r\n")[0]
+            status, challenges = _describe(sock, target, 1)
+            # Then answer the challenge with the credentials we hold, exactly
+            # as FFmpeg does. This used to stop at the challenge, so a server
+            # that requires a login answered 401 to every diagnosis whatever
+            # had really gone wrong — and "unauthorized" pauses every camera
+            # on the host (see ai_worker.backoff), so a wrong verdict here
+            # would take the whole grid off the air for a timeout on one feed.
+            if " 401" in status and user is not None:
+                header = _authorization(user, secret, target, challenges)
+                if header is not None:
+                    status, _ = _describe(sock, target, 2, header)
     except TimeoutError:
         return "timeout"
     except OSError as exc:
@@ -150,6 +160,110 @@ def diagnose(url: str, timeout: float = 6.0) -> str:
         # a codec the build cannot handle, or a path publishing nothing.
         return "opened but no media"
     return status.strip() or "unknown"
+
+
+def _without_credentials(url: str) -> str:
+    """The URL a request line may carry. Credentials go in a header or nowhere."""
+    parsed = urlparse(url)
+    if parsed.username is None and parsed.password is None:
+        return url
+    host = parsed.hostname or ""
+    netloc = f"[{host}]" if ":" in host else host
+    if parsed.port:
+        netloc += f":{parsed.port}"
+    return urlunparse(parsed._replace(netloc=netloc))
+
+
+def _describe(
+    sock: socket.socket, target: str, cseq: int, authorization: str | None = None
+) -> tuple[str, list[str]]:
+    """One DESCRIBE on an open connection: its status line and any challenges."""
+    request = (
+        f"DESCRIBE {target} RTSP/1.0\r\n"
+        f"CSeq: {cseq}\r\n"
+        "User-Agent: nagarnetra/diagnose\r\n"
+        "Accept: application/sdp\r\n"
+        + (f"Authorization: {authorization}\r\n" if authorization else "")
+        + "\r\n"
+    )
+    sock.sendall(request.encode("latin-1"))
+
+    data = b""
+    while b"\r\n\r\n" not in data and len(data) < 16_384:
+        chunk = sock.recv(4096)
+        if not chunk:
+            break
+        data += chunk
+    head, _, body = data.partition(b"\r\n\r\n")
+    lines = head.decode("latin-1", "replace").split("\r\n")
+
+    challenges: list[str] = []
+    length = 0
+    for line in lines[1:]:
+        name, _, value = line.partition(":")
+        if name.strip().lower() == "www-authenticate":
+            challenges.append(value.strip())
+        elif name.strip().lower() == "content-length" and value.strip().isdigit():
+            length = int(value.strip())
+    # Drain the body, so a second request on this connection reads its own
+    # response rather than the tail of this one.
+    while len(body) < min(length, 65_536):
+        chunk = sock.recv(4096)
+        if not chunk:
+            break
+        body += chunk
+    return lines[0], challenges
+
+
+def _authorization(
+    user: str, secret: str, target: str, challenges: list[str]
+) -> str | None:
+    """Answer a challenge the way an RTSP client would. Digest when offered.
+
+    Digest is preferred because it never puts the password on the wire, and
+    this is plain RTSP over the internet; Basic only when it is all the server
+    accepts, which is also when FFmpeg itself would send it.
+    """
+    for challenge in challenges:
+        scheme, _, params = challenge.partition(" ")
+        if scheme.lower() == "digest":
+            return _digest(user, secret, target, _challenge_params(params))
+    if any(c.partition(" ")[0].lower() == "basic" for c in challenges):
+        token = base64.b64encode(f"{user}:{secret}".encode()).decode("ascii")
+        return f"Basic {token}"
+    return None
+
+
+def _challenge_params(text: str) -> dict[str, str]:
+    return {
+        key.lower(): quoted if quoted else bare
+        for key, quoted, bare in re.findall(r'(\w+)=(?:"([^"]*)"|([^,\s]+))', text)
+    }
+
+
+def _digest(user: str, secret: str, target: str, params: dict[str, str]) -> str:
+    """RFC 2617 Digest, MD5, with `qop=auth` when the server asks for it."""
+
+    def md5(text: str) -> str:
+        # MD5 because the protocol says so, not as a choice of hash.
+        return hashlib.md5(text.encode()).hexdigest()
+
+    realm, nonce = params.get("realm", ""), params.get("nonce", "")
+    ha1 = md5(f"{user}:{realm}:{secret}")
+    ha2 = md5(f"DESCRIBE:{target}")
+    fields = [
+        f'username="{user}"', f'realm="{realm}"', f'nonce="{nonce}"', f'uri="{target}"'
+    ]
+    if "auth" in [q.strip() for q in params.get("qop", "").split(",")]:
+        cnonce, nc = secrets.token_hex(8), "00000001"
+        response = md5(f"{ha1}:{nonce}:{nc}:{cnonce}:auth:{ha2}")
+        fields += ["qop=auth", f"nc={nc}", f'cnonce="{cnonce}"']
+    else:
+        response = md5(f"{ha1}:{nonce}:{ha2}")
+    fields.append(f'response="{response}"')
+    if "opaque" in params:
+        fields.append(f'opaque="{params["opaque"]}"')
+    return "Digest " + ", ".join(fields)
 
 
 @dataclass(slots=True)
@@ -247,7 +361,11 @@ class StreamReader:
 
     # ── lifecycle ──
     def _open(self) -> bool:
-        capture = cv2.VideoCapture(self.source)
+        # FFmpeg only. Left to choose, OpenCV tries its other backends after
+        # FFmpeg refuses, and the image-sequence one rejects the URL with an
+        # error that quotes it whole — credentials included — on stderr, which
+        # is the container log. It was doing that on every failed grid open.
+        capture = cv2.VideoCapture(self.source, cv2.CAP_FFMPEG)
         if not capture.isOpened():
             capture.release()
             return False

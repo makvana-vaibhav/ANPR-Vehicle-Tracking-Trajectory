@@ -26,6 +26,7 @@ from ailab.config import RunConfig
 from ailab.stream import SourceIdentity, StreamRunner, StreamUnavailable
 from ailab.stream.reader import redact
 
+from ai_worker.backoff import ACCOUNT_REASONS, Backoff, host_of
 from ai_worker.config import WorkerSettings
 from ai_worker.crops import MinioCropStore
 from ai_worker.discovery import (
@@ -50,6 +51,10 @@ REASON_ADVICE = {
     "opened but no media": "answers, but sends no decodable video",
 }
 
+#: How long shutdown waits for every camera thread together. Each one checks
+#: its stop flag at least every two seconds, then closes its capture.
+STOP_WAIT_S = 8.0
+
 
 @dataclass
 class CameraTask:
@@ -71,6 +76,12 @@ class CameraTask:
     unreachable: bool = False
     #: Why, from `ailab.stream.reader.diagnose`.
     reason: str = ""
+    #: Set by the camera thread once its stream opens; `open_seen` once the
+    #: supervisor has told the backoff. Seen once, not on every pass: a
+    #: session opened an hour ago says nothing about whether the far end
+    #: would accept our login now.
+    opened: bool = False
+    open_seen: bool = False
 
     @property
     def alive(self) -> bool:
@@ -108,6 +119,14 @@ class AiWorker:
             pinned=frozenset(
                 c.strip() for c in settings.ai_worker_pinned.split(",") if c.strip()
             ),
+        )
+        # When a camera that would not open is asked again — and, after a
+        # rejected login, when its whole host is. See ai_worker.backoff.
+        self._backoff = Backoff(
+            base_s=settings.restart_delay_s,
+            cap_s=settings.restart_delay_max_s,
+            account_base_s=settings.auth_pause_s,
+            account_cap_s=settings.auth_pause_max_s,
         )
         # Evidence crops go straight from here to object storage; only the
         # object key rides the event bus. Created once and shared by every
@@ -205,12 +224,21 @@ class AiWorker:
         """Make the running set match the set that should be running now."""
         self.rotation.update_assignment(await self._discover())
         assigned = self.rotation.assigned
+        self._backoff.retain(frozenset(assigned))
+        now = time.monotonic()
 
         # Cameras that left the fleet, or moved to another worker.
         for code in list(self.tasks):
             if code not in assigned:
                 log.info("camera %s no longer assigned; stopping", code)
                 self._stop(code)
+
+        # Streams that opened since the last pass. Before the deaths below, so
+        # a camera that opened and then died is judged on its latest outcome.
+        for code, task in self.tasks.items():
+            if task.opened and not task.open_seen:
+                task.open_seen = True
+                self._backoff.opened(code, host_of(task.stream.rtsp_url))
 
         # Threads that ended — the slice expired, the stream closed, or it
         # errored. Either way the slot is free and goes back to the rotation
@@ -219,20 +247,36 @@ class AiWorker:
         for code, task in list(self.tasks.items()):
             if not task.alive:
                 ran_for = time.perf_counter() - task.started_at
+                host = host_of(task.stream.rtsp_url)
                 if task.completed_slice:
                     log.info(
                         "%s finished its %.0fs slice; yielding the slot", code, ran_for
                     )
                 elif task.unreachable:
-                    # Already logged as a warning by the loop itself; the slot
-                    # goes straight back to the rotation so an unreachable
-                    # camera costs the fleet a connect attempt, not a slice.
-                    pass
+                    # Already logged as a warning by the loop itself. The slot
+                    # goes straight back to the rotation, so an unreachable
+                    # camera costs the fleet a connect attempt, not a slice —
+                    # and the backoff decides when it costs the far end one.
+                    paused_before = self._backoff.host_paused_until.get(host)
+                    delay = self._backoff.failed(code, host, task.reason, now)
+                    if task.reason not in ACCOUNT_REASONS:
+                        log.info("%s will be asked again in %.0fs", code, delay)
+                    elif self._backoff.host_paused_until.get(host) != paused_before:
+                        log.warning(
+                            "%s refused our login; no camera on %s will be opened "
+                            "for %.0fs, then one will ask again",
+                            code,
+                            host,
+                            delay,
+                        )
                 else:
+                    delay = self._backoff.failed(code, host, "exited", now)
                     log.warning(
-                        "inference loop for %s exited after %.0fs", code, ran_for
+                        "inference loop for %s exited after %.0fs; restarting in %.0fs",
+                        code,
+                        ran_for,
+                        delay,
                     )
-                    await asyncio.sleep(self.settings.restart_delay_s)
                 self._stop(code)
 
         # Cameras whose slice is up and which somebody is waiting behind.
@@ -240,7 +284,23 @@ class AiWorker:
             log.info("rotating %s out; its slice is up and cameras are waiting", code)
             self._stop(code)
 
-        for stream in self.rotation.next_up():
+        starts = self.rotation.next_up(
+            admit=lambda s: self._backoff.admit(
+                s.camera_code, host_of(s.rtsp_url), now
+            )
+        )
+        for i, stream in enumerate(starts):
+            # One at a time. A worker that opens a dozen grid streams in the
+            # same instant looks like a burst to the far end, and is exactly
+            # what a per-account connection limiter is there to stop.
+            if i and self.settings.start_stagger_s > 0:
+                try:
+                    await asyncio.wait_for(
+                        self._shutdown.wait(), timeout=self.settings.start_stagger_s
+                    )
+                    return
+                except TimeoutError:
+                    pass
             self._start(stream, 0)
 
         self._log_coverage()
@@ -262,6 +322,16 @@ class AiWorker:
             if sweep > 0
             else "; every assigned camera runs continuously"
         )
+        now = time.monotonic()
+        for host, left in self._backoff.paused_hosts(now).items():
+            coverage += (
+                f"; {host} refused our login — next try in {left:.0f}s"
+                if left > 0
+                else f"; {host} refused our login — one camera is asking again"
+            )
+        waiting = self._backoff.waiting(now)
+        if waiting:
+            coverage += f"; {waiting} camera(s) backing off"
         pool = self._pipelines.stats()
         log.info(
             "watching %d/%d camera(s): %s · %d events published%s · models built %d, "
@@ -333,13 +403,24 @@ class AiWorker:
         runner = StreamRunner(
             config, source, self.sink, run_dir=self._crops, pipeline=pipeline
         )
+
+        def mark_open() -> None:
+            task = self._own_task(stream.camera_code, stop)
+            if task is not None:
+                task.opened = True
+
         try:
             # realtime=True: a live source sets the pace, and falling behind is
-            # handled by dropping frames rather than by queueing them.
+            # handled by dropping frames rather than by queueing them. `stop`
+            # is what makes _stop() actually close the capture.
             report = runner.run(
-                stream.rtsp_url, max_seconds=slice_seconds, realtime=True
+                stream.rtsp_url,
+                max_seconds=slice_seconds,
+                realtime=True,
+                stop=stop,
+                on_open=mark_open,
             )
-            task = self.tasks.get(stream.camera_code)
+            task = self._own_task(stream.camera_code, stop)
             if task is not None:
                 task.last_report = report
                 # Returning without an exception, having been given a deadline,
@@ -361,7 +442,7 @@ class AiWorker:
                 REASON_ADVICE.get(exc.reason, exc.reason),
                 exc,
             )
-            task = self.tasks.get(stream.camera_code)
+            task = self._own_task(stream.camera_code, stop)
             if task is not None:
                 task.unreachable = True
                 task.reason = exc.reason
@@ -376,20 +457,40 @@ class AiWorker:
             self._pipelines.release(config, pipeline)
             stop.set()
 
-    def _stop(self, code: str) -> None:
+    def _own_task(self, code: str, stop: threading.Event) -> CameraTask | None:
+        """The calling thread's task — never a newer one that took the camera
+        over after this thread was told to stop."""
+        task = self.tasks.get(code)
+        return task if task is not None and task.stop is stop else None
+
+    def _release(self, code: str) -> CameraTask | None:
+        """Take a camera off its slot and tell its thread to finish."""
         task = self.tasks.pop(code, None)
         self.rotation.release_slot(code)
         if task is None:
-            return
+            return None
+        # A probe stopped before it answered must not hold its host half-open
+        # forever; the next camera may ask instead.
+        self._backoff.stopped(code, host_of(task.stream.rtsp_url))
         task.stop.set()
-        if task.thread.is_alive():
-            # StreamRunner returns when its reader ends; give it a moment, then
-            # let the daemon thread go rather than blocking shutdown on it.
+        return task
+
+    def _stop(self, code: str) -> None:
+        task = self._release(code)
+        if task is not None and task.thread.is_alive():
+            # The runner checks `stop` at least every two seconds, then closes
+            # its capture. Wait a little for that, then let the daemon thread
+            # finish on its own rather than block the supervisor.
             task.thread.join(timeout=3.0)
 
     async def _stop_all(self) -> None:
-        for code in list(self.tasks):
-            self._stop(code)
+        # Tell every camera at once, then wait for them together. One at a
+        # time, at three seconds each, twelve cameras outlasted the container's
+        # grace period and the worker was killed with its sessions still open.
+        tasks = [t for t in map(self._release, list(self.tasks)) if t is not None]
+        deadline = time.monotonic() + STOP_WAIT_S
+        for task in tasks:
+            task.thread.join(timeout=max(0.0, deadline - time.monotonic()))
 
     def shutdown(self) -> None:
         self._shutdown.set()
@@ -404,6 +505,11 @@ class AiWorker:
             # How long before every assigned camera has had a turn. The number
             # an operator needs to answer "could we have missed a vehicle?".
             "sweep_seconds": round(self.rotation.sweep_seconds, 1),
+            # Hosts that refused our login, and seconds until we ask again.
+            "paused_hosts": {
+                host: round(left, 1)
+                for host, left in self._backoff.paused_hosts(time.monotonic()).items()
+            },
             "alive": sum(1 for t in self.tasks.values() if t.alive),
             "events_published": self.sink.written,
             "publish_failures": self.sink.publish_failures,

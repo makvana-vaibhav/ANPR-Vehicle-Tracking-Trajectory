@@ -365,6 +365,10 @@ services:
     container_name: contrail-ai-worker
     <<: *default-restart
     profiles: ["ai"]
+    # Time to close every capture before Docker kills the process. Killed, a
+    # worker's grid sessions end without a TEARDOWN, which the integration
+    # guide asks us not to do; its cameras stop together, within ~8s.
+    stop_grace_period: 20s
     env_file: [.env]
     environment: &ai-worker-env
       # An explicit camera list for this process; empty means its hash shard.

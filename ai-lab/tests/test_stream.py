@@ -8,13 +8,19 @@ on.
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import json
 import math
+import re
+import socketserver
+import threading
 import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from itertools import pairwise
 from pathlib import Path
+from urllib.parse import quote
 
 import cv2
 import numpy as np
@@ -22,7 +28,7 @@ import pytest
 
 from ailab.config import RunConfig
 from ailab.stream.events import EventSink, SourceIdentity, vehicle_event
-from ailab.stream.reader import StreamReader
+from ailab.stream.reader import StreamReader, diagnose
 from ailab.stream.runner import StreamRunner, _LiveTrack
 from ailab.track.merge import Vehicle
 from ailab.types import (
@@ -954,6 +960,209 @@ class TestNagarNetraIntegrationRules:
         stamps = [reader._read_pts(capture)[0] for _ in range(10)]
         assert stamps == sorted(stamps)
         assert reader.stats.pts_unavailable is True, "fallback must be recorded, not hidden"
+
+    def test_captures_are_opened_with_ffmpeg_only(self, monkeypatch) -> None:
+        """Left to choose, OpenCV falls through to its image-sequence backend
+        after FFmpeg refuses, which quotes the URL — password and all — in an
+        error on stderr. It did that on every failed grid open."""
+        import ailab.stream.reader as reader_module
+
+        calls: list[tuple] = []
+
+        class Refused:
+            def __init__(self, *args: object) -> None:
+                calls.append(args)
+
+            def isOpened(self) -> bool:  # noqa: N802 — OpenCV's name
+                return False
+
+            def release(self) -> None:
+                return None
+
+        monkeypatch.setattr(reader_module.cv2, "VideoCapture", Refused)
+        assert StreamReader("rtsp://u:p@grid:8554/stream/cam01")._open() is False
+        assert calls == [("rtsp://u:p@grid:8554/stream/cam01", cv2.CAP_FFMPEG)]
+
+
+@pytest.fixture
+def rtsp_server():
+    """A login-protected RTSP server that answers DESCRIBE and records requests.
+
+    Just enough of the protocol to tell a diagnosis that logs in from one that
+    does not: a challenge for a request without valid credentials, and an SDP
+    for one with them.
+    """
+    servers: list[socketserver.ThreadingTCPServer] = []
+
+    def start(
+        scheme: str, user: str = "team", secret: str = "s3cret"
+    ) -> tuple[int, list[str]]:
+        requests: list[str] = []
+        nonce = "f00dfeed"
+
+        def md5(text: str) -> str:
+            return hashlib.md5(text.encode()).hexdigest()
+
+        def accepted(authorization: str, uri: str) -> bool:
+            if scheme == "basic":
+                token = base64.b64encode(f"{user}:{secret}".encode()).decode()
+                return authorization == f"Basic {token}"
+            if not authorization.startswith("Digest "):
+                return False
+            params = dict(re.findall(r'(\w+)="([^"]*)"', authorization))
+            ha1 = md5(f"{user}:grid:{secret}")
+            expected = md5(f"{ha1}:{nonce}:{md5(f'DESCRIBE:{uri}')}")
+            return params.get("uri") == uri and params.get("response") == expected
+
+        class Handler(socketserver.BaseRequestHandler):
+            def handle(self) -> None:
+                buffered = b""
+                while True:
+                    while b"\r\n\r\n" not in buffered:
+                        chunk = self.request.recv(4096)
+                        if not chunk:
+                            return
+                        buffered += chunk
+                    head, _, buffered = buffered.partition(b"\r\n\r\n")
+                    text = head.decode("latin-1")
+                    requests.append(text)
+                    lines = text.split("\r\n")
+                    headers = {
+                        name.strip().lower(): value.strip()
+                        for name, _, value in (line.partition(":") for line in lines[1:])
+                    }
+                    cseq = headers.get("cseq", "1")
+                    if accepted(headers.get("authorization", ""), lines[0].split(" ")[1]):
+                        body = b"v=0\r\n"
+                        self.request.sendall(
+                            f"RTSP/1.0 200 OK\r\nCSeq: {cseq}\r\n"
+                            f"Content-Length: {len(body)}\r\n\r\n".encode() + body
+                        )
+                    else:
+                        challenge = (
+                            'Basic realm="grid"'
+                            if scheme == "basic"
+                            else f'Digest realm="grid", nonce="{nonce}"'
+                        )
+                        self.request.sendall(
+                            f"RTSP/1.0 401 Unauthorized\r\nCSeq: {cseq}\r\n"
+                            f"WWW-Authenticate: {challenge}\r\n\r\n".encode()
+                        )
+
+        server = socketserver.ThreadingTCPServer(("127.0.0.1", 0), Handler)
+        server.daemon_threads = True
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        servers.append(server)
+        return server.server_address[1], requests
+
+    yield start
+    for server in servers:
+        server.shutdown()
+        server.server_close()
+
+
+class TestDiagnosisLogsIn:
+    """A diagnosis must answer the login challenge with the credentials it has.
+
+    It used to stop at the challenge, so a grid that requires a login answered
+    401 to every diagnosis whatever had really gone wrong. "unauthorized" now
+    pauses every camera on the host, so a wrong verdict would take the whole
+    grid off the air over a timeout on one feed.
+    """
+
+    def test_accepted_credentials_are_not_called_unauthorized(self, rtsp_server) -> None:
+        port, _ = rtsp_server("basic")
+        url = f"rtsp://team:s3cret@127.0.0.1:{port}/stream/cam01"
+        assert diagnose(url, timeout=2.0) == "opened but no media"
+
+    def test_rejected_credentials_are_unauthorized(self, rtsp_server) -> None:
+        port, _ = rtsp_server("basic")
+        url = f"rtsp://team:wrong@127.0.0.1:{port}/stream/cam01"
+        assert diagnose(url, timeout=2.0) == "unauthorized"
+
+    def test_no_credentials_for_a_login_is_unauthorized(self, rtsp_server) -> None:
+        port, _ = rtsp_server("basic")
+        assert diagnose(f"rtsp://127.0.0.1:{port}/stream/cam01", timeout=2.0) == (
+            "unauthorized"
+        )
+
+    def test_digest_is_answered_without_the_password_on_the_wire(
+        self, rtsp_server
+    ) -> None:
+        port, requests = rtsp_server("digest")
+        url = f"rtsp://team:s3cret@127.0.0.1:{port}/stream/cam01"
+        assert diagnose(url, timeout=2.0) == "opened but no media"
+        wire = "\n".join(requests)
+        assert "s3cret" not in wire
+        assert base64.b64encode(b"team:s3cret").decode() not in wire
+
+    def test_the_request_line_never_carries_credentials(self, rtsp_server) -> None:
+        port, requests = rtsp_server("basic")
+        diagnose(f"rtsp://team:s3cret@127.0.0.1:{port}/stream/cam01", timeout=2.0)
+        request_lines = [r.split("\r\n")[0] for r in requests]
+        assert request_lines
+        assert all("s3cret" not in line and "team" not in line for line in request_lines)
+
+    def test_percent_encoded_credentials_are_decoded(self, rtsp_server) -> None:
+        """The registry quotes credentials into the URL, so `@`, `:` and `/`
+        in a password must survive the round trip."""
+        port, _ = rtsp_server("basic", secret="p@ss:w/rd")
+        url = f"rtsp://team:{quote('p@ss:w/rd', safe='')}@127.0.0.1:{port}/stream/cam01"
+        assert diagnose(url, timeout=2.0) == "opened but no media"
+
+
+class TestASupervisorCanStopARun:
+    """`stop` is how the worker ends a camera it no longer wants.
+
+    Without it the only ways out of a run were its deadline and the stream
+    failing, so a "stopped" camera kept its grid session open in an orphaned
+    thread for as long as the worker lived.
+    """
+
+    def test_stop_ends_the_run_and_closes_the_capture(
+        self, short_clip: Path, monkeypatch
+    ) -> None:
+        closed: list[bool] = []
+        original_stop = StreamReader.stop
+
+        def recording_stop(reader: StreamReader) -> None:
+            closed.append(True)
+            original_stop(reader)
+
+        monkeypatch.setattr(StreamReader, "stop", recording_stop)
+
+        class _RunnablePipeline(_StubPipeline):
+            _tracker = None
+
+        runner = StreamRunner(
+            RunConfig(),
+            SourceIdentity(camera_id="CAM-DEMO-01"),
+            EventSink(),
+            pipeline=_RunnablePipeline(),  # type: ignore[arg-type]
+        )
+        stop = threading.Event()
+        processed: list[int] = []
+        opened_after: list[int] = []
+
+        def process(_captured: object, frame_index: int) -> None:
+            processed.append(frame_index)
+            if len(processed) == 3:
+                stop.set()
+
+        monkeypatch.setattr(runner, "_process", process)
+        # Paced like a camera: unpaced, the reader finishes this short clip
+        # before the consumer asks twice, and keeps only the newest frame.
+        report = runner.run(
+            str(short_clip),
+            realtime=True,
+            stop=stop,
+            on_open=lambda: opened_after.append(len(processed)),
+        )
+
+        assert processed == [0, 1, 2], "the run went on after it was stopped"
+        assert report["stream"]["frames_processed"] == 3
+        assert closed, "the capture was not closed"
+        assert opened_after == [0], "on_open must fire once, before the first frame"
 
 
 class TestBoxesCarryTheirCoordinateSpace:

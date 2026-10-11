@@ -22,7 +22,9 @@ capacity are directly measurable rather than entangled with its neighbours.
 from __future__ import annotations
 
 import secrets
+import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -191,8 +193,21 @@ class StreamRunner:
         max_seconds: float | None = None,
         max_frames: int | None = None,
         realtime: bool = True,
+        stop: threading.Event | None = None,
+        on_open: Callable[[], None] | None = None,
     ) -> dict[str, Any]:
-        """Consume the stream until it ends or a limit is reached."""
+        """Consume the stream until it ends, a limit is reached, or `stop` is set.
+
+        `stop` is how a supervisor ends a camera it no longer wants. Without it
+        the only ways out were the deadline and the stream failing, so a camera
+        "stopped" by its supervisor kept its connection open in an orphaned
+        thread for as long as the process lived — against the integration
+        guide's rule to close a capture once it is finished with.
+
+        `on_open` is called once the stream has opened, so a supervisor backing
+        off a host learns it is answering again without waiting for this run
+        to end, which for a camera with no deadline is never.
+        """
         cfg = self.config
         reader = StreamReader(url, realtime=realtime).start()
         log.info(
@@ -201,6 +216,8 @@ class StreamRunner:
             # line that prints a source has to redact — including this one.
             redact(url), self.source.camera_id, reader.fps,
         )
+        if on_open is not None:
+            on_open()
 
         self._fps = reader.fps
         self.pipeline._tracker = self.pipeline._tracker or None
@@ -219,6 +236,9 @@ class StreamRunner:
 
         try:
             while True:
+                if stop is not None and stop.is_set():
+                    log.info("stopped by its supervisor")
+                    break
                 if deadline and time.perf_counter() > deadline:
                     log.info("time limit reached")
                     break
