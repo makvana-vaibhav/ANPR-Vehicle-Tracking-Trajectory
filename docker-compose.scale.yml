@@ -32,7 +32,7 @@ services:
       INGEST_ENABLED: "false"
 
   consumer:
-    image: nagarnetra/api:dev
+    image: contrail/api:dev
     command: ["python", "-m", "app.consumer_main"]
     restart: unless-stopped
     env_file: [.env]
@@ -51,4 +51,4 @@ services:
       postgres: { condition: service_healthy }
       redis: { condition: service_healthy }
       api: { condition: service_healthy }
-    networks: [nagarnetra]
+    networks: [contrail]

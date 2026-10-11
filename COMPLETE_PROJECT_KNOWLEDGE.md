@@ -1358,11 +1358,11 @@ Measured alert latency to a connected operator: **~24 ms**.
 | `minio` | `minio/minio:2025-09-07` | crops |
 | `opensearch` | `opensearchproject/opensearch:2.19.6` | **unused** |
 | `mediamtx` | `bluenviron/mediamtx:1.20.1-ffmpeg` | video gateway |
-| `api` | `nagarnetra/api:dev` | FastAPI |
+| `api` | `contrail/api:dev` | FastAPI |
 | `ingest` | same image | health monitor |
 | `simulator` | same image | camera fleet |
-| `web` | `nagarnetra/web:dev` | React |
-| `ai-worker` | `nagarnetra/ai-worker:dev` | **profile `ai`** |
+| `web` | `contrail/web:dev` | React |
+| `ai-worker` | `contrail/ai-worker:dev` | **profile `ai`** |
 
 ### Compose profiles
 
@@ -1783,13 +1783,13 @@ Browser: `http://localhost:5173` (web), `http://localhost:8000/docs` (API).
 
 ### Frontend doesn't load
 1. `docker compose ps` — is `web` up?
-2. `docker logs nagarnetra-web`
+2. `docker logs contrail-web`
 3. Browser console — is `VITE_API_BASE_URL` resolving?
 
 ### Camera doesn't appear
-1. `docker exec nagarnetra-postgres psql -U nagarnetra -d nagarnetra -c "SELECT camera_code,status FROM cameras;"`
+1. `docker exec contrail-postgres psql -U nagarnetra -d nagarnetra -c "SELECT camera_code,status FROM cameras;"`
 2. Is it in `data/seed/cameras.csv`? Seeding is **additive** — trimming the CSV does not delete rows. Use `python -m scripts.prune_registry --match-seed`.
-3. `docker logs nagarnetra-simulator | grep stream_started`
+3. `docker logs contrail-simulator | grep stream_started`
 
 ### Video doesn't play
 1. Is the MediaMTX path ready? `curl http://localhost:9997/v3/paths/list` (may need auth)
@@ -1801,9 +1801,9 @@ Browser: `http://localhost:5173` (web), `http://localhost:8000/docs` (API).
 ### ANPR isn't detecting
 1. **Is the worker even running?** `docker compose ps ai-worker` — `make up` does
    not start it. Use `make ai`.
-2. `docker logs nagarnetra-ai-worker | grep "inference budget"` — should show
+2. `docker logs contrail-ai-worker | grep "inference budget"` — should show
    threads per model.
-3. `docker logs nagarnetra-ai-worker | grep "models built"` — `built` must settle
+3. `docker logs contrail-ai-worker | grep "models built"` — `built` must settle
    at the slot count. If it keeps climbing, the pipeline pool is leaking.
 4. Are models present? `ls ai-lab/models/` → `make models`.
 
@@ -1814,7 +1814,7 @@ Browser: `http://localhost:5173` (web), `http://localhost:8000/docs` (API).
 4. Is grammar rejecting a valid plate? Check `plate_regions` on the camera.
 
 ### API returns 500
-1. Response carries a `request_id` — grep it: `docker logs nagarnetra-api | grep <id>`
+1. Response carries a `request_id` — grep it: `docker logs contrail-api | grep <id>`
 2. Common: a SQL error. **SQLAlchemy `text()` parses `:word` inside SQL comments**
    — never write a colon-prefixed word in a SQL comment, and use
    `CAST(:x AS text)` not `:x::text`.

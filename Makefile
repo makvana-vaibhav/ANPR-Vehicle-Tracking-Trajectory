@@ -255,7 +255,7 @@ load-quick: ## A 30s sanity run of the load test, for checking it still works
 load-operators: ## k6: can operators still work while ingest runs at full rate?
 	@# Containerised so no k6 install is needed, and on the compose network so
 	@# it reaches the API by service name rather than through the host.
-	@docker run --rm -i --network nagarnetra-net \
+	@docker run --rm -i --network contrail-net \
 		-e API_URL=http://api:8000 -e API_PASSWORD="$${BOOTSTRAP_ADMIN_PASSWORD:-NagarNetra@2026}" \
 		-v "$(PWD)/tests/load/k6:/scripts:ro" \
 		grafana/k6:0.54.0 run /scripts/api_load.js

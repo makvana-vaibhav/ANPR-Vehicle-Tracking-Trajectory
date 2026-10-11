@@ -11,7 +11,7 @@ nobody spends an afternoon on a switch that cannot exist.
 Not inferred — read from the running worker:
 
 ```
-$ docker exec nagarnetra-ai-worker python -c \
+$ docker exec contrail-ai-worker python -c \
     "import onnxruntime as ort; print(ort.get_available_providers())"
 ['AzureExecutionProvider', 'CPUExecutionProvider']
 ```

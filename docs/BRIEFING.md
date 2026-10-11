@@ -717,7 +717,7 @@ Full script with click paths: **`docs/DEMO_SCRIPT.md`**. The essentials:
 ```bash
 docker compose ps                                  # all healthy
 curl -s localhost:9100/streams | grep CAM-DEMO     # demo publishing
-docker logs nagarnetra-ai-worker --tail 5 | grep watching
+docker logs contrail-ai-worker --tail 5 | grep watching
 ```
 
 In the browser at **localhost:8080**, sign in as `admin` / `NagarNetra@2026` and

@@ -15,7 +15,7 @@ skip it — three of the five moments depend on a worker being up, and it takes
 docker compose ps            # every service healthy
 curl -s localhost:8000/health
 curl -s localhost:9100/streams | grep CAM-DEMO      # the demo feed is publishing
-docker logs nagarnetra-ai-worker --tail 5 | grep watching
+docker logs contrail-ai-worker --tail 5 | grep watching
 ```
 
 Then in the browser at **http://localhost:8080**, sign in as `admin` /

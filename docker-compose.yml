@@ -10,7 +10,7 @@
 #  lives in docker-compose.scale.yml.
 # ══════════════════════════════════════════════════════════════════════
 
-name: nagarnetra
+name: contrail
 
 x-logging: &default-logging
   driver: json-file
@@ -28,7 +28,7 @@ services:
   # timescaledb-ha:*-all ships PostGIS and TimescaleDB together.
   postgres:
     image: timescale/timescaledb-ha:pg16.14-ts2.29.2-all
-    container_name: nagarnetra-postgres
+    container_name: contrail-postgres
     <<: *default-restart
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-nagarnetra}
@@ -69,12 +69,12 @@ services:
       retries: 20
       start_period: 30s
     logging: *default-logging
-    networks: [nagarnetra]
+    networks: [contrail]
 
   # ── Redis 7 — cache + event bus (Streams w/ consumer groups) ────────
   redis:
     image: redis:7.4.11-alpine
-    container_name: nagarnetra-redis
+    container_name: contrail-redis
     <<: *default-restart
     command:
       - redis-server
@@ -95,12 +95,12 @@ services:
       retries: 10
       start_period: 5s
     logging: *default-logging
-    networks: [nagarnetra]
+    networks: [contrail]
 
   # ── MinIO — S3-compatible store for plate crops, frames, clips ──────
   minio:
     image: minio/minio:RELEASE.2025-09-07T16-13-09Z
-    container_name: nagarnetra-minio
+    container_name: contrail-minio
     <<: *default-restart
     command: server /data --console-address ":9001"
     environment:
@@ -119,12 +119,12 @@ services:
       retries: 20
       start_period: 10s
     logging: *default-logging
-    networks: [nagarnetra]
+    networks: [contrail]
 
   # ── MinIO bucket bootstrap — creates the media bucket, then exits ───
   minio-init:
     image: minio/minio:RELEASE.2025-09-07T16-13-09Z
-    container_name: nagarnetra-minio-init
+    container_name: contrail-minio-init
     depends_on:
       minio:
         condition: service_healthy
@@ -137,14 +137,14 @@ services:
       "
     restart: "no"
     logging: *default-logging
-    networks: [nagarnetra]
+    networks: [contrail]
 
   # ── OpenSearch — fuzzy/partial plate search ─────────────────────────
   # Apache-2.0. Postgres pg_trgm takes over at runtime if this is down,
   # so the demo survives losing this container (proven in Phase 8).
   opensearch:
     image: opensearchproject/opensearch:2.19.6
-    container_name: nagarnetra-opensearch
+    container_name: contrail-opensearch
     <<: *default-restart
     environment:
       discovery.type: single-node
@@ -170,14 +170,14 @@ services:
       retries: 30
       start_period: 40s
     logging: *default-logging
-    networks: [nagarnetra]
+    networks: [contrail]
 
   # ── MediaMTX — RTSP in → WebRTC (WHEP) / HLS out ────────────────────
   # On-demand publishing: a camera is only pulled while someone watches.
   # That is a real bandwidth argument, not a demo trick (see docs/HLD.md).
   mediamtx:
     image: bluenviron/mediamtx:1.20.1-ffmpeg
-    container_name: nagarnetra-mediamtx
+    container_name: contrail-mediamtx
     <<: *default-restart
     environment:
       # `protocols` was renamed `rtspTransports` in MediaMTX 1.x.
@@ -201,7 +201,7 @@ services:
       retries: 12
       start_period: 15s
     logging: *default-logging
-    networks: [nagarnetra]
+    networks: [contrail]
 
   # ── API — FastAPI: registry, GIS, auth, events, search, alerts ──────
   api:
@@ -213,8 +213,8 @@ services:
         # The demo image doubles as the test/lint runner (`make test`,
         # `make lint`), so it carries pytest, ruff and mypy.
         INSTALL_DEV: "true"
-    image: nagarnetra/api:dev
-    container_name: nagarnetra-api
+    image: contrail/api:dev
+    container_name: contrail-api
     <<: *default-restart
     env_file: [.env]
     environment:
@@ -256,7 +256,7 @@ services:
       retries: 12
       start_period: 20s
     logging: *default-logging
-    networks: [nagarnetra]
+    networks: [contrail]
 
   # ── Web — React command centre, served by nginx ─────────────────────
   web:
@@ -268,8 +268,8 @@ services:
         NODE_VERSION: "20"
         VITE_API_BASE_URL: ${VITE_API_BASE_URL:-http://localhost:8000}
         VITE_WS_URL: ${VITE_WS_URL:-ws://localhost:8000/ws/events}
-    image: nagarnetra/web:dev
-    container_name: nagarnetra-web
+    image: contrail/web:dev
+    container_name: contrail-web
     <<: *default-restart
     ports:
       - "${WEB_HOST_PORT:-8080}:80"
@@ -282,7 +282,7 @@ services:
       retries: 12
       start_period: 10s
     logging: *default-logging
-    networks: [nagarnetra]
+    networks: [contrail]
 
   # ── Ingest — fleet health monitor ───────────────────────────────────
   # Runs the staggered probe loop against every camera through its VMS
@@ -291,8 +291,8 @@ services:
   # the ORM models and adapters, and one image build protects the 5-minute
   # demo (see CLAUDE.md section 9).
   ingest:
-    image: nagarnetra/api:dev
-    container_name: nagarnetra-ingest
+    image: contrail/api:dev
+    container_name: contrail-ingest
     <<: *default-restart
     command: ["python", "-m", "app.ingest.monitor"]
     env_file: [.env]
@@ -316,7 +316,7 @@ services:
       retries: 5
       start_period: 20s
     logging: *default-logging
-    networks: [nagarnetra]
+    networks: [contrail]
 
   # ── AI worker — live ANPR on camera streams ─────────────────────────
   # Pulls RTSP from MediaMTX, runs vehicle detection, tracking, plate
@@ -358,8 +358,8 @@ services:
     build:
       context: .
       dockerfile: services/ai-worker/Dockerfile
-    image: nagarnetra/ai-worker:dev
-    container_name: nagarnetra-ai-worker
+    image: contrail/ai-worker:dev
+    container_name: contrail-ai-worker
     <<: *default-restart
     profiles: ["ai"]
     env_file: [.env]
@@ -449,7 +449,7 @@ services:
       retries: 3
       start_period: 20s
     logging: *default-logging
-    networks: [nagarnetra]
+    networks: [contrail]
 
   # ── The other two ANPR workers — opt in with `make ai-multi` ────────
   #
@@ -477,7 +477,7 @@ services:
   # the machine instead of each sizing for it alone.
   ai-worker-2:
     <<: *ai-worker
-    container_name: nagarnetra-ai-worker-2
+    container_name: contrail-ai-worker-2
     profiles: ["ai-multi"]
     environment:
       <<: *ai-worker-env
@@ -485,7 +485,7 @@ services:
 
   ai-worker-3:
     <<: *ai-worker
-    container_name: nagarnetra-ai-worker-3
+    container_name: contrail-ai-worker-3
     profiles: ["ai-multi"]
     environment:
       <<: *ai-worker-env
@@ -496,8 +496,8 @@ services:
   # cameras without hardware. This is the same technique the challenge
   # sandbox uses to expose its 30+ government feeds (FAQ Q39-40).
   simulator:
-    image: nagarnetra/api:dev
-    container_name: nagarnetra-simulator
+    image: contrail/api:dev
+    container_name: contrail-simulator
     <<: *default-restart
     command:
       ["uvicorn", "simulator.main:app", "--host", "0.0.0.0", "--port", "9100",
@@ -539,17 +539,19 @@ services:
       retries: 10
       start_period: 30s
     logging: *default-logging
-    networks: [nagarnetra]
+    networks: [contrail]
 
 networks:
-  nagarnetra:
-    name: nagarnetra-net
+  contrail:
+    name: contrail-net
     driver: bridge
     # Fixed subnet so MediaMTX can grant control-API access to the internal
     # tier by CIDR rather than to the world (see infra/mediamtx/mediamtx.yml).
+    # 172.31 rather than the old 172.28: the pre-rename nagarnetra-net keeps
+    # 172.28, and Docker refuses two networks with overlapping pools.
     ipam:
       config:
-        - subnet: 172.28.0.0/16
+        - subnet: 172.31.0.0/16
 
 volumes:
   postgres-data:

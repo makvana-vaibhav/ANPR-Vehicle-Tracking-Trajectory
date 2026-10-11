@@ -37,7 +37,7 @@ authInternalUsers:
   # Publish and playback within the platform's own network.
   - user: any
     pass:
-    ips: ['172.28.0.0/16', '127.0.0.1', '::1']
+    ips: ['172.31.0.0/16', '127.0.0.1', '::1']
     permissions:
       - action: publish
       - action: playback
@@ -52,7 +52,7 @@ authInternalUsers:
   # Control API and metrics: internal tier only.
   - user: any
     pass:
-    ips: ['172.28.0.0/16', '127.0.0.1', '::1']
+    ips: ['172.31.0.0/16', '127.0.0.1', '::1']
     permissions:
       - action: api
       - action: metrics

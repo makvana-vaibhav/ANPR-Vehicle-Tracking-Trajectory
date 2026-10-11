@@ -61,7 +61,7 @@ make down && make demo
 This is the most likely failure and it is almost always the worker.
 
 ```bash
-docker logs nagarnetra-ai-worker --tail 20
+docker logs contrail-ai-worker --tail 20
 ```
 
 | Log says | Do |
