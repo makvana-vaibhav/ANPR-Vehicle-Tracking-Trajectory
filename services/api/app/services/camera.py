@@ -15,7 +15,7 @@ from typing import Any
 from geoalchemy2 import Geometry
 from geoalchemy2.functions import ST_Distance, ST_DWithin, ST_MakePoint, ST_SetSRID
 from pydantic import ValidationError
-from sqlalchemy import Select, func, select
+from sqlalchemy import ColumnElement, Select, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -44,7 +44,7 @@ DEFAULT_PAGE_SIZE = 50
 MAX_BULK_ROWS = 10_000
 
 
-def _point(lat: float, lon: float):
+def _point(lat: float, lon: float) -> ColumnElement[Any]:
     """Build a WGS-84 geography point. Note the (lon, lat) argument order."""
     return ST_SetSRID(ST_MakePoint(lon, lat), 4326)
 
@@ -98,7 +98,7 @@ def _extract_coordinates(camera: Camera) -> tuple[float, float]:
     GeoAlchemy2 hands back a WKBElement; shapely decodes it. Values cached on
     the instance by a query that already selected them take precedence.
     """
-    cached = getattr(camera, "_lat_lon", None)
+    cached: tuple[float, float] | None = getattr(camera, "_lat_lon", None)
     if cached is not None:
         return cached
 
@@ -185,11 +185,17 @@ async def list_cameras(
 
 
 async def get_camera(session: AsyncSession, camera_id: uuid.UUID) -> Camera | None:
-    return await session.scalar(_base_query().where(Camera.id == camera_id))
+    # Bound to a name first: with the return type as context, mypy resolves
+    # `AsyncSession.scalar`'s overloads to Any.
+    camera: Camera | None = await session.scalar(_base_query().where(Camera.id == camera_id))
+    return camera
 
 
 async def get_camera_by_code(session: AsyncSession, code: str) -> Camera | None:
-    return await session.scalar(_base_query().where(Camera.camera_code == code.upper()))
+    camera: Camera | None = await session.scalar(
+        _base_query().where(Camera.camera_code == code.upper())
+    )
+    return camera
 
 
 async def find_nearby(
@@ -368,13 +374,19 @@ async def fleet_summary(session: AsyncSession) -> dict[str, Any]:
 async def _resolve_department(session: AsyncSession, code: str | None) -> uuid.UUID | None:
     if not code:
         return None
-    return await session.scalar(select(Department.id).where(Department.code == code.upper()))
+    department_id: uuid.UUID | None = await session.scalar(
+        select(Department.id).where(Department.code == code.upper())
+    )
+    return department_id
 
 
 async def _resolve_vms(session: AsyncSession, name: str | None) -> uuid.UUID | None:
     if not name:
         return None
-    return await session.scalar(select(VmsInstance.id).where(VmsInstance.name == name))
+    vms_id: uuid.UUID | None = await session.scalar(
+        select(VmsInstance.id).where(VmsInstance.name == name)
+    )
+    return vms_id
 
 
 async def create_camera(session: AsyncSession, payload: CameraCreate) -> Camera:

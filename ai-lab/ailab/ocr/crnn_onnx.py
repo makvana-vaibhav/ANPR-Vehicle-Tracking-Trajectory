@@ -70,7 +70,9 @@ class CrnnOnnxEngine(OcrEngine):
 
         inp = self.session.get_inputs()[0]
         self.input_name = inp.name
-        self.input_dtype = np.float16 if "float16" in inp.type else np.float32
+        self.input_dtype: type[np.floating[Any]] = (
+            np.float16 if "float16" in inp.type else np.float32
+        )
         self.channels = inp.shape[1] if isinstance(inp.shape[1], int) else 3
         self.height = inp.shape[2] if isinstance(inp.shape[2], int) else 48
         self.width = inp.shape[3] if isinstance(inp.shape[3], int) else 320
@@ -85,7 +87,8 @@ class CrnnOnnxEngine(OcrEngine):
             blob = rgb.transpose(2, 0, 1)[None]
         blob = np.ascontiguousarray(blob, dtype=self.input_dtype) / self.input_dtype(255.0)
         # Standard [-1, 1] normalisation used by PP-OCR/CRNN recognisers.
-        return (blob - self.input_dtype(0.5)) / self.input_dtype(0.5)
+        normalised: np.ndarray = (blob - self.input_dtype(0.5)) / self.input_dtype(0.5)
+        return normalised
 
     def read(self, image: np.ndarray) -> OcrResult:
         if image is None or image.size == 0:
@@ -150,7 +153,8 @@ class CrnnOnnxEngine(OcrEngine):
 def _softmax(x: np.ndarray) -> np.ndarray:
     shifted = x - x.max(axis=-1, keepdims=True)
     exp = np.exp(shifted)
-    return exp / exp.sum(axis=-1, keepdims=True)
+    probabilities: np.ndarray = exp / exp.sum(axis=-1, keepdims=True)
+    return probabilities
 
 
 def build(config: OcrConfig) -> CrnnOnnxEngine:

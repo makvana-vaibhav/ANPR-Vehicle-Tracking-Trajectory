@@ -25,6 +25,7 @@ import { useToast } from '@/components/Toast'
 import { Button, ErrorBanner, Icon, PlateChip, Spinner } from '@/components/ui'
 import { useAuth } from '@/hooks/useAuth'
 import * as api from '@/lib/api'
+import { evidenceFloor } from '@/lib/evidence'
 import type { RouteHop, VehicleRoute } from '@/lib/types'
 
 /** What a flag means, in words a reader without the codebase will follow. */
@@ -167,14 +168,12 @@ export default function VehicleReport() {
     async function load() {
       try {
         const window = { since, until }
-        const [document, detections, cameras] = await Promise.all([
+        const [document, cameras] = await Promise.all([
           api.getVehicleRoute(plate, window),
-          api.getDetections({ plate, since, until, limit: 200 }),
           api.getCameras({ limit: '500' }),
         ])
         if (cancelled) return
         setRoute(document)
-        setCrops(Object.fromEntries(detections.items.map((d) => [d.id, d.crop_url ?? null])))
         setDepartments(
           Object.fromEntries(
             cameras.items.filter((c) => c.department_name).map((c) => [c.id, c.department_name!]),
@@ -190,6 +189,31 @@ export default function VehicleReport() {
     }
   }, [plate, since, until])
 
+  // The crop for each visit, from its clearest read. Asked for once the route
+  // is known, and only for reads as confident as the weakest visit's best —
+  // the newest 200 reads of a busy plate missed every visit but the latest
+  // (see `evidenceFloor`). A crop still not found prints as "no crop": it is
+  // evidence about a visit, never the visit itself.
+  useEffect(() => {
+    const floor = route ? evidenceFloor(route) : null
+    if (floor === null) {
+      setCrops({})
+      return
+    }
+    let cancelled = false
+    api
+      .getDetections({ plate, since, until, min_confidence: floor, limit: 200 })
+      .then((page) => {
+        if (!cancelled) setCrops(Object.fromEntries(page.items.map((d) => [d.id, d.crop_url ?? null])))
+      })
+      .catch(() => {
+        if (!cancelled) setCrops({})
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [route, plate, since, until])
+
   // YYYYMMDD-HHMM in IST: en-CA orders the date parts year first.
   const reference = `${plate}-${new Intl.DateTimeFormat('en-CA', {
     timeZone: 'Asia/Kolkata',
@@ -198,7 +222,7 @@ export default function VehicleReport() {
     day: '2-digit',
     hour: '2-digit',
     minute: '2-digit',
-    hour12: false,
+    hourCycle: 'h23',
   })
     .format(new Date(prepared))
     .replace(/[^0-9]/g, '')

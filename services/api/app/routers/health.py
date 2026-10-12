@@ -20,7 +20,7 @@ import asyncio
 import json
 import time
 from datetime import UTC, datetime
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 import httpx
 import redis.asyncio as aioredis
@@ -83,10 +83,14 @@ async def _probe_redis() -> dict[str, Any]:
     """Redis — the event bus in the base profile. Fatal if unreachable."""
     client: aioredis.Redis | None = None
     try:
-        client = aioredis.from_url(
-            settings.redis_url,
-            socket_connect_timeout=_PROBE_TIMEOUT_SECONDS,
-            socket_timeout=_PROBE_TIMEOUT_SECONDS,
+        # redis-py leaves `from_url` unannotated, so its result is Any.
+        client = cast(
+            aioredis.Redis,
+            aioredis.from_url(
+                settings.redis_url,
+                socket_connect_timeout=_PROBE_TIMEOUT_SECONDS,
+                socket_timeout=_PROBE_TIMEOUT_SECONDS,
+            ),
         )
         async with asyncio.timeout(_PROBE_TIMEOUT_SECONDS):
             await client.ping()
@@ -267,8 +271,15 @@ async def _ingest_fleet() -> dict[str, Any]:
         await client.aclose()
 
     if not raw:
-        return {"workers": 0, "consumed": 0, "boxes": 0, "persisted": 0,
-                "alerts_raised": 0, "failed": 0, "latency": {}}
+        return {
+            "workers": 0,
+            "consumed": 0,
+            "boxes": 0,
+            "persisted": 0,
+            "alerts_raised": 0,
+            "failed": 0,
+            "latency": {},
+        }
 
     # Drop workers that have stopped reporting. A dead worker's final totals
     # would otherwise sit in the sum forever, making a shrinking fleet look

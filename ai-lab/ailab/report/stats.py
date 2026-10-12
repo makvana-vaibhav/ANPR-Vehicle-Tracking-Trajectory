@@ -54,7 +54,7 @@ def _distribution(values: list[float]) -> dict[str, Any]:
 
 
 def _histogram(values: list[float], buckets: int = 10) -> dict[str, int]:
-    counts = Counter()
+    counts: Counter[int] = Counter()
     for value in values:
         index = min(buckets - 1, max(0, int(value * buckets)))
         counts[index] += 1

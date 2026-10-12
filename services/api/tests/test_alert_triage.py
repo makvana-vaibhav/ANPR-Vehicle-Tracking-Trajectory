@@ -74,6 +74,55 @@ class TestTriageOrder:
             str(ids["medium-anomaly"]),
         ]
 
+    async def test_a_watchlist_hit_outranks_an_anomaly_at_any_severity(
+        self, client: AsyncClient, auth_headers
+    ) -> None:
+        """A trajectory anomaly is a journey to explain; a watchlist hit is a
+        known vehicle read now. Even a high anomaly waits behind a low hit —
+        and behind a near match, which is still a lead on a listed vehicle."""
+        plate = f"ZZTRIAGE{uuid.uuid4().hex[:4].upper()}"
+        now = datetime.now(UTC)
+        specs = [
+            ("critical-anomaly", AlertType.ANOMALY.value, "critical", now),
+            ("high-anomaly", AlertType.ANOMALY.value, "high", now - timedelta(minutes=1)),
+            ("low-hit", AlertType.WATCHLIST_HIT.value, "low", now - timedelta(minutes=50)),
+            ("medium-near", AlertType.POSSIBLE_MATCH.value, "medium", now - timedelta(minutes=40)),
+            ("medium-hit", AlertType.WATCHLIST_HIT.value, "medium", now - timedelta(minutes=60)),
+        ]
+        ids: dict[str, uuid.UUID] = {}
+        async with SessionLocal() as session:
+            for name, kind, priority, created in specs:
+                alert = Alert(
+                    id=uuid.uuid4(),
+                    alert_type=kind,
+                    priority=priority,
+                    status=AlertStatus.NEW.value,
+                    plate_normalised=plate,
+                    created_at=created,
+                )
+                session.add(alert)
+                ids[name] = alert.id
+            await session.commit()
+        try:
+            response = await client.get(
+                "/api/v1/alerts",
+                params={"plate": plate, "sort": "priority"},
+                headers=await auth_headers("operator"),
+            )
+            assert response.status_code == 200, response.text
+            order = [item["id"] for item in response.json()["items"]]
+            assert order == [
+                str(ids["medium-hit"]),
+                str(ids["medium-near"]),
+                str(ids["low-hit"]),
+                str(ids["critical-anomaly"]),
+                str(ids["high-anomaly"]),
+            ]
+        finally:
+            async with SessionLocal() as session:
+                await session.execute(delete(Alert).where(Alert.plate_normalised == plate))
+                await session.commit()
+
     async def test_newest_first_is_still_there_when_asked_for(
         self, client: AsyncClient, auth_headers, queue
     ) -> None:

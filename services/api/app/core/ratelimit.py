@@ -32,11 +32,13 @@ from __future__ import annotations
 import asyncio
 import time
 from dataclasses import dataclass
+from typing import cast
 
 import redis.asyncio as aioredis
 from fastapi import Request, Response, status
 from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
+from starlette.types import ASGIApp
 
 from app.core.config import settings
 from app.core.logging import get_logger
@@ -98,7 +100,7 @@ def client_key(request: Request) -> str:
 class RateLimitMiddleware(BaseHTTPMiddleware):
     """Fixed-window counter, shared across replicas."""
 
-    def __init__(self, app, redis_url: str | None = None) -> None:
+    def __init__(self, app: ASGIApp, redis_url: str | None = None) -> None:
         super().__init__(app)
         self._redis_url = redis_url or settings.redis_url
         self._client: aioredis.Redis | None = None
@@ -116,7 +118,10 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         """
         running = asyncio.get_running_loop()
         if self._client is None or self._loop is not running:
-            self._client = aioredis.from_url(self._redis_url, decode_responses=True)
+            # redis-py leaves `from_url` unannotated, so its result is Any.
+            self._client = cast(
+                aioredis.Redis, aioredis.from_url(self._redis_url, decode_responses=True)
+            )
             self._loop = running
         return self._client
 

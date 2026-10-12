@@ -14,7 +14,7 @@ from __future__ import annotations
 import uuid
 from datetime import date, datetime
 
-from geoalchemy2 import Geography
+from geoalchemy2 import Geography, WKBElement
 from sqlalchemy import (
     Boolean,
     Date,
@@ -122,7 +122,9 @@ class Camera(Base):
 
     # WGS-84. Geography (not Geometry) so distance maths is in metres on a
     # spheroid — Gujarat spans ~700 km, where planar approximations drift.
-    location: Mapped[str] = mapped_column(
+    # Loaded as GeoAlchemy2's WKBElement; the column type is set explicitly, so
+    # the annotation describes the Python value and does not shape the schema.
+    location: Mapped[WKBElement] = mapped_column(
         Geography(geometry_type="POINT", srid=4326, spatial_index=False),
         nullable=False,
     )

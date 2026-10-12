@@ -16,7 +16,7 @@ import uuid
 
 import pytest
 from httpx import AsyncClient
-from sqlalchemy import delete, select
+from sqlalchemy import String, delete, select
 
 from app.db.session import SessionLocal
 from app.models.security import AuditLog
@@ -209,6 +209,48 @@ class TestAuditDurability:
         async with SessionLocal() as session:
             await session.execute(delete(AuditLog).where(AuditLog.action == "test.oversized"))
             await session.commit()
+
+
+class TestReadingTheTrail:
+    """Reading the trail is audited — once per read, not once per mechanism."""
+
+    async def test_one_view_of_the_trail_writes_one_row(
+        self, client: AsyncClient, auth_headers
+    ) -> None:
+        """The middleware and the endpoint both wrote `audit.read`, so every
+        view of the Audit screen counted twice. A filter no real reviewer
+        would type marks this read's rows apart from anyone else's."""
+        marker = f"zz-probe-{uuid.uuid4().hex[:8]}"
+        response = await client.get(
+            "/api/v1/audit", params={"action": marker}, headers=await auth_headers("auditor")
+        )
+        assert response.status_code == 200, response.text
+
+        async with SessionLocal() as session:
+            rows = list(
+                await session.scalars(
+                    select(AuditLog).where(
+                        AuditLog.action == "audit.read",
+                        AuditLog.params.cast(String).contains(marker),
+                    )
+                )
+            )
+        assert len(rows) == 1, [r.params for r in rows]
+        # The row kept is the one with the detail: what was filtered, and
+        # how much of the trail the reviewer was shown.
+        assert rows[0].params["filters"]["action"] == marker
+        assert rows[0].params["returned"] == 0
+        assert rows[0].username == "auditor"
+
+    async def test_a_refused_read_still_leaves_its_trace(
+        self, client: AsyncClient, auth_headers
+    ) -> None:
+        """Only an endpoint that wrote its own row replaces the middleware's:
+        a role refused the trail is still recorded, by the RBAC layer."""
+        before = await _count("auth.permission_denied")
+        response = await client.get("/api/v1/audit", headers=await auth_headers("operator"))
+        assert response.status_code == 403
+        assert await _count("auth.permission_denied") > before
 
 
 class TestAuditQueryability:

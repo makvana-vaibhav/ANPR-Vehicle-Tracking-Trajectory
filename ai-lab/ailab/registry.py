@@ -15,9 +15,16 @@ from __future__ import annotations
 import importlib
 import importlib.util
 from collections.abc import Callable
-from typing import Any, TypeVar
+from typing import Any, Protocol, TypeVar
 
-T = TypeVar("T")
+
+class _Engine(Protocol):
+    """What `register` stamps on a class: every engine base declares this."""
+
+    engine_name: str
+
+
+T = TypeVar("T", bound=_Engine)
 
 # kind -> name -> factory
 _REGISTRY: dict[str, dict[str, Callable[..., Any]]] = {}

@@ -30,11 +30,12 @@
  * - A forecast is shown with **every** contributing factor the API gave and
  *   with its own backtested error. A prediction with no error bar is
  *   decoration, and one with half its reasons is half an explanation.
- * - The traffic endpoint reads a capped number of rows, oldest first, and
- *   does not say when it stopped (`TRAFFIC_ROW_CAP`). Past the cap its total
- *   was the cap — "20,000 vehicles" over a window that held 27,000. The total
- *   now comes from the uncapped buckets, and every panel built on the capped
- *   read says it is the start of the window, not all of it.
+ * - The traffic endpoint reads a bounded number of rows, newest first, and
+ *   says when the window held more (`truncated`, `rows_read`, `rows_total`).
+ *   It once read oldest first and said nothing, so its total was the cap —
+ *   "20,000 vehicles" over a window that held 27,000. The total shown is the
+ *   server's count of the whole window, and every panel built on the bounded
+ *   read says it covers the latest part of the window, not all of it.
  *
  * The caveats sit behind the `ⓘ` beside each title, and the panels are
  * grouped into four tabs so each is one screenful.
@@ -102,11 +103,10 @@ import {
   factorLabel,
   forecastGeometry,
   HOUR,
-  isTruncatedRead,
   istTicks,
   MINUTE,
   quietLeadIn,
-  TRAFFIC_ROW_CAP,
+  trafficSample,
   withGaps,
   type TimeFlags,
 } from '@/pages/trafficSeries'
@@ -144,7 +144,7 @@ const IST_CLOCK = new Intl.DateTimeFormat('en-IN', {
   timeZone: 'Asia/Kolkata',
   hour: '2-digit',
   minute: '2-digit',
-  hour12: false,
+  hourCycle: 'h23',
 })
 const IST_DAY = new Intl.DateTimeFormat('en-IN', {
   timeZone: 'Asia/Kolkata',
@@ -156,7 +156,7 @@ const IST_STAMP = new Intl.DateTimeFormat('en-IN', {
   hour: '2-digit',
   minute: '2-digit',
   second: '2-digit',
-  hour12: false,
+  hourCycle: 'h23',
 })
 
 /** Spans longer than this are labelled by day rather than by clock time. */
@@ -642,19 +642,11 @@ export default function TrafficIntelligence() {
 
   const zones = traffic?.zones ?? []
 
-  const historyTotal = useMemo(
-    () => (history ? history.points.reduce((sum, p) => sum + p.vehicles, 0) : null),
-    [history],
-  )
-  const sample: SampleInfo | null =
-    traffic && historyTotal !== null && isTruncatedRead(traffic.total_vehicles, historyTotal)
-      ? {
-          read: traffic.total_vehicles,
-          observed: historyTotal,
-          windowLabel: windowDef.label,
-          canNarrow: hours > 1,
-        }
-      : null
+  // The server says when its bounded read stopped short of the window.
+  const partial = trafficSample(traffic)
+  const sample: SampleInfo | null = partial
+    ? { ...partial, windowLabel: windowDef.label, canNarrow: hours > 1 }
+    : null
   const congested = zones.filter((z) => z.congestion === 'heavy' || z.congestion === 'severe')
   const severe = zones.some((z) => z.congestion === 'severe')
   const failed = error !== null && traffic === null
@@ -762,7 +754,7 @@ export default function TrafficIntelligence() {
                 aside={<KpiSparkline rows={historyRows} />}
                 detail={
                   sample
-                    ? `unique · last ${windowDef.label} · road figures from the first ${sample.read.toLocaleString('en-IN')}`
+                    ? `unique · last ${windowDef.label} · road figures from the latest ${sample.read.toLocaleString('en-IN')}`
                     : `unique · last ${windowDef.label}`
                 }
                 info={
@@ -774,9 +766,9 @@ export default function TrafficIntelligence() {
                       <>
                         {' '}
                         The road-state figures are read from at most{' '}
-                        {TRAFFIC_ROW_CAP.toLocaleString('en-IN')} vehicles per
-                        request, oldest first; this total is the full count, summed
-                        from the five-minute buckets.
+                        {sample.read.toLocaleString('en-IN')} vehicles per request,
+                        newest first; this total is the server's count of the whole
+                        window.
                       </>
                     )}
                   </>
@@ -938,7 +930,7 @@ export default function TrafficIntelligence() {
                   caption={
                     traffic
                       ? sample
-                        ? `The first ${traffic.total_vehicles.toLocaleString('en-IN')} vehicles in the window`
+                        ? `The latest ${traffic.total_vehicles.toLocaleString('en-IN')} vehicles in the window`
                         : `${traffic.total_vehicles.toLocaleString('en-IN')} unique vehicles`
                       : undefined
                   }
@@ -1327,17 +1319,17 @@ function bucketWord(bucket: string): string {
 // ── Small parts ──────────────────────────────────────────────────────────
 
 interface SampleInfo {
-  /** Vehicles the traffic endpoint actually read — the cap. */
+  /** Vehicles the traffic endpoint read — the window's latest. */
   read: number
-  /** Vehicles in the window, from the uncapped buckets. */
+  /** Vehicles in the whole window, counted by the server. */
   observed: number
   windowLabel: string
-  /** Whether a shorter window is on offer to bring the read under the cap. */
+  /** Whether a shorter window is on offer to bring the read under the bound. */
   canNarrow: boolean
 }
 
 /**
- * Says that a panel was computed from the first part of the window only.
+ * Says that a panel was computed from the latest part of the window only.
  * Not a warning colour: nothing is wrong with the roads, and nobody needs to
  * act — but a figure built on a sample has to say so beside the figure.
  */
@@ -1349,10 +1341,10 @@ function SampleNote({ sample, className = '' }: { sample: SampleInfo; className?
     >
       <Icon name="info" size={14} className="mt-px shrink-0 text-faint" />
       <span>
-        Computed from the first {read} of {sample.observed.toLocaleString('en-IN')}{' '}
-        vehicles in the last {sample.windowLabel}, oldest first — the server
-        reads at most {read} per request, so the latest traffic is not in this
-        panel.{sample.canNarrow ? ' A shorter window may fit within that.' : ''}
+        Computed from the latest {read} of {sample.observed.toLocaleString('en-IN')}{' '}
+        vehicles in the last {sample.windowLabel} — the server reads at most {read}{' '}
+        per request, newest first, so the start of the window is not in this panel.
+        {sample.canNarrow ? ' A shorter window may fit within that.' : ''}
       </span>
     </p>
   )

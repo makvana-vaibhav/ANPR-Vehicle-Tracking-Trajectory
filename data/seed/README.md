@@ -4,7 +4,7 @@ What is here, and — more importantly — what is deliberately *not*.
 
 | File | What it is |
 |---|---|
-| `watchlist.csv` | The demo watchlist, loaded by `seed.py`. Includes `GJ03AB1234`, the plate `docs/DEMO_SCRIPT.md` types. |
+| `watchlist.csv` | The demo watchlist, loaded by `seed.py` (on unless `SEED_WATCHLIST=false`). Ten fictional vehicles — stolen, wanted, blacklisted, suspect, e-challan defaulter, one expired — each with a `DEMO/` case reference and a `DEMO (fictional)` remark. Every plate is at least three characters from any plate the feeds had read by 12 Oct 2026, so none can fire on a real vehicle seen so far; check again before adding one. Includes `GJ03AB1234`, the plate `docs/DEMO_SCRIPT.md` types. |
 | `sample_cameras.csv` | **Four rows for demonstrating CSV onboarding live.** Not loaded by the seed. |
 | `gujarat_districts.geojson` | District boundaries for the offline basemap. |
 | `gujarat_places.csv` | Place names for the map, rendered as HTML labels. |

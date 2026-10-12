@@ -30,7 +30,7 @@ import sys
 from collections.abc import Iterable
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 import cv2
 import numpy as np
@@ -39,6 +39,18 @@ from ailab.config import REPO_ROOT, RunConfig
 from ailab.logging import get_logger
 
 log = get_logger(__name__)
+
+
+class CropStore(Protocol):
+    """Where evidence crops go; returns where each one landed, or None.
+
+    A `RunDirectory` in the lab, object storage in the AI worker, nowhere at
+    all when a stream is processed only to measure it.
+    """
+
+    def save_plate_crop(self, image: np.ndarray, name: str) -> str | None: ...
+
+    def save_vehicle_crop(self, image: np.ndarray, name: str) -> str | None: ...
 
 
 class RunDirectory:

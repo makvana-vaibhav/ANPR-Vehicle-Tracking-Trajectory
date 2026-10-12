@@ -182,5 +182,7 @@ async def reconcile() -> dict[str, int]:
                 failed += 1
                 log.warning("gateway.reconcile_failed", path=name, error=str(exc))
 
-    log.info("gateway.reconciled", registered=registered, failed=failed, skipped=len(rows) - len(wanted))
+    log.info(
+        "gateway.reconciled", registered=registered, failed=failed, skipped=len(rows) - len(wanted)
+    )
     return {"registered": registered, "failed": failed, "federated": len(rows) - len(wanted)}

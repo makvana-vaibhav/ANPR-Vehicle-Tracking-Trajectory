@@ -39,7 +39,10 @@ async def candidates(
     request: Request,
     detection_id: Annotated[uuid.UUID, Query(description="The detection to find matches for")],
     detection_ts: Annotated[
-        datetime, Query(description="That detection's ts — required, same composite key detections use everywhere")
+        datetime,
+        Query(
+            description="That detection's ts — required, same composite key detections use everywhere"
+        ),
     ],
 ) -> ReidMatchResponse:
     result = await reid.find_reid_matches(session, detection_id, detection_ts)

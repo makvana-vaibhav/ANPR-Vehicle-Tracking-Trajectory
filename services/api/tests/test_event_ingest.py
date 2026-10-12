@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import uuid
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 import pytest
 from sqlalchemy import delete, select
@@ -30,10 +31,21 @@ def an_event(camera_code: str, plate: str = "GJ05TT4321", vehicle_id: int = 1) -
         "event_time": datetime.now(UTC).isoformat(),
         "source": {"camera_id": camera_code, "name": camera_code},
         "frame": {"width": 1920, "height": 1080},
-        "vehicle": {"vehicle_id": vehicle_id, "track_ids": [vehicle_id], "type": "car",
-                    "confidence": 0.81, "bbox": {"x1": 1.0, "y1": 2.0, "x2": 3.0, "y2": 4.0}},
-        "plate": {"text": plate, "confidence": 0.9, "grammar_valid": True,
-                  "candidates": [], "evidence": {}, "bbox": None},
+        "vehicle": {
+            "vehicle_id": vehicle_id,
+            "track_ids": [vehicle_id],
+            "type": "car",
+            "confidence": 0.81,
+            "bbox": {"x1": 1.0, "y1": 2.0, "x2": 3.0, "y2": 4.0},
+        },
+        "plate": {
+            "text": plate,
+            "confidence": 0.9,
+            "grammar_valid": True,
+            "candidates": [],
+            "evidence": {},
+            "bbox": None,
+        },
         "evidence": {"reads": []},
     }
 
@@ -50,8 +62,12 @@ async def _clean_detections():
 async def _make_camera(code: str) -> uuid.UUID:
     async with SessionLocal() as session:
         camera = Camera(
-            camera_code=code, name=f"Test {code}", district="TEST",
-            location="SRID=4326;POINT(72.5 23.0)", status="unknown", anpr_enabled=True,
+            camera_code=code,
+            name=f"Test {code}",
+            district="TEST",
+            location="SRID=4326;POINT(72.5 23.0)",
+            status="unknown",
+            anpr_enabled=True,
         )
         session.add(camera)
         await session.commit()
@@ -160,10 +176,14 @@ class TestBatchedPersistence:
         assert consumer.persisted == 200
         async with SessionLocal() as session:
             rows = (
-                await session.execute(
-                    select(Detection).where(Detection.track_id.like(f"{code}%"))
+                (
+                    await session.execute(
+                        select(Detection).where(Detection.track_id.like(f"{code}%"))
+                    )
                 )
-            ).scalars().all()
+                .scalars()
+                .all()
+            )
         assert len(rows) == 200
 
     async def test_every_row_in_a_batch_gets_its_own_primary_key(self, _clean_detections):
@@ -182,10 +202,14 @@ class TestBatchedPersistence:
 
         async with SessionLocal() as session:
             ids = (
-                await session.execute(
-                    select(Detection.id).where(Detection.track_id.like(f"{code}%"))
+                (
+                    await session.execute(
+                        select(Detection.id).where(Detection.track_id.like(f"{code}%"))
+                    )
                 )
-            ).scalars().all()
+                .scalars()
+                .all()
+            )
         assert len(set(ids)) == 10
         assert None not in ids
 
@@ -269,7 +293,7 @@ class TestTheFanOutSplitIsRealAndSeparate:
         from app.services import event_consumer as module
 
         source = module.__file__
-        with open(source) as handle:
+        with Path(source).open() as handle:
             body = handle.read()
         assert "broadcaster.publish" not in body, (
             "the consumer must not fan events out itself — with dedicated ingest "
@@ -279,7 +303,7 @@ class TestTheFanOutSplitIsRealAndSeparate:
     def test_the_tailer_reads_without_a_consumer_group(self):
         from app.services import event_tailer as module
 
-        with open(module.__file__) as handle:
+        with Path(module.__file__).open() as handle:
             body = handle.read()
         assert "xreadgroup" not in body, (
             "a consumer group would give each replica a different subset of "
@@ -299,7 +323,10 @@ class TestLatencyReporting:
         """An empty window reports nothing, rather than a confident zero."""
         consumer = EventConsumer()
         assert consumer.latency_percentiles() == {
-            "p50_ms": None, "p95_ms": None, "p99_ms": None, "samples": 0,
+            "p50_ms": None,
+            "p95_ms": None,
+            "p99_ms": None,
+            "samples": 0,
         }
 
     def test_percentiles_come_from_the_events_own_timestamps(self):

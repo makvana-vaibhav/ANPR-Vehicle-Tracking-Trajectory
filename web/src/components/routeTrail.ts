@@ -308,7 +308,7 @@ export function timelineTicks(
     'en-IN',
     step >= 86_400
       ? { timeZone: 'Asia/Kolkata', day: 'numeric', month: 'short' }
-      : { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit', hour12: false },
+      : { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' },
   )
   const ticks: { at: number; label: string }[] = []
   for (let t = first; t <= startS + totalSeconds; t += step) {

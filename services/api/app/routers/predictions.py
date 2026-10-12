@@ -228,7 +228,9 @@ def _backtest(indexed: list[tuple[datetime, float, int]]) -> BacktestResult:
         predicted = max(0.0, intercept + slope * x)
         errors.append(abs(predicted - actual))
 
-    return BacktestResult(status="ok", samples=len(errors), mae_pct=round(sum(errors) / len(errors), 2))
+    return BacktestResult(
+        status="ok", samples=len(errors), mae_pct=round(sum(errors) / len(errors), 2)
+    )
 
 
 def _upstream_factor(
@@ -279,7 +281,9 @@ def _speed_factor(
         return None
     earlier_med = _median(earlier)
     later_med = _median(later)
-    if not earlier_med:
+    # `later` holds at least MIN_SPEED_LEGS_PER_HALF legs, so its median is
+    # never None; the test is for the type checker, which cannot know that.
+    if not earlier_med or later_med is None:
         return None
     delta_pct = round((later_med - earlier_med) / earlier_med * 100.0, 1)
     if abs(delta_pct) < SPEED_CHANGE_THRESHOLD_PCT:
@@ -322,7 +326,9 @@ def _build_series(
         indexed.append((row["bucket"], 100.0 * row["vehicles"] / avg_bucket_flow, days))
 
     if not indexed:
-        status: DataStatus = "insufficient_history" if key not in baseline_keys else "insufficient_data"
+        status: DataStatus = (
+            "insufficient_history" if key not in baseline_keys else "insufficient_data"
+        )
         return CongestionSeries(
             key=key,
             label=label,
@@ -362,7 +368,9 @@ def _build_series(
         span_minutes = int((trend_points[-1][0] - trend_points[0][0]).total_seconds() // 60)
         span_minutes = span_minutes or BUCKET_MINUTES
         if slope > SLOPE_EPS:
-            detail = f"Rising — volume index up {slope:.1f} pts/min over the last {span_minutes} min."
+            detail = (
+                f"Rising — volume index up {slope:.1f} pts/min over the last {span_minutes} min."
+            )
         elif slope < -SLOPE_EPS:
             detail = f"Falling — volume index down {abs(slope):.1f} pts/min over the last {span_minutes} min."
         else:
@@ -441,7 +449,7 @@ async def congestion(
 
     return CongestionResponse(
         window=Window(start=lookback_start, end=now, bucket_seconds=BUCKET_MINUTES * 60),
-        group_by=group_by,  # type: ignore[arg-type]
+        group_by=group_by,
         baseline_window_days=BASELINE_DAYS,
         horizons_minutes=list(HORIZONS),
         series=sorted(series, key=lambda s: s.key)[:MAX_ROWS],

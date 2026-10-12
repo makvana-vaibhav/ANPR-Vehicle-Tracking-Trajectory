@@ -61,10 +61,12 @@ async def is_revoked(jti: str) -> bool:
     administrator believes they cancelled.
     """
     try:
-        return await _redis().exists(f"{_KEY_PREFIX}{jti}") == 1
+        # EXISTS answers with a count of the keys present.
+        present: int = await _redis().exists(f"{_KEY_PREFIX}{jti}")
     except aioredis.RedisError as exc:
         log.error("token.revocation_check_failed", jti=jti, error=str(exc), exc_info=True)
         return True
+    return present == 1
 
 
 async def close() -> None:

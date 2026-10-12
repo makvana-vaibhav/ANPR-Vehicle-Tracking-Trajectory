@@ -291,9 +291,13 @@ async def seed_vms(department_ids: dict[str, object]) -> None:
 #: own camera grid (onboarded by scripts/sync_sandbox.py), so the simulated
 #: fleet shrinks to one recorded camera, CAM-DEMO-01, kept as the fallback
 #: that still plays when the grid cannot be reached.
+#:
+#: `CAM-DEMO-02` is no longer retired: the code was reused for the persons
+#: watchlist's recorded demonstration camera (see data/seed/cameras.csv).
+#: Retiring it here would delete it — with its person-match alarms — on every
+#: re-seed, only for `seed_fleet` to recreate it empty a moment later.
 RETIRED_CAMERA_CODES = (
     "CAM-DEMO",
-    "CAM-DEMO-02",
     "CAM-DEMO-03",
     "CAM-NRD-01",
     "CAM-NRD-02",
@@ -518,19 +522,24 @@ async def seed_watchlist() -> None:
     That is exactly how this database ended up with all eight of its entries
     inactive.
 
-    ## Off by default
+    ## Labelled, and on by default
 
     The rows in `watchlist.csv` are invented — plates nobody reported, against
-    FIR numbers that do not exist. That was harmless while the whole fleet was
-    replaying stock clips, but the demo now runs on our own footage of real
-    vehicles, and an invented "stolen, occupants may be armed" flag against a
-    real plate photographed on a real road is not a thing to put on a screen.
+    case numbers that do not exist. This was opt-in while they read like real
+    cases: an invented "stolen, occupants may be armed" flag against a real
+    plate photographed on a real road is not a thing to put on a screen. With
+    seeding off, though, a fresh `make demo` failed its own check that the
+    watchlist is not empty, and the brief asks for representative data —
+    stolen, wanted, blacklisted and suspect vehicles.
 
-    So seeding it is opt-in: `SEED_WATCHLIST=true`, or `--only watchlist`,
-    which is explicit enough to count as asking. Without it the watchlist
-    starts empty and no alert fires, which is the honest state of a system
-    nobody has entered a wanted vehicle into. Turn it on to rehearse the
-    blacklist-alert demo moment.
+    So every row now says what it is, where an operator looks: the case
+    reference starts `DEMO/` and the remark `DEMO (fictional)`. Every plate
+    was checked against all 1,516 plates read on the live feeds by 12 Oct
+    2026 and is at least three characters from each, so neither an exact nor
+    a one-character near match can fire on a vehicle the cameras have seen.
+    Re-check before adding a row (CLAUDE.md: guess toward demonstrable, never
+    toward accusing a real vehicle). `SEED_WATCHLIST=false` leaves the
+    watchlist empty for a deployment that should start with none.
     """
     csv_path = SEED_DIR / "watchlist.csv"
     if not csv_path.exists():
@@ -544,10 +553,15 @@ async def seed_watchlist() -> None:
     async with SessionLocal() as session:
         for row in rows:
             plate = normalise_plate(row["plate"])
+            # The entry being watched now, if there is one. A plate can also
+            # have retired entries under other cases; refreshing one of those
+            # instead would leave the plate watched twice.
             existing = (
                 (
                     await session.execute(
-                        select(Watchlist).where(Watchlist.plate_normalised == plate)
+                        select(Watchlist)
+                        .where(Watchlist.plate_normalised == plate)
+                        .order_by(Watchlist.active.desc(), Watchlist.created_at.desc())
                     )
                 )
                 .scalars()
@@ -628,15 +642,16 @@ async def main() -> int:
             await retire_cameras()
         if args.only in ("fleet", "all"):
             await seed_fleet()
-        # `--only watchlist` is someone asking for it by name; `all` is not.
-        # See `seed_watchlist`'s docstring for why the default is off.
+        # On unless switched off; `--only watchlist` is someone asking for it
+        # by name either way. See `seed_watchlist`'s docstring for the history.
         if args.only == "watchlist" or (
             args.only == "all"
-            and os.environ.get("SEED_WATCHLIST", "").lower() in ("1", "true", "yes")
+            and os.environ.get("SEED_WATCHLIST", "true").lower()
+            not in ("0", "false", "no")
         ):
             await seed_watchlist()
         elif args.only == "all":
-            print("  watchlist: skipped — set SEED_WATCHLIST=true to load demo entries")
+            print("  watchlist: skipped — SEED_WATCHLIST is off")
     finally:
         await dispose_engine()
 

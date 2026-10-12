@@ -127,4 +127,6 @@ def configure_logging(*, service: str = "api", json_output: bool | None = None) 
 
 def get_logger(name: str = "api") -> structlog.stdlib.BoundLogger:
     """Return a bound structlog logger."""
-    return structlog.get_logger(name)
+    # `structlog.stdlib.get_logger` only calls `structlog.get_logger`; it exists
+    # to carry the return type the plain function leaves as Any.
+    return structlog.stdlib.get_logger(name)

@@ -1,0 +1,14 @@
+# ── Lint, type-check and test tooling for the ANPR tree ────────────────
+# Covers ai-lab/ailab and this worker together, installed on top of the
+# worker's own pinned dependencies (requirements.txt): the type check is only
+# meaningful against the numpy, OpenCV stubs and pydantic the worker ships
+# with, which differ from the API's.
+#
+# Never installed into the worker image. `make lint` installs it into a named
+# volume used alongside that image; CI installs it on top of requirements.txt.
+# Versions match services/api/requirements-dev.txt.
+
+mypy==1.14.0
+ruff==0.8.4
+pytest==8.3.4
+pytest-asyncio==0.25.0

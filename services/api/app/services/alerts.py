@@ -81,10 +81,16 @@ class AlertDeduper:
     Kept in memory rather than queried: this runs on the event path, and the
     window is short enough that a restart losing it costs at most one duplicate
     alert per vehicle in flight.
+
+    Remembered per `kind` as well as per plate and camera. A repeat folds into
+    an alert *of its own kind* only: a watchlist hit arriving within the window
+    of a trajectory anomaly on the same plate and camera is a known vehicle
+    read now, and folding it into a journey to explain would leave the stolen
+    car with no alarm of its own at all.
     """
 
     window: timedelta = DEDUP_WINDOW
-    _recent: dict[tuple[str, str], _RecentHit] = field(default_factory=dict)
+    _recent: dict[tuple[str, str, str], _RecentHit] = field(default_factory=dict)
 
     def _prune(self, now: datetime) -> None:
         cutoff = now - self.window
@@ -92,19 +98,27 @@ class AlertDeduper:
         for key in stale:
             del self._recent[key]
 
-    def seen(self, plate: str, camera: str, now: datetime | None = None) -> _RecentHit | None:
+    def seen(
+        self, plate: str, camera: str, now: datetime | None = None, *, kind: str = "watchlist"
+    ) -> _RecentHit | None:
         moment = now or datetime.now(UTC)
         self._prune(moment)
-        hit = self._recent.get((plate, camera))
+        hit = self._recent.get((kind, plate, camera))
         if hit is None:
             return None
         hit.repeats += 1
         return hit
 
     def remember(
-        self, plate: str, camera: str, alert_id: uuid.UUID, now: datetime | None = None
+        self,
+        plate: str,
+        camera: str,
+        alert_id: uuid.UUID,
+        now: datetime | None = None,
+        *,
+        kind: str = "watchlist",
     ) -> None:
-        self._recent[(plate, camera)] = _RecentHit(
+        self._recent[(kind, plate, camera)] = _RecentHit(
             alert_id=alert_id, raised_at=now or datetime.now(UTC)
         )
 
@@ -189,14 +203,15 @@ async def raise_for_anomaly(
     Shares the watchlist deduper rather than a second one: the failure mode
     is identical (the same fact re-raised on every cycle a slow-moving
     journey happens to get re-scored) and a second in-memory structure would
-    only be a second thing that can drift from the first.
+    only be a second thing that can drift from the first. Under its own
+    `kind`, so the two never fold into each other.
 
     Priority follows the strongest factor found, not a raw count — a single
     `impossible_hop` (the physics filter's own strongest signal, promoted
     here) matters more than three merely-rare transitions.
     """
     now = datetime.now(UTC)
-    repeat = deduper.seen(plate, camera_code, now)
+    repeat = deduper.seen(plate, camera_code, now, kind=AlertType.ANOMALY.value)
     if repeat is not None:
         log.info(
             "alert.deduplicated",
@@ -235,7 +250,7 @@ async def raise_for_anomaly(
     session.add(alert)
     await session.flush()
 
-    deduper.remember(plate, camera_code, alert.id, now)
+    deduper.remember(plate, camera_code, alert.id, now, kind=AlertType.ANOMALY.value)
     log.info(
         "alert.raised",
         alert_id=str(alert.id),

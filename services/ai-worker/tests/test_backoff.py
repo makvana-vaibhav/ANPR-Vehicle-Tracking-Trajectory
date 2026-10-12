@@ -118,7 +118,9 @@ class TestRefusedLogin:
         incident, not twelve doublings of the pause."""
         b = backoff()
         first = b.failed("SBX-cam01", GRID, "unauthorized", 0.0)
-        later = [b.failed(f"SBX-cam{i:02d}", GRID, "unauthorized", 3.0) for i in (2, 3, 4)]
+        later = [
+            b.failed(f"SBX-cam{i:02d}", GRID, "unauthorized", 3.0) for i in (2, 3, 4)
+        ]
         assert first == 120.0
         assert later == [117.0, 117.0, 117.0]
         assert b.paused_hosts(3.0) == {GRID: 117.0}

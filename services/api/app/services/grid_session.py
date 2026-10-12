@@ -48,7 +48,9 @@ import html
 import json
 import re
 import secrets
+from collections.abc import Awaitable
 from datetime import UTC, datetime, timedelta
+from typing import cast
 
 import httpx
 import redis.asyncio as aioredis
@@ -218,7 +220,10 @@ class GridSession:
                         await self._client().set(
                             # Outlives the login's own 20 s timeout, so a slow
                             # login cannot lose the lock to a second one.
-                            lock_key, token, nx=True, ex=int(LOGIN_WAIT_S) + 10
+                            lock_key,
+                            token,
+                            nx=True,
+                            ex=int(LOGIN_WAIT_S) + 10,
                         )
                     )
                 except RedisError:
@@ -258,7 +263,13 @@ class GridSession:
         finally:
             if locked:
                 try:
-                    await self._client().eval(_RELEASE_LOCK, 1, lock_key, token)
+                    # redis-py types EVAL for its sync and async clients at once
+                    # (`Awaitable[str] | str`); on the asyncio client it is
+                    # always the awaitable.
+                    await cast(
+                        Awaitable[object],
+                        self._client().eval(_RELEASE_LOCK, 1, lock_key, token),
+                    )
                 except RedisError as exc:
                     log.warning("grid.session_store_unreachable", error=str(exc))
 

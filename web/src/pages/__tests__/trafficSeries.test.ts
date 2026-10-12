@@ -14,9 +14,9 @@ import { describe, expect, it } from 'vitest'
 import {
   factorLabel,
   forecastGeometry,
-  isTruncatedRead,
   istTicks,
   quietLeadIn,
+  trafficSample,
   withGaps,
 } from '@/pages/trafficSeries'
 
@@ -28,7 +28,7 @@ function ist(ms: number): string {
     timeZone: 'Asia/Kolkata',
     hour: '2-digit',
     minute: '2-digit',
-    hour12: false,
+    hourCycle: 'h23',
   }).format(ms)
 }
 
@@ -213,22 +213,22 @@ describe('forecastGeometry', () => {
   })
 })
 
-describe('isTruncatedRead', () => {
-  it('flags a read that stopped at the cap while the buckets saw more', () => {
-    expect(isTruncatedRead(20_000, 27_101)).toBe(true)
+describe('trafficSample', () => {
+  it('takes the server at its word when it says the read stopped short', () => {
+    expect(trafficSample({ truncated: true, rows_read: 20_000, rows_total: 27_101 })).toEqual({
+      read: 20_000,
+      observed: 27_101,
+    })
   })
 
-  it('does not flag a complete read, or a window that holds exactly the cap', () => {
-    expect(isTruncatedRead(6_085, 6_085)).toBe(false)
-    expect(isTruncatedRead(20_000, 20_000)).toBe(false)
+  it('is no sample when the read covered the window, however large', () => {
+    // Exactly the cap's worth is a complete read; only the server's count can
+    // tell the two apart, which is why the screen no longer guesses.
+    expect(trafficSample({ truncated: false, rows_read: 20_000, rows_total: 20_000 })).toBeNull()
+    expect(trafficSample({ truncated: false, rows_read: 6_085, rows_total: 6_085 })).toBeNull()
   })
 
-  it('does not take a few late arrivals under the cap for truncation', () => {
-    // A detection can land between the two queries; that is not a cap.
-    expect(isTruncatedRead(19_998, 20_003)).toBe(false)
-  })
-
-  it('cannot judge without the bucket count', () => {
-    expect(isTruncatedRead(20_000, null)).toBe(false)
+  it('is nothing before the figures load', () => {
+    expect(trafficSample(null)).toBeNull()
   })
 })

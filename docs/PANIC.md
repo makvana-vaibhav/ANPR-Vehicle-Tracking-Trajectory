@@ -49,10 +49,12 @@ services; nothing in the demo path needs them:
 docker compose stop opensearch minio
 ```
 
-**Total reset — two minutes, and it works:**
+**Total reset — two minutes, and it works — but only between sessions:**
 ```bash
 make down && make demo
 ```
+It restarts the workers, so expect the grid to refuse our login for 2–15
+minutes afterwards (§2a). CAM-DEMO works throughout.
 
 ---
 
@@ -75,8 +77,8 @@ for w in contrail-ai-worker contrail-ai-worker-2 contrail-ai-worker-3; do docker
 
 Plates are read continuously on **CAM-DEMO-01, SBX-cam10, SBX-cam21 and
 SBX-cam22** (`AI_WORKER_ALWAYS_ON` in `.env`). Any other camera is analysed
-only while it is open on **Live ANPR** — it starts within about 3 seconds of
-opening it. A grid camera with no boxes that is *not* open there is working
+only while it is open on **Live** (`/anpr`) — it starts within about 3 seconds
+of opening it. A grid camera with no boxes that is *not* open there is working
 as intended.
 
 **Do not restart the workers to "fix" something.** Every restart reopens grid
@@ -138,8 +140,14 @@ Then click **CAM-DEMO** and carry on. **Do not debug this on stage.**
 
 ## 4. The alert never fires
 
-The vehicle has to pass the camera *again* — measured at **33–99 s**. Fill the
-time with the Vehicle Search screen; do not stand and wait.
+The vehicle has to pass the camera *again*. CAM-DEMO's clip loops every 15 s,
+so a plate already being read usually comes round within a minute (one measured
+run on 12 Oct: 7 s). Fill the time with **Investigate**; do not stand and wait.
+
+Check the **Alarms** queue itself before anything else: watchlist hits sort
+first, so the alarm is at the top if it fired. A *Possible watchlist match* at
+medium is a one-character near read of the plate — by design, a lead and not a
+hit; the exact read raises its own alarm at the entry's priority.
 
 If it still has not fired after two minutes:
 
@@ -156,18 +164,26 @@ to match exactly.
 **The terminal fallback — this always works and is genuinely impressive:**
 ```bash
 docker compose exec -e NAGARNETRA_API_URL=http://api:8000 api \
-    python /app/scripts/demo_anpr.py --plate NA13NRU
+    python /app/scripts/demo_anpr.py
 ```
-It prints every step: what the AI read, the watchlist entry, the wait, then the
-alert with its evidence.
+It picks the plate CAM-DEMO is reading best (or pass `--plate`), then prints
+every step: what the AI read, the watchlist entry, the wait, then the alert
+with its evidence. It leaves its entry active and its alarm open — **Retire**
+the entry on the Watchlist and close the alarm (`c`) afterwards.
 
 ---
 
 ## 5. The map is blank
 
-Click **Offline** on the basemap toggle. District boundaries are committed
-GeoJSON and need no network — this is the "works on a plane" claim, so
-demonstrating it deliberately turns a failure into a feature.
+On **Network → Map**, click **Offline** on the basemap toggle. District
+boundaries are committed GeoJSON and need no network — this is the "works on a
+plane" claim, so demonstrating it deliberately turns a failure into a feature.
+**Command**'s map uses no tiles at all, so a blank Command map is not the
+network.
+
+Five grid cameras have no position and are never drawn — Command's legend links
+to them ("5 cameras without a position"), the Map lists them apart, and Live's
+rail has a "Position unknown" filter. That is not a blank map.
 
 If there are no markers at all, the seed did not run:
 ```bash
@@ -182,8 +198,9 @@ Your token expired (15 minutes). **Sign out and back in.**
 
 If a screen is blank with no error, hard-refresh: `Cmd+Shift+R`.
 
-If a role is missing tabs — that is **correct**. `analyst` and `auditor` do not
-see Live ANPR. Sign in as `admin`.
+If a role is missing workspaces — that is **correct**. `analyst` and `auditor`
+do not see **Live**, and `auditor` does not see **Investigate**. Sign in as
+`admin`.
 
 ---
 
@@ -214,6 +231,8 @@ running can still assess the engineering.
 | No plates on a grid camera | *"Night junction overview with headlight glare. Detection and tracking work; ANPR needs a camera down a lane. Same pipeline, different angle."* |
 | Something is slow | *"CPU-only on a laptop, 4.4 fps per stream measured. Production runs this at the edge with a GPU."* |
 | A number looks small | *"That's the measured figure, not a projected one. `docs/HLD.md` labels every number measured, arithmetic or extrapolated."* |
+| A "Journey to explain" is on screen | *"A route that differs from what the fleet usually does. It is for a person to explain — the system never calls a vehicle suspicious, and it sits below every watchlist alarm."* |
+| Insights says "road figures from the latest 20,000" | *"The road-state panels read the latest 20,000 vehicles of the window; the total beside it is the full count. It says so rather than pretending."* |
 
 ---
 
@@ -234,6 +253,10 @@ connect (§2a), and that should be over before anyone is watching. After that,
 
 Then open the browser, sign in, and confirm:
 
-- [ ] Dashboard says **event feed live** (green, top right)
-- [ ] "Reading now" is producing plates
+- [ ] The feed pill at the right of the top bar says **Live** (pulsing dot)
+- [ ] **Command**: the "Reading now" strip is producing plates
+- [ ] **Alarms**: no test alarm left open from a rehearsal
 - [ ] The plate you intend to watchlist is **not already on it**
+
+And do not run `make test` once anyone is watching: the end-to-end suite raises
+a real critical alarm on the live screens before it closes it again.

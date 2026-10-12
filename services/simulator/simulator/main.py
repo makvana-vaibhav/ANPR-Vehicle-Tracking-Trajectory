@@ -16,6 +16,7 @@ import asyncio
 import contextlib
 import os
 from collections import Counter
+from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
 
@@ -65,9 +66,10 @@ DEMO_ROUTE_CITIES = ("Ahmedabad",)
 #: which is the widest spacing the footage allows and therefore the least likely
 #: to leave two cameras at the same phase. Set it to pin the step instead.
 OFFSET_STEP_S = (
-    float(os.environ["SIM_OFFSET_STEP_S"]) if os.environ.get("SIM_OFFSET_STEP_S") else 0.0
+    float(os.environ["SIM_OFFSET_STEP_S"])
+    if os.environ.get("SIM_OFFSET_STEP_S")
+    else 0.0
 )
-
 
 
 publisher = StreamPublisher(RTSP_BASE)
@@ -243,9 +245,11 @@ def build_specs(cameras: list[Camera], videos: list[Path]) -> list[StreamSpec]:
     # Cameras with no corridor fall back to their own code, so each keeps a
     # clip to itself rather than being lumped together.
     corridor_keys = sorted({c.corridor or c.camera_code for c in cameras})
-    corridor_clip = {
-        key: videos[index % len(videos)] for index, key in enumerate(corridor_keys)
-    } if videos else {}
+    corridor_clip = (
+        {key: videos[index % len(videos)] for index, key in enumerate(corridor_keys)}
+        if videos
+        else {}
+    )
 
     resolved: list[tuple[Camera, Path | None]] = []
     for camera in cameras:
@@ -337,7 +341,7 @@ async def shutdown() -> None:
 
 
 @contextlib.asynccontextmanager
-async def lifespan(_app: FastAPI):  # noqa: ANN201
+async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     await startup()
     yield
     await shutdown()

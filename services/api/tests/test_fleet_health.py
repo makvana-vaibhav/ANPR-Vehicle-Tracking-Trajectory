@@ -80,9 +80,9 @@ class TestFleetHealthEndpoint:
         # implementations, which are code and are unit-tested.
         vendors = body["by_vendor"]
         assert vendors, "fleet health must break the estate down by vendor"
-        assert all(row["total"] > 0 for row in vendors), (
-            f"a vendor row with no cameras represents no integration: {vendors}"
-        )
+        assert all(
+            row["total"] > 0 for row in vendors
+        ), f"a vendor row with no cameras represents no integration: {vendors}"
         assert sum(row["total"] for row in vendors) >= ONBOARDED_FLEET
 
     async def test_the_adapter_interface_covers_more_than_is_connected(

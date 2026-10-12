@@ -81,20 +81,22 @@ def _read_csv(path: Path) -> list[dict[str, str]]:
 
 def _float(value: str | None, default: float = 0.0) -> float:
     try:
-        return float(value) if value not in (None, "") else default
+        return float(value) if value is not None and value != "" else default
     except ValueError:
         return default
 
 
 def _int(value: str | None, default: int = 0) -> int:
     try:
-        return int(float(value)) if value not in (None, "") else default
+        return int(float(value)) if value is not None and value != "" else default
     except ValueError:
         return default
 
 
 def _load_tracks(path: Path) -> dict[int, Track]:
     tracks: dict[int, Track] = {}
+    # Rebound per row below; None when a row names a track that was not loaded.
+    track: Track | None
 
     for row in _read_csv(path / "vehicles.csv"):
         track_id = _int(row.get("track_id"), -1)

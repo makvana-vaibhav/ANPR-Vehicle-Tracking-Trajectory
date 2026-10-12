@@ -135,7 +135,6 @@ class TestClustering:
         )
         assert hops[0].best_confidence == 0.97
 
-
     def test_a_visit_is_evidenced_by_its_best_read_not_its_first(self) -> None:
         """A report shows one crop per visit; it should be the clearest one."""
         blurred = sighting(RAJKOT, "RAJKOT", T0, confidence=0.61)

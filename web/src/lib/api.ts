@@ -282,15 +282,23 @@ export async function login(
 
 export async function logout(): Promise<void> {
   const token = refreshToken
-  setTokens(null, null)
-  if (!token) return
+  if (!token) {
+    setTokens(null, null)
+    return
+  }
   try {
+    // Sent while still signed in. The API needs the access token to know whose
+    // refresh token it is revoking, and records the sign-out against them;
+    // clearing the tokens first sent this unauthenticated, so it was refused,
+    // the refresh token stayed valid and no sign-out was ever audited.
     await request('/api/v1/auth/logout', {
       method: 'POST',
       body: JSON.stringify({ refresh_token: token }),
     })
   } catch {
-    /* already signed out locally; the token expires on its own */
+    /* signed out locally regardless; the token expires on its own */
+  } finally {
+    setTokens(null, null)
   }
 }
 
@@ -771,7 +779,7 @@ export function formatIST(iso: string, withDate = true): string {
     timeZone: 'Asia/Kolkata',
     ...(withDate ? { dateStyle: 'medium' as const } : {}),
     timeStyle: 'medium',
-    hour12: false,
+    hourCycle: 'h23',
   }).format(new Date(iso))
 }
 

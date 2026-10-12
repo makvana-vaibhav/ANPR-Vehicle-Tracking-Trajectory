@@ -90,7 +90,9 @@ class TestWhenTheClipCannotBeMeasured:
 class TestAnExplicitStep:
     def test_an_explicit_step_is_honoured(self, clip) -> None:
         source = clip(61.0)
-        offsets = [stagger_offset(source, slot, sharing=3, step=2.0) for slot in range(3)]
+        offsets = [
+            stagger_offset(source, slot, sharing=3, step=2.0) for slot in range(3)
+        ]
 
         assert offsets == [0.0, 2.0, 4.0]
 
@@ -98,6 +100,8 @@ class TestAnExplicitStep:
         """Honouring a step that walks off the end would be worse than ignoring
         it: no video at all, rather than a narrower spread."""
         source = clip(16.0)
-        offsets = [stagger_offset(source, slot, sharing=3, step=90.0) for slot in range(3)]
+        offsets = [
+            stagger_offset(source, slot, sharing=3, step=90.0) for slot in range(3)
+        ]
 
         assert offsets == [0.0, 5.0, 10.0]

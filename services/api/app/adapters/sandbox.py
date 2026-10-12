@@ -117,9 +117,7 @@ class HostedGridAdapter(CameraAdapter):
             try:
                 async with httpx.AsyncClient(timeout=http_timeout, follow_redirects=True) as client:
                     response = await client.get(attempted, headers=headers)
-                    if grid_session.is_one_session_refusal(
-                        response.status_code, response.text
-                    ):
+                    if grid_session.is_one_session_refusal(response.status_code, response.text):
                         # Another session holds our address; the grid allows
                         # one. Ours is shared by every process, so this is
                         # someone else's — replaced at most once a minute.

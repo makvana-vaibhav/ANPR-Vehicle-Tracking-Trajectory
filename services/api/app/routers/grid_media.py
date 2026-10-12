@@ -35,6 +35,7 @@ would otherwise resolve against our origin and 404.
 from __future__ import annotations
 
 import uuid
+from collections.abc import AsyncIterator
 
 import httpx
 from fastapi import APIRouter, HTTPException, Request, Response, status
@@ -89,9 +90,7 @@ async def _fetch(client: httpx.AsyncClient, url: str, headers: dict[str, str]) -
     what the grid said rather than "no video".
     """
     for attempt in (1, 2):
-        response = await client.send(
-            client.build_request("GET", url, headers=headers), stream=True
-        )
+        response = await client.send(client.build_request("GET", url, headers=headers), stream=True)
         turned_away = response.status_code in (301, 302, 303, 307, 308)
         if response.status_code == 403:
             body = (await response.aread()).decode("utf-8", "replace")
@@ -227,7 +226,7 @@ async def grid_media(
         # Segments and keys are streamed. A 7,200-segment playlist is not
         # something to buffer, and the client is a video element that wants
         # bytes as they arrive.
-        async def body_stream():
+        async def body_stream() -> AsyncIterator[bytes]:
             try:
                 async for chunk in response.aiter_bytes():
                     yield chunk

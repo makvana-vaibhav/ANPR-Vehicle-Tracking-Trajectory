@@ -283,7 +283,9 @@ class VehicleTypeCounts(BaseModel):
     motorcycle: int = 0
     bus: int = 0
     truck: int = 0
-    other: int = Field(default=0, description="Classes the detector reported outside the four above.")
+    other: int = Field(
+        default=0, description="Classes the detector reported outside the four above."
+    )
 
 
 class DirectionCounts(BaseModel):
@@ -383,10 +385,26 @@ class TrafficResponse(BaseModel):
 
     #: Fleet-level totals, so the dashboard's headline strip does not have to
     #: re-derive them and risk disagreeing with the table below it.
-    total_vehicles: int
+    total_vehicles: int = Field(
+        description="Vehicles every figure here was computed from: the rows read."
+    )
     totals_by_type: VehicleTypeCounts
-    active_cameras: int = Field(description="Cameras that produced at least one vehicle in the window.")
-    fleet_cameras: int = Field(description="Cameras enabled for ANPR, whether or not they saw anything.")
+    active_cameras: int = Field(
+        description="Cameras that produced at least one vehicle in the window."
+    )
+    fleet_cameras: int = Field(
+        description="Cameras enabled for ANPR, whether or not they saw anything."
+    )
+
+    #: The read is bounded (`MAX_OBSERVATION_ROWS`), newest first. When the
+    #: window holds more, the figures describe its latest `rows_read` vehicles
+    #: and say so here, rather than a client having to infer it.
+    rows_read: int = Field(description="Detection rows read — one per vehicle.")
+    rows_total: int = Field(description="Detection rows in the window, read or not.")
+    truncated: bool = Field(
+        description="True when the window held more rows than were read; the figures "
+        "then cover its latest rows_read vehicles, not all rows_total."
+    )
 
     possible_obstructions: list[PossibleObstruction]
     #: Worst-first, for the "top congested roads" panel.

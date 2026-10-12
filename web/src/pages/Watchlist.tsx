@@ -48,7 +48,10 @@ import { PERMISSIONS } from '@/lib/permissions'
 import { normalisePlate, spacedPlate } from '@/lib/plates'
 import type { Priority, WatchlistEntry } from '@/lib/types'
 
-const CATEGORIES = ['stolen', 'suspect', 'wanted', 'bolo', 'expired'] as const
+/** The kinds of vehicle the brief asks a watchlist to hold — stolen, wanted,
+ *  blacklisted, suspect — and the ones a control room adds. The API accepts
+ *  any short word; these are the ones offered and named. */
+const CATEGORIES = ['stolen', 'wanted', 'blacklisted', 'suspect', 'bolo', 'echallan', 'expired'] as const
 const PRIORITIES: Priority[] = ['low', 'medium', 'high', 'critical']
 
 /** A date alone, in IST — the time sits under it. */
@@ -61,7 +64,9 @@ const CATEGORY_LABEL: Record<string, string> = {
   stolen: 'Stolen',
   suspect: 'Suspect',
   wanted: 'Wanted',
+  blacklisted: 'Blacklisted',
   bolo: 'BOLO — be on the lookout',
+  echallan: 'E-challan defaulter',
   expired: 'Expired',
 }
 

@@ -105,7 +105,7 @@ const IST_TIME = new Intl.DateTimeFormat('en-IN', {
   hour: '2-digit',
   minute: '2-digit',
   second: '2-digit',
-  hour12: false,
+  hourCycle: 'h23',
 })
 
 function ResultMark({ result }: { result: string }) {

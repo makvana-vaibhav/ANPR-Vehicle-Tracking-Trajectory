@@ -322,7 +322,8 @@ class VendorVmsAdapter(CameraAdapter):
                     headers=self._headers(),
                 )
                 response.raise_for_status()
-                return pick(response.json(), "stream")
+                playback: str | None = pick(response.json(), "stream")
+                return playback
         except (AdapterError, httpx.HTTPError, ValueError) as exc:
             self.log.info("vendor.playback_unavailable", error=str(exc))
             return None

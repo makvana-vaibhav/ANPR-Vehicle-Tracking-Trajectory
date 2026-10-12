@@ -372,7 +372,9 @@ def main() -> None:
     talukas = load_talukas()
     localities = load_localities()
 
-    wanted = {code.strip().upper() for code in args.corridors.split(",") if code.strip()}
+    wanted = {
+        code.strip().upper() for code in args.corridors.split(",") if code.strip()
+    }
     unknown = wanted - {corridor.code for corridor in CORRIDORS}
     if unknown:
         raise SystemExit(f"Unknown corridor code(s): {', '.join(sorted(unknown))}")

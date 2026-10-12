@@ -29,6 +29,37 @@ ignore = [
   "E501",    # long lines are prose comments; code is wrapped by hand where it matters
 ]
 
+[tool.mypy]
+# Run `mypy` from ai-lab/ (`make lint` and CI both do). It also checks
+# services/ai-worker, which imports this package and ships in the same image —
+# checking them together is what catches a mismatch between the runner and the
+# sinks and crop stores the worker hands it. Run it against the worker's pinned
+# dependencies (services/ai-worker/requirements.txt plus requirements-dev.txt):
+# numpy's and OpenCV's stubs change between releases.
+files = ["ailab", "../services/ai-worker/ai_worker"]
+python_version = "3.11"
+platform = "linux"
+warn_return_any = true
+warn_unused_configs = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+no_implicit_optional = true
+check_untyped_defs = true
+plugins = ["pydantic.mypy"]
+
+[[tool.mypy.overrides]]
+# Installed, but ship no type information.
+module = ["onnxruntime.*", "scipy.*", "rapidocr_onnxruntime.*", "yaml.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+# The optional experiment profile (requirements-torch.txt), imported lazily and
+# absent from the core environment the pipeline ships with.
+module = ["torch.*", "torchvision.*", "ultralytics.*", "easyocr.*"]
+ignore_missing_imports = true
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q --strict-markers"

@@ -27,7 +27,7 @@ import numpy as np
 from ailab.aggregate.consensus import consensus
 from ailab.aggregate.grammar import normalise, validate
 from ailab.annotate import Annotator, TrackLabel, VideoWriter, transcode_to_h264
-from ailab.artifacts import RunDirectory, runs_root
+from ailab.artifacts import CropStore, RunDirectory, runs_root
 from ailab.config import RunConfig
 from ailab.logging import get_logger
 from ailab.plate.scheduler import CropGate, PlateScheduler
@@ -133,7 +133,9 @@ class Pipeline:
         self._duplicate_plates = 0
         self._reattributed_plates = 0
         self._best_inset: dict[int, float] = {}
-        self._tracker = None  # built per run, since it needs the source frame rate
+        # Built per run, since it needs the source frame rate. Any, like the
+        # detector and OCR above: the registry builds it by name.
+        self._tracker: Any = None
 
     def reset_run_state(self) -> None:
         """Forget the previous run, keeping the loaded models.
@@ -563,7 +565,7 @@ class Pipeline:
         image: np.ndarray,
         plate: PlateDetection,
         tracks: dict[int, Track],
-        run_dir: RunDirectory,
+        run_dir: CropStore,
         reads_by_track: dict[int, int],
         crops_saved: dict[int, int],
         labels: dict[int, TrackLabel],

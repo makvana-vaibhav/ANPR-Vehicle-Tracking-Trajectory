@@ -71,12 +71,8 @@ async def _insert_watchlist(plate: str, *, active: bool = True, priority: str = 
 
 async def _cleanup() -> None:
     async with SessionLocal() as session:
-        await session.execute(
-            text("DELETE FROM detections WHERE plate_normalised LIKE 'ZZ%'")
-        )
-        await session.execute(
-            text("DELETE FROM watchlist WHERE plate_normalised LIKE 'ZZ%'")
-        )
+        await session.execute(text("DELETE FROM detections WHERE plate_normalised LIKE 'ZZ%'"))
+        await session.execute(text("DELETE FROM watchlist WHERE plate_normalised LIKE 'ZZ%'"))
         await session.commit()
 
 
@@ -91,7 +87,9 @@ async def _clean_synthetic_rows():
 async def cameras() -> list[dict]:
     async with SessionLocal() as session:
         rows = (
-            await session.execute(text("SELECT id, camera_code FROM cameras ORDER BY camera_code LIMIT 2"))
+            await session.execute(
+                text("SELECT id, camera_code FROM cameras ORDER BY camera_code LIMIT 2")
+            )
         ).mappings()
         result = [dict(r) for r in rows]
     if len(result) < 2:
@@ -153,9 +151,7 @@ class TestFuzzyMatch:
 
         assert UNRELATED_PLATE not in {r["plate_normalised"] for r in body["results"]}
 
-    async def test_a_query_too_short_is_rejected(
-        self, client: AsyncClient, auth_headers
-    ) -> None:
+    async def test_a_query_too_short_is_rejected(self, client: AsyncClient, auth_headers) -> None:
         response = await client.get(
             "/api/v1/vehicles/search",
             params={"q": "G1"},
@@ -226,7 +222,10 @@ class TestFacetsAndFilters:
     ) -> None:
         await _insert_detection(CORRECT_PLATE, WINDOW_START, cameras[0]["id"], vehicle_type="car")
         await _insert_detection(
-            CORRECT_PLATE, WINDOW_START + timedelta(minutes=5), cameras[0]["id"], vehicle_type="truck"
+            CORRECT_PLATE,
+            WINDOW_START + timedelta(minutes=5),
+            cameras[0]["id"],
+            vehicle_type="truck",
         )
 
         response = await client.get(
@@ -305,7 +304,9 @@ class TestAccessControlAndAudit:
                     await session.execute(
                         select(func.count())
                         .select_from(AuditLog)
-                        .where(AuditLog.action == "search.plate", AuditLog.resource_id == CORRECT_PLATE)
+                        .where(
+                            AuditLog.action == "search.plate", AuditLog.resource_id == CORRECT_PLATE
+                        )
                     )
                 ).scalar_one()
 

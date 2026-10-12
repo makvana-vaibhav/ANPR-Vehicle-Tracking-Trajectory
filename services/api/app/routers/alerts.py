@@ -35,10 +35,25 @@ TRANSITION_PERMISSION = {
     AlertStatus.FALSE_POSITIVE.value: Permission.ALERT_CLOSE,
 }
 
-#: The triage order (`sort=priority`): severity first, and within a severity a
-#: watchlist hit — a known vehicle, read now — before anything inferred. With
+#: The triage order (`sort=priority`), what needs a person first. With
 #: newest-first alone, a critical hit sat below every camera that had gone
-#: dark since; an alarm queue is sorted by what needs a person first.
+#: dark since.
+#:
+#: 1. Anything inferred from a journey — a trajectory anomaly — after every
+#:    alarm about a known vehicle or a failing camera, whatever its severity.
+#:    It is a journey to explain, not a vehicle to stop: a high one must not
+#:    sit above a low watchlist hit (ISA-18.2: an alarm needs a required
+#:    action; an insight does not).
+#: 2. Severity.
+#: 3. Within a severity, a watchlist hit — a known vehicle, read now — or a
+#:    persons-watchlist match (an approved entry, seen now; still for a person
+#:    to confirm), then a near plate match, then the rest.
+#: 4. Newest first.
+_INFERRED_LAST = case(
+    {AlertType.ANOMALY.value: 1, AlertType.SPEED.value: 1, AlertType.CONVOY.value: 1},
+    value=Alert.alert_type,
+    else_=0,
+)
 _PRIORITY_RANK = case(
     {
         Priority.CRITICAL.value: 0,
@@ -49,7 +64,15 @@ _PRIORITY_RANK = case(
     value=Alert.priority,
     else_=4,
 )
-_WATCHLIST_FIRST = case({AlertType.WATCHLIST_HIT.value: 0}, value=Alert.alert_type, else_=1)
+_WATCHLIST_FIRST = case(
+    {
+        AlertType.WATCHLIST_HIT.value: 0,
+        AlertType.PERSON_MATCH.value: 0,
+        AlertType.POSSIBLE_MATCH.value: 1,
+    },
+    value=Alert.alert_type,
+    else_=2,
+)
 
 
 @router.get(
@@ -66,7 +89,12 @@ async def list_alerts(
     open_only: Annotated[bool, Query(description="Only alerts still needing action")] = False,
     sort: Annotated[
         Literal["recent", "priority"],
-        Query(description="recent: newest first. priority: severity, watchlist hits, newest"),
+        Query(
+            description=(
+                "recent: newest first. priority: trajectory anomalies after every other "
+                "alarm, then severity, watchlist hits, newest"
+            )
+        ),
     ] = "recent",
     limit: Annotated[int, Query(ge=1, le=200)] = 50,
     offset: Annotated[int, Query(ge=0)] = 0,
@@ -99,7 +127,7 @@ async def list_alerts(
 
     total = (await session.execute(count_query)).scalar_one()
     order = (
-        (_PRIORITY_RANK, _WATCHLIST_FIRST, Alert.created_at.desc())
+        (_INFERRED_LAST, _PRIORITY_RANK, _WATCHLIST_FIRST, Alert.created_at.desc())
         if sort == "priority"
         else (Alert.created_at.desc(),)
     )
@@ -127,12 +155,14 @@ async def _with_crops(session: DbSession, alerts: list[Alert]) -> list[AlertOut]
         rows = await session.execute(
             select(Detection.id, Detection.crop_key).where(Detection.id.in_(detection_ids))
         )
-        keys = dict(rows.all())
+        # `.tuples()` is typing only: it returns the same result object.
+        keys = dict(rows.tuples().all())
 
     out: list[AlertOut] = []
     for alert in alerts:
         item = AlertOut.model_validate(alert)
-        item.crop_url = evidence.crop_url(keys.get(alert.detection_id))
+        crop_key = keys.get(alert.detection_id) if alert.detection_id else None
+        item.crop_url = evidence.crop_url(crop_key)
         out.append(item)
     return out
 
@@ -209,6 +239,6 @@ async def alert_summary(session: DbSession) -> dict[str, object]:
         .group_by(Alert.priority)
     )
     return {
-        "by_status": dict(by_status.all()),
-        "open_by_priority": dict(by_priority.all()),
+        "by_status": dict(by_status.tuples().all()),
+        "open_by_priority": dict(by_priority.tuples().all()),
     }

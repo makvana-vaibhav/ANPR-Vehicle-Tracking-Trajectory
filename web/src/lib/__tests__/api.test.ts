@@ -8,7 +8,7 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { ApiError, getAccessToken, isAuthenticated, setTokens } from '@/lib/api'
+import { ApiError, getAccessToken, isAuthenticated, logout, setTokens } from '@/lib/api'
 
 describe('token storage', () => {
   beforeEach(() => setTokens(null, null))
@@ -59,5 +59,36 @@ describe('ApiError', () => {
     expect(error.status).toBe(403)
     expect(error.name).toBe('ApiError')
     expect(error).toBeInstanceOf(Error)
+  })
+})
+
+describe('logout', () => {
+  afterEach(() => {
+    setTokens(null, null)
+    vi.unstubAllGlobals()
+  })
+
+  it('revokes the refresh token while still signed in, then forgets both', async () => {
+    setTokens('access-abc', 'refresh-xyz')
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({ detail: 'Signed out' }), { status: 200 }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    await logout()
+
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    const [url, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit]
+    expect(url).toContain('/api/v1/auth/logout')
+    expect(new Headers(init.headers).get('Authorization')).toBe('Bearer access-abc')
+    expect(JSON.parse(String(init.body))).toEqual({ refresh_token: 'refresh-xyz' })
+    expect(isAuthenticated()).toBe(false)
+  })
+
+  it('still signs out locally when the server cannot be reached', async () => {
+    setTokens('access-abc', 'refresh-xyz')
+    vi.stubGlobal('fetch', vi.fn(async () => {
+      throw new TypeError('network down')
+    }))
+    await logout()
+    expect(isAuthenticated()).toBe(false)
   })
 })

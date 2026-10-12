@@ -61,6 +61,7 @@ import {
   Tr,
 } from '@/components/ui'
 import * as api from '@/lib/api'
+import { evidenceFloor } from '@/lib/evidence'
 import { buildTimeline, journeySeconds } from '@/lib/journey'
 import type {
   Convoy,
@@ -174,7 +175,7 @@ function istTime(iso: string, withDate: boolean): string {
     hour: '2-digit',
     minute: '2-digit',
     second: '2-digit',
-    hour12: false,
+    hourCycle: 'h23',
   }).format(new Date(iso))
 }
 
@@ -370,21 +371,14 @@ export default function VehicleSearch() {
   }, [route, plate, searched])
 
   // The evidence crop for each visit — its clearest read. One request,
-  // filtered to reads at least as confident as the weakest visit's best: a
-  // busy plate has hundreds of reads, and the newest page alone would miss
-  // the best read of every visit but the last. The margin covers the route's
-  // four-decimal rounding. A crop that still is not found shows nothing — it
-  // is evidence about a sighting, never the sighting itself.
+  // filtered to reads at least as confident as the weakest visit's best
+  // (`evidenceFloor`): a busy plate has hundreds of reads, and the newest page
+  // alone would miss the best read of every visit but the last. A crop that
+  // still is not found shows nothing — it is evidence about a sighting, never
+  // the sighting itself.
   useEffect(() => {
-    if (!route || !plate || !searched) {
-      setCrops({})
-      return
-    }
-    const confidences = [
-      ...route.hops.map((h) => h.plate_confidence),
-      ...route.unplaced_sightings.map((u) => u.plate_confidence),
-    ]
-    if (confidences.length === 0) {
+    const floor = route ? evidenceFloor(route) : null
+    if (!route || !plate || !searched || floor === null) {
       setCrops({})
       return
     }
@@ -394,7 +388,7 @@ export default function VehicleSearch() {
         plate,
         since: searched.since,
         until: searched.until,
-        min_confidence: Math.max(0, Math.min(...confidences) - 0.001),
+        min_confidence: floor,
         limit: 200,
       })
       .then((page) => {

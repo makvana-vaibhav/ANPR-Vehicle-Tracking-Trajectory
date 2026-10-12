@@ -35,7 +35,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Protocol
 
 from ailab.aggregate.grammar import describe_plate
 from ailab.track.merge import Vehicle
@@ -503,6 +503,19 @@ def vehicle_event(
         payload["latency_ms"] = round(latency_ms, 1)
 
     return payload
+
+
+class EventSinkLike(Protocol):
+    """What `StreamRunner` and its callers need from a sink: `EventSink` below
+    in the lab, the AI worker's Redis publisher on the platform. The counters
+    feed the run report."""
+
+    written: int
+    by_kind: dict[str, int]
+
+    def emit(self, event: dict[str, Any]) -> None: ...
+
+    def close(self) -> None: ...
 
 
 @dataclass

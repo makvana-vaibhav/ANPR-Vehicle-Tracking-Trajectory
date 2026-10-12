@@ -308,9 +308,7 @@ class TestPagination:
             await client.get(f"/api/v1/cameras?limit={limit}&offset=0", headers=headers)
         ).json()
         second = (
-            await client.get(
-                f"/api/v1/cameras?limit={limit}&offset={limit}", headers=headers
-            )
+            await client.get(f"/api/v1/cameras?limit={limit}&offset={limit}", headers=headers)
         ).json()
 
         total = first["total"]
@@ -659,7 +657,7 @@ class TestRecordedSourceFile:
 
         from app.schemas.camera import SOURCE_VIDEO_SUFFIXES
 
-        assert SOURCE_VIDEO_SUFFIXES == frozenset(VIDEO_SUFFIXES)
+        assert frozenset(VIDEO_SUFFIXES) == SOURCE_VIDEO_SUFFIXES
 
     @pytest.mark.parametrize(
         "value",
@@ -671,9 +669,7 @@ class TestRecordedSourceFile:
             "clip.mp4/../../secret.mp4",
         ],
     )
-    async def test_a_path_is_refused(
-        self, client: AsyncClient, auth_headers, value: str
-    ) -> None:
+    async def test_a_path_is_refused(self, client: AsyncClient, auth_headers, value: str) -> None:
         """Anything that is not a bare filename is rejected at the edge.
 
         The database must not be able to hold a value the simulator would have
@@ -708,9 +704,7 @@ class TestRecordedSourceFile:
         )
         assert response.status_code == 422, response.text
 
-    async def test_a_filename_round_trips(
-        self, client: AsyncClient, auth_headers
-    ) -> None:
+    async def test_a_filename_round_trips(self, client: AsyncClient, auth_headers) -> None:
         """A legitimate clip name is stored and returned.
 
         Unlike `stream_url`, `source_file` comes back on the camera: it carries

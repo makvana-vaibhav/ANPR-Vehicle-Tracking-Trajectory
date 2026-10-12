@@ -103,11 +103,21 @@ def main() -> int:
         print("installing playwright (first run only)...")
         subprocess.run(
             ["npx", "--yes", "playwright@1.48.0", "install", "chromium"],
-            cwd=workdir, check=False,
+            cwd=workdir,
+            check=False,
         )
         result = subprocess.run(
-            ["npx", "--yes", "--package=playwright@1.48.0", "node",
-             str(script_path), json.dumps(SHOTS), str(OUT), WEB, ADMIN_PASSWORD],
+            [
+                "npx",
+                "--yes",
+                "--package=playwright@1.48.0",
+                "node",
+                str(script_path),
+                json.dumps(SHOTS),
+                str(OUT),
+                WEB,
+                ADMIN_PASSWORD,
+            ],
             cwd=workdir,
         )
 

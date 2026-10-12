@@ -271,7 +271,7 @@ class VideoWriter:
 
         for codec in ("avc1", "mp4v"):
             writer = cv2.VideoWriter(
-                str(path), cv2.VideoWriter_fourcc(*codec), self.fps, self.size
+                str(path), cv2.VideoWriter.fourcc(*codec), self.fps, self.size
             )
             if writer.isOpened():
                 self._writer = writer

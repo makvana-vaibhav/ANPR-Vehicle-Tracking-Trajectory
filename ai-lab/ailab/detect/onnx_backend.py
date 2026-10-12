@@ -119,14 +119,17 @@ class OnnxYoloModel:
 
         inp = self.session.get_inputs()[0]
         self.input_name = inp.name
-        self.input_dtype = np.float16 if "float16" in inp.type else np.float32
+        self.input_dtype: type[np.floating[Any]] = (
+            np.float16 if "float16" in inp.type else np.float32
+        )
 
         # A fixed-shape export dictates its own input size; honour it rather
         # than failing at inference with a shape mismatch.
         static_h = inp.shape[2] if isinstance(inp.shape[2], int) else None
         static_w = inp.shape[3] if isinstance(inp.shape[3], int) else None
         self.dynamic = static_h is None or static_w is None
-        if not self.dynamic:
+        # `not self.dynamic`, spelled out so both sizes are known to be ints.
+        if static_h is not None and static_w is not None:
             if static_h != static_w:
                 raise ValueError(f"non-square fixed input {inp.shape} is not supported")
             if imgsz != static_h:

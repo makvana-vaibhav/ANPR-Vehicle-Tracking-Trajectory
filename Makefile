@@ -26,7 +26,7 @@ SHELL := /bin/bash
 # blanket switch also stops `/tmp/...` being translated for host tools such as
 # curl.exe, which then write to a C:	mp that does not exist and fail silently.
 # Only the paths that exist inside our containers are listed. No-op elsewhere.
-export MSYS2_ARG_CONV_EXCL := /app;/data;/work;/models;/tmp/ruff
+export MSYS2_ARG_CONV_EXCL := /app;/data;/work;/models;/tmp/ruff;/tmp/mypy;contrail-lint-tools
 
 COMPOSE          := docker compose
 COMPOSE_AI       := docker compose --profile ai
@@ -204,13 +204,51 @@ test: ## Run backend and frontend test suites
 docs: ## Regenerate docs/API.md from the running API
 	@python3 scripts/generate_api_docs.py
 
-.PHONY: lint
-lint: ## Lint and type-check everything
-	@printf "\033[1mPython\033[0m\n"
+# The ANPR tree (ai-lab + the AI worker) is linted and type-checked in the AI
+# worker image, against the dependencies it actually ships with — numpy 1.26,
+# OpenCV's stubs, pydantic 2.9 — not the API image's, which differ. That image
+# carries no dev tooling by design, so services/ai-worker/requirements-dev.txt
+# is installed once into a named volume and reused; `docker volume rm
+# contrail-lint-tools` resets it. AI_IMAGE is the tag docker-compose.yml builds
+# for the ai-worker service.
+AI_IMAGE   := contrail/ai-worker:dev
+LINT_TOOLS := contrail-lint-tools
+
+.PHONY: lint lint-api lint-anpr lint-web
+lint: lint-api lint-anpr lint-web ## Lint and type-check everything, as CI does
+
+lint-api: ## Ruff + mypy for the API, simulator and scripts (api container)
+	@printf "\033[1mPython — API, simulator, scripts\033[0m\n"
 	@$(COMPOSE) exec -T -w /app/services/api api ruff check .
 	@$(COMPOSE) exec -T -w /app/services/api api ruff format --check .
 	@$(COMPOSE) exec -T -w /app -e RUFF_CACHE_DIR=/tmp/ruff api ruff check services/ai-worker services/simulator scripts
 	@$(COMPOSE) exec -T -w /app -e RUFF_CACHE_DIR=/tmp/ruff api ruff format --check services/ai-worker services/simulator scripts
+	@# What is checked comes from [tool.mypy] `files` in services/api/pyproject.toml.
+	@$(COMPOSE) exec -T -w /app/services/api api mypy --cache-dir /tmp/mypy
+
+lint-anpr: ## Ruff + mypy for ai-lab and the AI worker (AI worker image)
+	@printf "\n\033[1mPython — ANPR tree (ai-lab + AI worker)\033[0m\n"
+	@# No `ruff format --check` for ai-lab: the lab is formatted by hand (aligned
+	@# tables, compact argument lists), and its own `make lint` never enforced it.
+	@# What mypy checks comes from [tool.mypy] `files` in ai-lab/pyproject.toml.
+	@if ! docker image inspect $(AI_IMAGE) >/dev/null 2>&1; then \
+	  printf "\033[31m✗ $(AI_IMAGE) is not built.\033[0m The ANPR tree is checked against the\n"; \
+	  printf "  AI worker's own dependencies. Build it once with 'make ai'.\n"; \
+	  exit 1; \
+	fi; \
+	docker run --rm --pull never \
+	  -v "$(CURDIR)/ai-lab:/work/ai-lab:ro" \
+	  -v "$(CURDIR)/services/ai-worker:/work/services/ai-worker:ro" \
+	  -v $(LINT_TOOLS):/opt/lint \
+	  -w /work/ai-lab --entrypoint /bin/sh $(AI_IMAGE) -c ' \
+	    export PYTHONUSERBASE=/opt/lint RUFF_CACHE_DIR=/opt/lint/ruff MYPY_CACHE_DIR=/opt/lint/mypy \
+	      PIP_ROOT_USER_ACTION=ignore; \
+	    python -m pip install --user --quiet --disable-pip-version-check --no-warn-script-location \
+	      -r ../services/ai-worker/requirements-dev.txt \
+	    && python -m ruff check ailab tests scripts \
+	    && python -m mypy'
+
+lint-web: ## TypeScript typecheck of the command centre
 	@printf "\n\033[1mTypeScript\033[0m\n"
 	@cd web && npm run typecheck
 

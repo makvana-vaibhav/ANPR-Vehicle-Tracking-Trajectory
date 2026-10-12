@@ -117,7 +117,9 @@ class Backoff:
                 return max(0.0, self.host_paused_until[host] - now)
             n = self.host_streak.get(host, 0) + 1
             self.host_streak[host] = n
-            delay = min(self.account_cap_s, self.account_base_s * 2 ** (n - 1))
+            # Declared: typeshed types `int ** int` as Any (a negative exponent
+            # gives a float), which would make the delay Any too.
+            delay: float = min(self.account_cap_s, self.account_base_s * 2 ** (n - 1))
             self.host_paused_until[host] = now + delay
             return delay
 
@@ -146,7 +148,8 @@ class Backoff:
     def paused_hosts(self, now: float) -> dict[str, float]:
         """Hosts refusing us, and seconds left (0 = waiting on a probe)."""
         return {
-            host: max(0.0, until - now) for host, until in self.host_paused_until.items()
+            host: max(0.0, until - now)
+            for host, until in self.host_paused_until.items()
         }
 
     def waiting(self, now: float) -> int:

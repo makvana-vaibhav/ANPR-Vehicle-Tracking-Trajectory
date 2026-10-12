@@ -216,15 +216,19 @@ claim. If there is not enough data to compute a figure, the UI says so.
   `request_id`). No `print()` outside `scripts/`.
 - **Time: UTC internally, IST for display.** Every timestamp stored and transported is timezone-aware
   UTC. Conversion to `Asia/Kolkata` happens at the presentation edge only. Never store naive datetimes.
+  In the browser, format with `hourCycle: 'h23'`, never `hour12: false` — under some ICU builds
+  (Node 20, which CI uses) the latter prints midnight as `24:00`.
 - **Contracts — ⚠️ ASPIRATIONAL, NOT TRUE TODAY (P12).** The intent is that event shapes live in
   `packages/contracts/schemas` as JSON Schema with Pydantic and TS generated from them. In reality
   `packages/contracts/` is a single empty `.gitkeep`, the event is a hand-rolled dict in
   `ai-lab/ailab/stream/events.py`, it is duplicated by hand in `simulator/load_mode.py`, and there is
   no validation on either side of the bus. Do not cite this rule as satisfied. If you change the
   event shape, change **both** hand-rolled copies.
-- **Typed.** Frontend passes `tsc --noEmit` (enforced by `make lint`). Public functions get type
-  hints. **`mypy` does NOT currently pass** — 17 errors across 8 files, and `make lint` does not run
-  it (P12). Do not claim it passes.
+- **Typed.** Frontend passes `tsc --noEmit`, and `mypy` passes with zero errors on
+  `services/api/app`, the simulator, `ai-lab/ailab` and `services/ai-worker` — all enforced by
+  `make lint` (`lint-api`, `lint-anpr`, `lint-web`) and by CI (`.github/workflows/ci.yml`). The AI
+  trees are checked inside the `contrail/ai-worker:dev` image, against the numpy/pydantic they
+  actually ship with. Keep it at zero; a new `# type: ignore` needs its code and a reason.
 - **Config via env, parsed once** into a Pydantic `Settings` object in `app/core/config.py`.
   No `os.getenv` scattered through the codebase.
 - **Migrations, never `create_all`.** Schema changes are Alembic revisions.
@@ -403,7 +407,6 @@ stream gateway (WHEP/HLS, scoped tokens) · watchlist → alert → WebSocket ·
 | Four `detections` columns | `vehicle_colour`, `frame_key`, `direction`, `speed_kmph` — permanently NULL, no producer anywhere (`crop_key` fixed in P3) | P9 |
 | Six real bugs | Listed in [BUILD_STATE.md](docs/BUILD_STATE.md) — two demo-visible, one silently loses data | P6 |
 | Sizing docs | `docs/INFRASTRUCTURE.md` §2 is **~4× optimistic** (treats a 4-thread worker as one core). `scripts/capacity_model.py` supersedes it | P12 |
-| `mypy` | 17 errors; `make lint` does not run it | P12 |
 | Old-brief prose | `docs/*` (incl. `BUILD_STATE.md` history), `docs/submission/*` still argue statewide / 80,000 cameras / Model 1-3-5 / FAQ Q12-Q15-Q26 / Gujarat Police / SCRB | P12 |
 | `HOSTED_GRID` adapter | Federates the old challenge's grid at `sentinel.gujarat.gov.in`, which has no standing in SIH26127. **Removal candidate** | P12 |
 | `docs/REQUIREMENTS.md` | Maps the **old** challenge's requirements | P12 |

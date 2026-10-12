@@ -290,7 +290,7 @@ export default function MapView() {
   const showUnplaced = useCallback(() => {
     clearSelection()
     window.requestAnimationFrame(() =>
-      unplacedRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }),
+      unplacedRef.current?.scrollIntoView?.({ behavior: 'smooth', block: 'start' }),
     )
   }, [clearSelection])
 

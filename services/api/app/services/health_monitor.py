@@ -202,7 +202,9 @@ async def _resolve_recovered(
                 )
             )
         ).all():
-            found.append((alert, f"Closed automatically: the camera was reachable again at {stamp} IST."))
+            found.append(
+                (alert, f"Closed automatically: the camera was reachable again at {stamp} IST.")
+            )
     for vms_id in vms_reachable:
         for alert in (
             await session.scalars(

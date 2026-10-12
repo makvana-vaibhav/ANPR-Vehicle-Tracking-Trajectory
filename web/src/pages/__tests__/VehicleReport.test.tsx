@@ -168,6 +168,49 @@ describe('VehicleReport', () => {
     expect(screen.getByText('Weakest read on the route').nextElementSibling?.textContent).toBe('—')
     expect(screen.queryByText(/at least 0 km/)).toBeNull()
   })
+
+  it("asks for each visit's clearest read, not the newest 200, and prints its crop", async () => {
+    // A busy plate: the newest 200 reads all come from the last visit, so a
+    // plain "this plate's reads" request left the first visit without its
+    // crop. The report now asks only for reads as confident as the weakest
+    // visit's best (0.90 here, the unplaced read), which keeps all three.
+    vi.mocked(api.getVehicleRoute).mockResolvedValue({
+      ...ROUTE,
+      hops: [
+        hop('SBX-cam10', '2026-10-11T04:00:00Z', { plate_confidence: 0.97 }),
+        { ...ROUTE.hops[1]!, plate_confidence: 0.93 },
+      ],
+    })
+    vi.mocked(api.getDetections).mockResolvedValue({
+      items: [
+        { id: 'det-SBX-cam17', crop_url: '/crops/cam17.jpg' },
+        { id: 'det-SBX-cam10', crop_url: '/crops/cam10.jpg' },
+        { id: 'det-unplaced', crop_url: '/crops/unplaced.jpg' },
+      ],
+      total: 3,
+      limit: 200,
+      offset: 0,
+    } as unknown as DetectionPage)
+
+    renderReport()
+
+    expect(await screen.findByAltText('Plate read at SBX-cam10')).toHaveProperty(
+      'src',
+      expect.stringContaining('/crops/cam10.jpg'),
+    )
+    expect(screen.getByAltText('Plate read at SBX-cam17')).toHaveProperty(
+      'src',
+      expect.stringContaining('/crops/cam17.jpg'),
+    )
+    expect(screen.getByAltText('Plate read at SBX-cam22')).toHaveProperty(
+      'src',
+      expect.stringContaining('/crops/unplaced.jpg'),
+    )
+    const asked = vi.mocked(api.getDetections).mock.calls.map(([query]) => query)
+    expect(asked).toHaveLength(1)
+    expect(asked[0]).toMatchObject({ plate: 'GJ03AB1234', limit: 200 })
+    expect(asked[0]!.min_confidence).toBeCloseTo(0.899, 6)
+  })
 })
 
 describe('spacedPlate', () => {

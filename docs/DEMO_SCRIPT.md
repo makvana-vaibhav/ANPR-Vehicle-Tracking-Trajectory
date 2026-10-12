@@ -1,175 +1,311 @@
-# Demo script
+# Demo script — Sentinel live test, 12–13 Oct 2026
 
-Eight minutes, five judge moments, one laptop. Every step below has been run;
-where a step depends on something outside our control, the fallback is named.
+Contrail on one laptop, against the organisers' camera grid. The scored part is
+the live test case; everything below is ordered around it. Every step names the
+screen it happens on and what to do when it does not work. Something broken
+mid-session: [PANIC.md](PANIC.md), and keep talking.
 
-**Before you start:** `make demo`, then confirm the checklist in §0. Do not
-skip it — three of the five moments depend on a worker being up, and it takes
-90 seconds to notice that on stage.
+**Two rules before anything else.**
+
+1. **Never restart the AI workers** to "fix" something, and never run
+   `make down`/`make demo` between sessions. Every restart reopens grid sessions,
+   and the grid answers churn by refusing our login for 2–15 minutes
+   ([PANIC §2a](PANIC.md#2a-the-grid-refused-our-login)). Start early, then
+   leave the stack running.
+2. **Never run `make test` while anyone is watching.** The end-to-end suite
+   raises a real critical alarm on the live screens (its own watchlist entry,
+   closed when it finishes) and the API suite writes synthetic rows for a few
+   seconds. Run it before the doors open or not at all.
 
 ---
 
-## 0. Pre-flight (2 minutes before)
+## 0. The screens
+
+Seven workspaces across the top bar; a role sees only the ones it can use.
+
+| Workspace | Screen | What it is for on the day |
+|---|---|---|
+| **Command** | `/dashboard` | The network at a glance: map of towns, alarms docked beside it, plates arriving along the bottom ("Reading now") |
+| **Live** | `/anpr` | One camera on the stage with its plate boxes; the rest in a rail |
+| **Investigate** | `/vehicles` | A plate in, its timestamped route out; CSV, printable report, plate-read export |
+| **Alarms** | `/alerts`, `/watchlist` | The alarm queue (watchlist hits first) and the watchlist itself |
+| **Network** | `/map`, `/cameras`, `/health` | GIS map, the camera registry and onboarding, fleet health |
+| **Insights** | `/traffic` | Counts, flow, congestion, forecast |
+| **Admin** | `/users`, `/audit` | Accounts and the audit trail |
+
+**⌘K** (Ctrl K, or `/`) opens search from any screen: type a plate to open its
+journey, a camera code or place (`cam10`, `Paldi`) to open it, or a screen name.
+
+The **feed pill** at the right of the top bar says **Live** (pulsing) while
+reads and alarms are arriving. Anything else means every figure on screen is
+historical — see [PANIC §2](PANIC.md#2-no-plates-are-appearing).
+
+Sign in as `admin` with the password in `.env` (`BOOTSTRAP_ADMIN_PASSWORD`).
+The other roles (`supervisor`, `operator`, `analyst`, `auditor`) use the demo
+password `make seed` prints.
+
+---
+
+## 1. Pre-flight — at least 20 minutes before
+
+The 20 minutes are for the grid: it can refuse our login for up to fifteen
+minutes after the workers connect, and that should be over before anyone is
+watching.
 
 ```bash
-docker compose ps            # every service healthy
-curl -s localhost:8000/health
-curl -s localhost:9100/streams | grep CAM-DEMO      # the demo feed is publishing
-docker logs contrail-ai-worker --tail 5 | grep watching
+docker compose ps                                     # all 12 containers healthy
+curl -s localhost:8000/health                         # "status": "alive"
+curl -s localhost:9100/streams | grep -c CAM-DEMO     # 1: the recorded clip is publishing
+for w in contrail-ai-worker contrail-ai-worker-2 contrail-ai-worker-3; do
+  docker logs $w --tail 2; done
 ```
 
-Then in the browser at **http://localhost:8080**, sign in as `admin` /
-`NagarNetra@2026` and check:
+| Worker log says | Meaning |
+|---|---|
+| `analysing N of M camera(s): CAM-DEMO-01, SBX-cam10 …` | Working |
+| `… refused our login — next try in Ns` | The grid is pausing us. **Leave it**; it resumes on its own. CAM-DEMO-01 is unaffected |
+| `no cameras assigned` | Roster empty — [PANIC §2b](PANIC.md#2b-the-roster-is-empty) |
 
-- [ ] Dashboard shows **event feed live** (green, top right)
-- [ ] "Reading now" is producing plates
-- [ ] Watchlist has **no** entry for the plate you are about to add
+In the browser at **http://localhost:8080**:
 
-> If the event feed is amber, the worker is not publishing. Restart it:
-> `docker compose --profile ai up -d --force-recreate ai-worker` and wait 30 s.
-
----
-
-## 1. Fleet on a map (90 s) — *Judge Moment 1*
-
-**Say:** Gujarat already runs CCTV across departments and vendors. We do not
-replace those systems; we federate them.
-
-1. **Dashboard** — read the tiles aloud. Point at *"280 of 281 never probed"*
-   and say plainly: the registry is bigger than the fleet we analyse, and the
-   tile says so rather than showing a flattering number.
-2. **GIS Map** — 281 cameras across Gujarat. Filter by department, then by
-   status. Click a marker → popup with department, VMS vendor, status.
-
-**Fallback:** if satellite tiles are slow, switch the basemap to *Offline* —
-district boundaries are committed GeoJSON and need no network.
+- [ ] Feed pill says **Live**
+- [ ] **Command** — the "Reading now" strip is moving and Paldi (CAM-DEMO-01) ripples
+- [ ] **Alarms** — no test alarm left open (nothing with case `FIR/E2E/…` or a demo case from a rehearsal)
+- [ ] **Watchlist** — the ten `DEMO/…` entries are watched (§6); the plate you mean to add live is **not** already on it
+- [ ] **Network → Cameras** — 31 cameras: 30 from the organisers' grid, 1 recorded clip
+- [ ] One browser tab only. A second tab on a grid camera spends the grid's watch quota twice
 
 ---
 
-## 2. Live video and live ANPR (2 min) — *Judge Moment 2*
+## 2. The live test, in order
 
-**Say:** the AI runs beside the camera. Only events cross the network — that is
-the whole scaling argument.
+About **13 minutes** for the full path. The short path (8 min) is steps 2.1,
+2.3, 2.4 and 2.5.
 
-1. **Live ANPR** → pick **CAM-DEMO**.
-2. Video plays inline. Plate boxes appear over vehicles with the reading and
-   its confidence.
-3. Point at the **feed on the right**: each card shows how many frames agreed
-   and whether the grammar repaired the reading.
-4. Now pick **SBX-00001 (Chiman bhai Bridge)** — a real government camera.
-   Vehicles are detected and tracked; **no plates are read**, and say why: it
-   is a night-time junction overview with headlight glare. The pipeline is the
-   same; the camera angle is not.
+### 2.1 Command — the network now (60 s)
 
-**This is the honest moment of the demo and it is worth making deliberately.**
-A system that claims to read plates off every camera is one nobody in the room
-believes.
+**Say:** departments keep their own cameras and recorders; we federate them.
+Only events cross the network; video is pulled only while someone watches.
 
-**Fallback:** if the grid is unreachable, stay on CAM-DEMO and say the grid is
-federated and currently down — the registry still lists its cameras, which is
-the correct behaviour.
+1. **Command.** Read the tiles aloud — each says what it counts. "Reading plates"
+   is cameras that read a plate in the last ten minutes, not cameras configured
+   to.
+2. Point at the map: towns, a ring where plates were read in the last ten
+   minutes, a ripple per plate read live, contrails for vehicles seen at two or
+   more cameras.
+3. Point at the alarm dock: most severe first, a watchlist hit first within a
+   severity, and journeys to explain (trajectory anomalies) below every
+   watchlist and camera alarm whatever their severity.
+
+### 2.2 Onboard heterogeneous cameras, and interoperability (2 min)
+
+The brief asks for about 50 cameras from several departments. **We have 31: the
+organisers' 30 and one recorded clip.** Say so; do not round up.
+
+1. **Network → Cameras.** The registry: each camera's department, integration,
+   transport and position. "Connected systems" names the two VMS we federate
+   (the organisers' hosted grid; the simulated recorder carrying the clip).
+   "Available adapters" lists the integrations that exist as code: RTSP,
+   ONVIF, vendor VMS API, hosted grid, simulated.
+2. **Heterogeneous, measured:** the grid's 30 streams are 24 × H.264 and 6 ×
+   HEVC, 960×576 to 2560×1440, read over RTSP for inference and served to the
+   browser through our authenticated HLS proxy — the grid's credentials never
+   reach the browser.
+3. **Import CSV → Validate only** with `data/seed/sample_cameras.csv`: three
+   cameras would be created and one is rejected *with its reason* (coordinates
+   in London). That is the feature. Do not press **Import** unless you mean to
+   add three cameras with no stream.
+4. **Network → Map.** Filter by department, integration, status. Five grid
+   cameras have no position — the catalogue names a place we could not find —
+   and they are listed apart (Command's legend: "5 cameras without a position"),
+   never dropped on the map at a guess.
+5. **If the organisers add cameras today:** re-sync the catalogue (reads the
+   catalogue and checks the RTSP port; it does not open a stream):
+   ```bash
+   docker compose exec -T api python /app/scripts/sync_sandbox.py --dry-run   # look first
+   docker compose exec -T api python /app/scripts/sync_sandbox.py             # then write
+   ```
+   New cameras join the workers' rotation within a minute; no restart.
+
+### 2.3 Track the vehicle number given on the day (4 min) — the scored task
+
+1. **⌘K**, type the number exactly as given, Enter. Investigate opens on it.
+2. Set the window: **24 h**, or **7 d** if nothing shows. The grid replays its
+   footage on a loop, so history covers what we analysed since the stack came up.
+3. **If it was read:** every sighting in order — time (IST), camera, place,
+   department, read confidence, the plate crop. The route draws on the map;
+   **Replay journey** plays it in proportion to real time. Say plainly: legs are
+   straight lines between cameras, so every distance and speed is a lower
+   bound; a red dashed leg is one the platform does not believe, shown rather
+   than hidden.
+4. **If the exact plate was not read:**
+   - **Did you mean…** lists plates read that are close to it, with similarity.
+     Open the closest and compare its **crop** before saying anything — a near
+     match is a lead, not a finding.
+   - **Not on the map** lists reads at cameras with no known position.
+   - On a sighting with no readable plate, **Find similar** offers candidates
+     by appearance, labelled **Candidates · not confirmed**. Keep the label.
+5. **Then watchlist it** (§2.4) so the next pass on any analysed camera raises an
+   alarm by itself.
+6. **Export** (§2.5).
+
+**What to say if it was never read:** *"We did not read that plate in the
+window. That is not evidence the vehicle was absent: this laptop analyses four
+cameras continuously and rotates the rest in 45-second slices, so a camera that
+was not being analysed when it passed could not have read it."* The report
+prints the same sentence.
+
+### 2.4 Cross-reference live feeds against the watchlist (2.5 min)
+
+**Say:** matching runs on every settled read, on every camera, against every
+active entry — exact matches at the entry's own priority, one-character near
+matches capped at medium as a lead to verify.
+
+1. **Alarms → Watchlist → Add a plate.** For a guaranteed live alarm use a plate
+   you can see being read on **Live → CAM-DEMO-01** (a recorded UK road clip that
+   loops every 15 s). Category **Stolen**, priority **Critical**, case reference
+   `DEMO/FIR/2026/LIVE`, remark "Live demonstration".
+   For the day's vehicle use the organisers' case reference.
+2. The alarm usually arrives within a minute as the clip comes round (one
+   measured run on 12 Oct: 7 s). Fill the gap with the queue, not by waiting.
+3. **Alarms.** The queue runs most severe first, a watchlist hit first within a
+   severity, and a journey to explain never above a watchlist hit. The detail
+   pane shows the crop, camera, time, read confidence, **Why it fired** and
+   **What to do**, and the watchlist entry with its case.
+4. Triage from the keyboard: `j`/`k` move, `a` acknowledge, `d` dispatch,
+   `c` close, `f` false positive. Every transition records who and when.
+5. **Clean up straight after:** close the alarm (`c`, with a note) and **Retire**
+   the entry on the Watchlist. Never leave a demonstration entry live.
+
+**Fallback** if no alarm in two minutes — the same chain in a terminal, printing
+each step (it picks the best-read plate itself):
+```bash
+docker compose exec -e NAGARNETRA_API_URL=http://api:8000 api python /app/scripts/demo_anpr.py
+```
+It leaves its entry active and its alarm open: retire and close them after.
+
+### 2.5 Export the report of detected plates (1.5 min)
+
+1. **Investigate → Export plate reads (CSV)** — every plate read in the chosen
+   window, on every camera, with timestamps. This is the submission's "report of
+   detected plates with timestamps".
+2. For one vehicle: **CSV** (every visit in order and the leg to it) and
+   **Printable report** → **Print or save as PDF**: route to scale, visits with
+   crops, the notes a reader needs. It is light on purpose — it is paper.
+3. Opening either is a plate search and lands in the audit trail.
+
+### 2.6 GIS (1 min)
+
+**Network → Map**: cameras clustered where several stand at one place, filters,
+the camera popup. Basemap **Satellite** when online, **Offline** with no network
+at all — district outlines are committed GeoJSON, which is the "works on a
+plane" claim. Command's map needs no tiles in the first place.
+
+### 2.7 End-to-end performance and architecture (1.5 min)
+
+Quote only these, and say which kind each is.
+
+| Figure | Kind |
+|---|---|
+| Capture → event on the worker: **385 ms** median (p90 493, p99 559), 720p | measured, Sep |
+| Detection → alarm on a connected screen: **24 ms** | measured |
+| Stream killed → camera offline: **19 s** | measured |
+| **4.39 fps** per 720p stream per worker, CPU only | measured |
+| 4 always-on cameras + the one on screen: **4.4–5.6 cores** | measured, 11 Oct |
+| Ingest: **2,774 events/s** sustained for 80,000 camera identities, 0 failures — but p95 capture→persisted **5.7 s** against a 3 s target while a backlog drained | measured load test, synthetic events, no video |
+| 80,000 × 4 Mbps ≈ 320 Gbps central, against ~43 Mbps of events | arithmetic |
+| Anything with a GPU | **never measured** — say so |
+
+The **Live** screen shows the current capture-to-event latency for the camera on
+stage; read that rather than the table if it is better or worse. Details:
+[HLD §6](HLD.md#6-measured-performance) and [§7](HLD.md#7-scaling-to-80000-cameras).
+
+### 2.8 Who looked at what (optional, 1 min)
+
+**Admin → Audit trail**: every plate search, stream open, watchlist change and
+sign-in, filterable. Reading the trail is itself recorded — one row per view.
+Sign in as `auditor`: Live and Investigate are not offered, and typing
+`/vehicles` refuses cleanly, naming the missing permission.
 
 ---
 
-## 3. Watchlist → automatic alert (2 min) — *Judge Moment 3*
+## 3. Live: which camera to put on the stage
 
-**Say:** this is what the platform is for.
+Opening a camera makes the workers analyse it (within about 3 s), and **every
+grid camera opened spends the organisers' per-address watch time**.
 
-1. **Watchlist** → add a plate you just saw in the live feed. Category
-   `stolen`, priority `critical`, case reference `FIR/2026/DEMO`.
-2. Say: matching runs on every settled read across every camera.
-3. **Dashboard** or **Alerts** — within a minute or two, as the clip loops and
-   that vehicle passes again, a **red critical alert** appears by itself.
-4. Open **Alerts**. Show the plate, camera, location, confidence and case
-   reference. Acknowledge it with the keyboard: `a`.
-5. Say: every transition is recorded against the operator who made it.
-
-**Timing note:** the alert fires when the vehicle next passes — measured at
-**33–99 s**. Fill the gap with §4; do not stand and wait.
-
-**Fallback:** `docker compose exec -e NAGARNETRA_API_URL=http://api:8000 api
-python /app/scripts/demo_anpr.py --plate NA13NRU` runs the same chain in a
-terminal and prints each step.
+- Default to **CAM-DEMO-01** — it reads plates continuously and is labelled
+  **Recorded clip**, which it is. Say so before anyone asks.
+- For a grid camera, prefer the always-on three: **SBX-cam10, SBX-cam21,
+  SBX-cam22** (they read the most plates). Open one, show it, move on.
+- A grid camera with boxes but no plates is a junction overview — say why
+  (§5). Do not hop through grid cameras looking for a better one.
 
 ---
 
-## 4. Trace a vehicle (90 s) — *Judge Moment 4*
+## 4. If something breaks
 
-1. **Vehicle Search** → click a suggested plate (those are the ones seen on
-   more than one camera).
-2. The route draws on the map. Point out that the legs are **dashed and
-   straight**: the platform knows where the vehicle was seen, not the roads it
-   took, so distances and speeds are lower bounds.
-3. Open the hop table — timestamps, dwell, implied speed, and any flags in
-   plain English.
-4. If a leg is flagged, read it out. **An impossible leg is what a cloned plate
-   looks like**, and the system says so rather than hiding it.
-
-**Caveat to state:** only one camera currently produces plates, so a full
-four-camera route needs either the grid to provide an ANPR-class feed or a
-second demonstration camera. Say it; the correlator is built and tested either
-way.
-
----
-
-## 5. Who did what (60 s) — *the question a police force asks*
-
-1. **Audit** — every plate search, stream open, watchlist change and sign-in.
-2. Filter to **Plate searches**. Show your own search from §4.
-3. Say: **reading this page is itself recorded**. There is no role that reads
-   the trail unseen, including admin.
-4. Sign out, sign in as **auditor**. Live ANPR and Vehicle Search are **gone
-   from the navigation** — the interface offers only what the role may use.
-5. Type `/vehicles` in the address bar → a clean refusal naming the missing
-   permission.
-
----
-
-## 6. Architecture and scale (60 s) — *Judge Moment 5*
-
-Open [`docs/HLD.md`](HLD.md) §1 and read the arithmetic:
-
-> 80,000 × 4 Mbps ≈ **320 Gbps** centralised, versus 2,667 events/s × 2 KB ≈
-> **43 Mbps** federated. About 7,000× less.
-
-Then §6 — the measured numbers: 4.39 fps per 720p stream, 385 ms
-capture-to-event, 24 ms detection-to-alert, 19 s to detect a dead camera.
-
-**Say plainly:** the load test proving 2,667 events/s sustained has **not been
-run**. Every number quoted is measured on this laptop; the 80,000-camera figure
-is extrapolation and is labelled as such in the document.
-
----
-
-## 7. If something breaks
+[PANIC.md](PANIC.md). The short version:
 
 | Symptom | Do this |
 |---|---|
-| Event feed amber | `docker compose --profile ai up -d --force-recreate ai-worker` |
-| No video on CAM-DEMO | `docker compose restart simulator`, wait 15 s |
-| Grid cameras unreachable | Expected if their gateway is down. Say so and use CAM-DEMO |
-| A screen is blank | Hard refresh. The token may have expired — sign in again |
-| Postgres unhealthy | `docker compose restart postgres api`; the API waits for it |
-| Everything is wrong | `make down && make demo`. Two minutes |
-
-**Last resort:** `ai-lab/runs/.../annotated.mp4` is a rendered video of the
-pipeline reading plates with crops and transcriptions overlaid. Play it and
-narrate. It is real output from this pipeline, not a mock-up.
+| Feed pill not **Live** / no plates | Read the worker logs ([PANIC §2](PANIC.md#2-no-plates-are-appearing)). **Do not restart the workers** |
+| Grid refused our login | Nothing. It resumes by itself; demonstrate on CAM-DEMO-01 meanwhile |
+| A grid camera will not play | Their gateway. Say so, switch to CAM-DEMO-01, do not debug on stage |
+| CAM-DEMO-01 black | `docker compose restart simulator`, wait 15 s (touches no grid session) |
+| A screen is blank or everything 401s | Sign out and in (15-minute token); hard refresh |
+| Nothing works | The rendered pipeline video — [PANIC §7](PANIC.md#7-nothing-works--the-fallback) |
 
 ---
 
-## 8. What not to claim
+## 5. What not to claim
 
 Judges reward honesty and punish overreach. Do not say:
 
-* *"It reads plates from all 30 government cameras."* It reads plates from
-  none of them, for camera-angle reasons that are not the pipeline's fault.
-* *"99% accuracy."* The 100% figure is on generated plates and is optimistic by
-  construction.
-* *"It scales to 80,000 cameras."* Say **the architecture is designed for it and
-  here is the arithmetic**, and that the load test has not been run.
-* *"It's production ready."* It has no TLS, no backups and an AGPL model
-  weight. `docs/SECURITY.md` §8 lists all of it.
+- *"It reads plates on every government camera."* By day the grid yields
+  roughly one valid plate per hundred detections, at night almost none: junction
+  overviews, glare, vehicles facing away. Detection, tracking, health and events
+  work on all of them; ANPR does not. The best readers are SBX-cam10/21/22.
+- *"It watches all 31 cameras all the time."* Four continuously; the rest in
+  45-second slices, or immediately while open on Live. Absence from a report is
+  not absence from the road.
+- *"Over 90% accuracy."* There is no real-world accuracy figure. The 100% exact
+  match is on generated plates and optimistic by construction.
+- *"It scales to 80,000 cameras."* Say: the architecture is designed for it, the
+  ingest path sustained 2,774 events/s for 80,000 camera identities on this
+  laptop, the latency target was missed under backlog, and the infrastructure
+  sizing beyond that is arithmetic.
+- *"Suspicious vehicle"* about a trajectory anomaly. The screen says **Journey to
+  explain**: movement that differs from the norm, for a person to judge.
+- *"These are real cases."* The ten watchlist entries are fictional, labelled
+  `DEMO/…` and "DEMO (fictional)" (§6). Say so if asked.
+- *"Face recognition"* or a persons watchlist — unless that screen has been
+  rehearsed on this build today.
+- *"It's production ready."* No TLS, no backups, an AGPL model weight in the
+  export toolchain; `docs/SECURITY.md` §8 lists it all.
 
-Every one of these is already written down in this repository. Being the person
-who says it first is worth more than hoping nobody asks.
+Being the person who says it first is worth more than hoping nobody asks.
+
+---
+
+## 6. The demonstration watchlist
+
+Ten entries from `data/seed/watchlist.csv`, the representative data the brief
+asks for: stolen, wanted, blacklisted and suspect vehicles, an e-challan
+defaulter, and one whose validity has ended. Every one is fictional, its case
+reference starts `DEMO/`, and its plate was checked against every plate the
+feeds had read by 12 Oct and is at least three characters from each — so none
+fires on a vehicle the cameras have seen. `GJ03AB1234` (stolen, critical) is the
+one to type when showing a search for a listed vehicle.
+
+Re-applying them is idempotent: `make seed` (or `python -m scripts.seed --only
+watchlist` in the api container) creates, reinstates or refreshes them.
+
+---
+
+## 7. After each session
+
+- [ ] Close any alarm raised during the session (`c`, with a note) — closed,
+      never deleted; it happened
+- [ ] **Retire** every watchlist entry added during it
+- [ ] Leave the stack running. No restarts between sessions

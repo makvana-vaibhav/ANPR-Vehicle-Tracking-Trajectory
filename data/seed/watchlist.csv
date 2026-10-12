@@ -1,6 +1,11 @@
 plate,category,priority,case_ref,remarks,valid_from,valid_to
-GJ03AB1234,stolen,critical,FIR/2026/RJT/0412,Reported stolen from Kalawad Road; occupants may be armed,,
-GJ18W3962,wanted,high,FIR/2026/AHM/1187,Suspect vehicle in chain-snatching series,,
-GJ05GY0433,suspect,medium,INT/2026/0093,Seen near three separate incident sites,,
-MH12DE1433,stolen,high,FIR/2026/RJT/0388,Out-of-state stolen vehicle circulated by MH police,,
-GJ01XY7788,expired,low,ADM/2026/0021,Permit expired; stop and check paperwork,,2026-01-01T00:00:00Z
+GJ03AB1234,stolen,critical,DEMO/FIR/2026/RJT/0412,"DEMO (fictional) — car reported stolen from Kalawad Road, Rajkot",,
+GJ01RV4827,stolen,critical,DEMO/FIR/2026/AHM/0957,"DEMO (fictional) — car reported stolen from a parking lot near Navrangpura, Ahmedabad",,
+MH12DE1433,stolen,high,DEMO/FIR/2026/PUNE/0388,DEMO (fictional) — out-of-state stolen vehicle circulated by Pune police,,
+GJ05NR3318,stolen,medium,DEMO/FIR/2026/SRT/0764,"DEMO (fictional) — two-wheeler reported stolen from Udhna, Surat",,
+GJ18W3962,wanted,high,DEMO/FIR/2026/GNR/1187,"DEMO (fictional) — wanted in connection with a chain-snatching case, Gandhinagar",,
+GJ23CK5190,wanted,high,DEMO/FIR/2026/AND/0219,"DEMO (fictional) — wanted in connection with a hit-and-run at Anand, driver not yet identified",,
+GJ06KM2219,blacklisted,high,DEMO/RTO/2026/VDR/0142,DEMO (fictional) — RTO blacklist: registration suspended for unpaid road tax and a lapsed fitness certificate,,
+GJ05GY0433,suspect,medium,DEMO/INT/2026/SRT/0093,DEMO (fictional) — on an investigation list: seen near three separate incident sites,,
+GJ27DQ6604,echallan,low,DEMO/ECH/2026/AHM/3310,"DEMO (fictional) — e-challan defaulter: 7 unpaid challans (Rs 13,500), stop and serve the notice",,
+GJ01XY7788,expired,low,DEMO/ADM/2026/0021,"DEMO (fictional) — permit check, validity ended 1 Jan 2026, so it no longer raises alarms",,2026-01-01T00:00:00Z

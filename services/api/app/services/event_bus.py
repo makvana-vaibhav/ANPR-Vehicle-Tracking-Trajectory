@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from collections.abc import Mapping
 from typing import Any
 
 from app.core.logging import get_logger
@@ -79,8 +80,12 @@ broadcaster = EventBroadcaster()
 ALERT_CHANNEL = "nagarnetra:alerts:fanout"
 
 
-def parse_event(raw: dict[str, Any]) -> dict[str, Any] | None:
-    """Decode one Redis Stream entry into an event dict."""
+def parse_event(raw: Mapping[Any, Any]) -> dict[str, Any] | None:
+    """Decode one Redis Stream entry into an event dict.
+
+    Field names arrive as ``str`` or ``bytes`` depending on whether the client
+    decodes responses, so both spellings are looked up.
+    """
     payload = raw.get("payload") or raw.get(b"payload")
     if payload is None:
         return None

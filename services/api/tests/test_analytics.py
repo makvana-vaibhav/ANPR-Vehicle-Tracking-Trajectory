@@ -105,9 +105,7 @@ async def _cleanup() -> None:
             text("DELETE FROM vehicle_tracks WHERE plate_normalised LIKE :p"),
             {"p": f"{PLATE_PREFIX}%"},
         )
-        await session.execute(
-            text("DELETE FROM detections WHERE track_id LIKE 'analytics-test-%'")
-        )
+        await session.execute(text("DELETE FROM detections WHERE track_id LIKE 'analytics-test-%'"))
         await session.commit()
 
 
@@ -169,18 +167,14 @@ class TestAccessControl:
             response = await client.get(f"/api/v1/analytics/{path}")
             assert response.status_code == 401, path
 
-    @pytest.mark.parametrize(
-        "role", ["admin", "supervisor", "operator", "analyst", "auditor"]
-    )
+    @pytest.mark.parametrize("role", ["admin", "supervisor", "operator", "analyst", "auditor"])
     async def test_every_operational_role_can_read(
         self, client: AsyncClient, auth_headers, role: str
     ) -> None:
         """The matrix in rbac.py grants ANALYTICS_READ to every role except
         api_client — analytics identifies no one, so there is no
         separation-of-duties reason to withhold it, unlike search."""
-        response = await client.get(
-            "/api/v1/analytics/flow", headers=await auth_headers(role)
-        )
+        response = await client.get("/api/v1/analytics/flow", headers=await auth_headers(role))
         assert response.status_code == 200, f"{role}: {response.text}"
 
     async def test_api_client_is_denied(self, client: AsyncClient, auth_headers) -> None:
@@ -281,9 +275,7 @@ class TestFlowEndpoint:
         assert len(series) == 1, "grouping by corridor must not split one corridor in two"
         assert series[0]["total"] == 3
 
-    async def test_an_invalid_group_by_is_rejected(
-        self, client: AsyncClient, auth_headers
-    ) -> None:
+    async def test_an_invalid_group_by_is_rejected(self, client: AsyncClient, auth_headers) -> None:
         response = await client.get(
             "/api/v1/analytics/flow",
             params={"group_by": "district"},
@@ -465,9 +457,7 @@ class TestRouteDensityEndpoint:
         assert response.status_code == 200, response.text
         body = response.json()
 
-        pair = next(
-            p for p in body["pairs"] if p["from_camera"] == a and p["to_camera"] == b
-        )
+        pair = next(p for p in body["pairs"] if p["from_camera"] == a and p["to_camera"] == b)
         assert pair["journeys"] == 2, (
             "one re-persisted journey plus one distinct journey is two "
             "vehicles on this route, not four"
@@ -488,7 +478,10 @@ class TestTravelTimeEndpoint:
         await _insert_track(
             _plate("NOHISTORY"),
             created_at=WINDOW_START,
-            hops=[_hop(a, arrived - timedelta(minutes=5), elapsed_s=280.0), _hop(b, arrived, elapsed_s=280.0)],
+            hops=[
+                _hop(a, arrived - timedelta(minutes=5), elapsed_s=280.0),
+                _hop(b, arrived, elapsed_s=280.0),
+            ],
         )
 
         response = await client.get(
@@ -662,9 +655,7 @@ class TestHeatmapEndpoint:
 
         assert body["type"] == "FeatureCollection"
         feature = next(
-            f
-            for f in body["features"]
-            if f["properties"]["camera_code"] == camera["camera_code"]
+            f for f in body["features"] if f["properties"]["camera_code"] == camera["camera_code"]
         )
         assert feature["type"] == "Feature"
         assert feature["geometry"]["type"] == "Point"

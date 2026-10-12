@@ -227,9 +227,7 @@ async def search_plates(
     session: DbSession,
     user: CurrentUserDep,
     request: Request,
-    q: Annotated[
-        str, Query(min_length=3, max_length=24, description="A plate, or a guess at one")
-    ],
+    q: Annotated[str, Query(min_length=3, max_length=24, description="A plate, or a guess at one")],
     since: Annotated[datetime | None, Query(description="UTC lower bound")] = None,
     until: Annotated[datetime | None, Query(description="UTC upper bound")] = None,
     camera_id: Annotated[uuid.UUID | None, Query()] = None,
@@ -266,30 +264,38 @@ async def search_plates(
         )
 
     rows = (
-        await session.execute(
-            text(_FUZZY_SEARCH_SQL),
-            {
-                "query": normalised,
-                "threshold": threshold,
-                "since": since,
-                "until": until,
-                "camera_id": camera_id,
-                "vehicle_type": vehicle_type,
-                "limit": limit,
-            },
+        (
+            await session.execute(
+                text(_FUZZY_SEARCH_SQL),
+                {
+                    "query": normalised,
+                    "threshold": threshold,
+                    "since": since,
+                    "until": until,
+                    "camera_id": camera_id,
+                    "vehicle_type": vehicle_type,
+                    "limit": limit,
+                },
+            )
         )
-    ).mappings().all()
+        .mappings()
+        .all()
+    )
 
     plates = [row["plate_normalised"] for row in rows]
     watchlist_hits: dict[str, WatchlistHit] = {}
     if plates:
         entries = (
-            await session.execute(
-                select(Watchlist).where(
-                    Watchlist.active.is_(True), Watchlist.plate_normalised.in_(plates)
+            (
+                await session.execute(
+                    select(Watchlist).where(
+                        Watchlist.active.is_(True), Watchlist.plate_normalised.in_(plates)
+                    )
                 )
             )
-        ).scalars().all()
+            .scalars()
+            .all()
+        )
         for entry in entries:
             # A plate can legitimately carry more than one active entry
             # (several open cases); the first one found is shown rather than

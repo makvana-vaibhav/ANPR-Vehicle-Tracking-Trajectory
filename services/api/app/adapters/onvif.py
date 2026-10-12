@@ -65,7 +65,10 @@ class OnvifAdapter(CameraAdapter):
                     service_url, content=_envelope(body), headers=_SOAP_HEADERS
                 )
                 response.raise_for_status()
-                return safe_fromstring(response.text)
+                # defusedxml ships no type information; it hands back the
+                # stdlib's Element.
+                root: Element = safe_fromstring(response.text)
+                return root
         except httpx.HTTPError as exc:
             raise AdapterError(f"ONVIF call failed: {exc}") from exc
         except ParseError as exc:

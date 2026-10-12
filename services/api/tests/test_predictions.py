@@ -111,7 +111,9 @@ async def _seed_baseline(camera_id: uuid.UUID, hours: tuple[int, ...]) -> None:
     await _insert_many(camera_id, timestamps)
 
 
-async def _seed_rising_live(camera_id: uuid.UUID, *, start_count: int = 2, buckets: int = 18) -> None:
+async def _seed_rising_live(
+    camera_id: uuid.UUID, *, start_count: int = 2, buckets: int = 18
+) -> None:
     """All `buckets` consecutive 5-minute buckets of the lookback window,
     `start_count + i` vehicles in bucket `i` — a perfectly straight line in
     vehicle count, and (with `avg_bucket_flow == 1.0`) in index_pct too."""
@@ -209,9 +211,7 @@ class TestCongestionInsufficientData:
             headers=await auth_headers("analyst"),
         )
         assert response.status_code == 200, response.text
-        entry = next(
-            s for s in response.json()["series"] if s["key"] == camera["camera_code"]
-        )
+        entry = next(s for s in response.json()["series"] if s["key"] == camera["camera_code"])
 
         assert entry["status"] == "insufficient_data"
         # The most recent bucket's own index is still meaningful even though
@@ -238,9 +238,7 @@ class TestCongestionInsufficientHistory:
             headers=await auth_headers("analyst"),
         )
         assert response.status_code == 200, response.text
-        entry = next(
-            s for s in response.json()["series"] if s["key"] == camera["camera_code"]
-        )
+        entry = next(s for s in response.json()["series"] if s["key"] == camera["camera_code"])
 
         assert entry["status"] == "insufficient_history"
         assert entry["current_index_pct"] is None

@@ -168,9 +168,7 @@ WHERE legs.from_camera IS NOT NULL
 """
 
 
-async def _segment_legs(
-    session: AsyncSession, start: datetime, end: datetime
-) -> list[Any]:
+async def _segment_legs(session: AsyncSession, start: datetime, end: datetime) -> list[Any]:
     """Every observed camera-to-camera movement in the window.
 
     Snapshots are read from a window wider than the report itself, because a
@@ -258,9 +256,7 @@ async def flow(
         ORDER BY key, bucket
     """
     rows = (
-        await session.execute(
-            text(sql), {"start": start, "end": end, "corridor": corridor}
-        )
+        await session.execute(text(sql), {"start": start, "end": end, "corridor": corridor})
     ).mappings()
 
     series: dict[str, FlowSeries] = {}
@@ -291,7 +287,7 @@ async def flow(
 
     return FlowResponse(
         window=Window(start=start, end=end, bucket_seconds=seconds),
-        group_by=group_by,  # type: ignore[arg-type]
+        group_by=group_by,
         series=sorted(series.values(), key=lambda s: -s.total)[:MAX_ROWS],
         total_vehicles=total,
     )
@@ -369,9 +365,7 @@ async def speed(
                 status="ok" if enough else "insufficient_data",
                 samples=samples,
                 median_kmph=round(_median(entry["kmph"]) or 0.0, 1) if enough else None,
-                p85_kmph=(
-                    round(_percentile(entry["kmph"], 0.85) or 0.0, 1) if enough else None
-                ),
+                p85_kmph=(round(_percentile(entry["kmph"], 0.85) or 0.0, 1) if enough else None),
                 median_seconds=(
                     round(_median(entry["seconds"]) or 0.0, 1)
                     if enough and entry["seconds"]
@@ -494,9 +488,7 @@ async def routes(
 
 
 # ── travel time ───────────────────────────────────────────────────────
-async def _travel_times(
-    session: AsyncSession, start: datetime, end: datetime
-) -> list[TravelTime]:
+async def _travel_times(session: AsyncSession, start: datetime, end: datetime) -> list[TravelTime]:
     """Current segment durations against the same time of day on earlier days."""
     current_legs = await _segment_legs(session, start, end)
 
@@ -537,9 +529,7 @@ async def _travel_times(
         now_values = current.get(key, [])
         base_values = baseline.get(key, [])
         now_median = _median(now_values)
-        base_median = (
-            _median(base_values) if len(base_values) >= MIN_BASELINE_SAMPLES else None
-        )
+        base_median = _median(base_values) if len(base_values) >= MIN_BASELINE_SAMPLES else None
 
         if now_median is None:
             status = "insufficient_data"
@@ -557,12 +547,10 @@ async def _travel_times(
                 from_camera=key[0],
                 to_camera=key[1],
                 corridor=corridors.get(key),
-                status=status,  # type: ignore[arg-type]
+                status=status,
                 current_seconds=round(now_median, 1) if now_median is not None else None,
                 current_samples=len(now_values),
-                baseline_seconds=(
-                    round(base_median, 1) if base_median is not None else None
-                ),
+                baseline_seconds=(round(base_median, 1) if base_median is not None else None),
                 baseline_samples=len(base_values),
                 baseline_days=len(baseline_days.get(key, ())),
                 delta_pct=delta,
@@ -614,9 +602,7 @@ async def _volume_by_camera(
         ORDER BY vehicles DESC
         LIMIT :limit
     """
-    rows = await session.execute(
-        text(sql), {"start": start, "end": end, "limit": limit}
-    )
+    rows = await session.execute(text(sql), {"start": start, "end": end, "limit": limit})
     return list(rows.mappings())
 
 
@@ -676,7 +662,7 @@ async def hotspots(
         window=Window(start=start, end=end, bucket_seconds=0),
         by_volume=by_volume,
         by_slowdown=slowdowns[:limit],
-        slowdown_status=status,  # type: ignore[arg-type]
+        slowdown_status=status,
         note=note,
     )
 
@@ -733,10 +719,15 @@ async def heatmap(
 #: Occupancy is a sweep over per-vehicle dwell intervals, and the sweep runs
 #: in `app/services/traffic.py` rather than in SQL so the tested function is
 #: the one actually serving traffic. That means the rows come to Python, so
-#: the window has to be bounded. At the demo fleet's scale (58 cameras, a few
-#: thousand vehicles in six hours) this is never reached; a city deployment
-#: would move the sweep into SQL, which is a known and deliberate limit
-#: rather than an oversight.
+#: the window has to be bounded. A city deployment would move the sweep into
+#: SQL, which is a known and deliberate limit rather than an oversight.
+#:
+#: It is reached: the looping demo clip alone produces ~27,000 rows a day.
+#: The read is therefore **newest first** — the latest traffic is what an
+#: operator is looking at — and the response says when it stopped
+#: (`truncated`, `rows_read`, `rows_total`). Read oldest first and unflagged,
+#: "20,000 vehicles" was shown for both 24 h and 7 d, and every road figure
+#: described the start of the window rather than now.
 MAX_OBSERVATION_ROWS = 20_000
 
 #: Bucket width the queue detector runs over. Fixed rather than caller-chosen:
@@ -759,8 +750,18 @@ _OBSERVATIONS_SQL = """
     JOIN cameras c ON c.id = d.camera_id
     WHERE d.ts >= :start AND d.ts < :end
       AND (CAST(:corridor AS text) IS NULL OR c.corridor = :corridor)
-    ORDER BY d.ts
+    ORDER BY d.ts DESC
     LIMIT :limit
+"""
+
+#: How many rows `_OBSERVATIONS_SQL` would have returned uncapped. Asked only
+#: when the read filled the cap, so a window under it costs nothing extra.
+_OBSERVATIONS_COUNT_SQL = """
+    SELECT count(*)
+    FROM detections d
+    JOIN cameras c ON c.id = d.camera_id
+    WHERE d.ts >= :start AND d.ts < :end
+      AND (CAST(:corridor AS text) IS NULL OR c.corridor = :corridor)
 """
 
 
@@ -932,7 +933,15 @@ async def traffic_state(
             "limit": MAX_OBSERVATION_ROWS,
         },
     )
-    rows = list(result.mappings())
+    # Read newest first so a full read keeps the latest traffic; put back in
+    # time order for everything below, which was written against it.
+    rows = list(result.mappings())[::-1]
+    rows_total = len(rows)
+    if len(rows) >= MAX_OBSERVATION_ROWS:
+        counted = await session.execute(
+            text(_OBSERVATIONS_COUNT_SQL), {"start": start, "end": end, "corridor": corridor}
+        )
+        rows_total = max(int(counted.scalar() or 0), len(rows))
 
     fleet = await session.execute(text("SELECT count(*) FROM cameras WHERE anpr_enabled"))
     fleet_cameras = int(fleet.scalar() or 0)
@@ -949,11 +958,7 @@ async def traffic_state(
 
     grouped: dict[str, list[Any]] = {}
     for row in rows:
-        key = (
-            (row["corridor"] or "unassigned")
-            if group_by == "corridor"
-            else row["camera_code"]
-        )
+        key = (row["corridor"] or "unassigned") if group_by == "corridor" else row["camera_code"]
         grouped.setdefault(key, []).append(row)
 
     zones: list[TrafficZone] = []
@@ -981,18 +986,12 @@ async def traffic_state(
             travel_time_delta_pct=travel_delta,
             thresholds=thresholds,
         )
-        queue = traffic.detect_queue(
-            _queue_samples(zone_rows, QUEUE_BUCKET_SECONDS), thresholds
-        )
+        queue = traffic.detect_queue(_queue_samples(zone_rows, QUEUE_BUCKET_SECONDS), thresholds)
 
         zones.append(
             TrafficZone(
                 key=key,
-                label=(
-                    (zone_corridor or key)
-                    if group_by == "corridor"
-                    else first["camera_name"]
-                ),
+                label=((zone_corridor or key) if group_by == "corridor" else first["camera_name"]),
                 corridor=zone_corridor,
                 lat=first["lat"] if group_by == "camera" else None,
                 lon=first["lon"] if group_by == "camera" else None,
@@ -1004,23 +1003,18 @@ async def traffic_state(
                 vehicles_per_minute=_rounded(
                     traffic.rate_per_minute(len(zone_rows), window_seconds)
                 ),
-                vehicles_per_hour=_rounded(
-                    traffic.rate_per_hour(len(zone_rows), window_seconds)
-                ),
+                vehicles_per_hour=_rounded(traffic.rate_per_hour(len(zone_rows), window_seconds)),
                 peak_occupancy=peak,
                 density_status="ok" if intervals else "insufficient_data",
                 median_speed_kmph=_rounded(median_speed),
                 speed_status="ok" if median_speed is not None else "insufficient_data",
                 travel_time_delta_pct=_rounded(travel_delta),
-                travel_time_status=(
-                    "ok" if travel_delta is not None else "insufficient_history"
-                ),
+                travel_time_status=("ok" if travel_delta is not None else "insufficient_history"),
                 congestion=assessment.level,
                 congestion_score=assessment.score,
                 congestion_status=assessment.status,
                 factors=[
-                    TrafficFactor(factor=f.factor, detail=f.detail)
-                    for f in assessment.factors
+                    TrafficFactor(factor=f.factor, detail=f.detail) for f in assessment.factors
                 ],
                 queue=QueueState(
                     present=queue.present,
@@ -1059,7 +1053,7 @@ async def traffic_state(
 
     return TrafficResponse(
         window=Window(start=start, end=end, bucket_seconds=QUEUE_BUCKET_SECONDS),
-        group_by=group_by,  # type: ignore[arg-type]
+        group_by=group_by,
         zones=zones,
         total_vehicles=len(rows),
         totals_by_type=VehicleTypeCounts(
@@ -1067,6 +1061,9 @@ async def traffic_state(
         ),
         active_cameras=len({r["camera_code"] for r in rows}),
         fleet_cameras=fleet_cameras,
+        rows_read=len(rows),
+        rows_total=rows_total,
+        truncated=rows_total > len(rows),
         possible_obstructions=obstructions[:MAX_ROWS],
         most_congested=[z.key for z in ranked[:10]],
         note=(
@@ -1124,7 +1121,7 @@ async def traffic_history(
     return TrafficHistoryResponse(
         window=Window(start=start, end=end, bucket_seconds=QUEUE_BUCKET_SECONDS),
         key=key,
-        group_by=group_by,  # type: ignore[arg-type]
+        group_by=group_by,
         points=[
             TrafficHistoryPoint(
                 bucket=row["bucket"],

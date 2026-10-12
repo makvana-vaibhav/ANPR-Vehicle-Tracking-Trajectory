@@ -16,6 +16,7 @@ for those reasons is noise.
 
 from __future__ import annotations
 
+import asyncio
 import os
 import time
 from collections import Counter
@@ -27,9 +28,14 @@ import pytest
 API = os.environ.get("NAGARNETRA_API", "http://localhost:8000")
 
 #: The camera the AI worker never rotates away from, so it is always reading.
-# AI_WORKER_PINNED is a comma-separated list; the first entry is enough for
-# a test that only needs one camera guaranteed to be under analysis.
-PINNED_CAMERA = os.environ.get("AI_WORKER_PINNED", "CAM-DEMO-01").split(",")[0].strip()
+# AI_WORKER_ALWAYS_ON (AI_WORKER_PINNED before it) is a comma-separated list;
+# the first entry is enough for a test that only needs one camera guaranteed
+# to be under analysis.
+PINNED_CAMERA = (
+    (os.environ.get("AI_WORKER_ALWAYS_ON") or os.environ.get("AI_WORKER_PINNED") or "CAM-DEMO-01")
+    .split(",")[0]
+    .strip()
+)
 ADMIN_PW = os.environ.get("BOOTSTRAP_ADMIN_PASSWORD", "NagarNetra@2026")
 
 pytestmark = pytest.mark.asyncio
@@ -148,14 +154,31 @@ class TestMomentTwo:
             assert field in row, f"a detection without {field} cannot be judged"
 
 
+#: Case reference on the suite's own watchlist entry, and the note every alarm
+#: it raised is closed with. Nothing the suite creates may outlive it in the
+#: live database an operator and a judge are looking at.
+E2E_CASE = "FIR/E2E/JUDGE"
+E2E_REMARK = "Created by the automated end-to-end test (tests/e2e); retired when it finishes."
+E2E_CLOSE_NOTE = (
+    f"Closed: raised by the end-to-end test's own watchlist entry ({E2E_CASE}), not a real case."
+)
+
+
 class TestMomentThree:
     """A watchlist hit fires by itself, as a red alert with the evidence."""
 
     async def test_a_watchlist_entry_raises_an_alert(self, client, admin):
-        """The whole chain: read → match → alert, on real detections.
+        """The whole chain: read → match → alert → acknowledge, on real detections.
 
         A plate the pipeline is *actually reading* is chosen rather than a
         fixed one, so this tests the live chain rather than seeded data.
+
+        This runs against the live database, so it touches only what it made:
+        a plate already on the watchlist is never chosen (retiring someone's
+        entry to "start from a known state" took a real one off the list), and
+        every alarm its own entry raised is closed when it finishes. The
+        acknowledgement is made on that alarm too — it used to be a separate
+        test that acknowledged the newest open alarm, whosever it was.
         """
         recent = (
             await client.get(
@@ -165,6 +188,12 @@ class TestMomentThree:
         ).json()
         if not recent["items"]:
             pytest.skip("nothing being read right now")
+        watched = {
+            entry["plate_normalised"]
+            for entry in (
+                await client.get("/api/v1/watchlist?limit=500", headers=admin)
+            ).json()
+        }
 
         # The plate seen *most often*, not the most recent one. The test waits
         # for the chosen plate to be read again, and the newest read is
@@ -180,31 +209,25 @@ class TestMomentThree:
         # so a plate from a rotating camera may simply not be looked at again in
         # time. CAM-DEMO is pinned (AI_WORKER_PINNED) and therefore always being
         # read, which is also exactly the camera the demo script puts on screen.
-        demo_plates = Counter(
-            item["plate"]
+        readable = [
+            item
             for item in recent["items"]
-            if item.get("plate") and item.get("camera_code") == PINNED_CAMERA
+            if item.get("plate") and item["plate"] not in watched
+        ]
+        demo_plates = Counter(
+            item["plate"] for item in readable if item.get("camera_code") == PINNED_CAMERA
         )
-        counts = demo_plates or Counter(
-            item["plate"] for item in recent["items"] if item.get("plate")
-        )
+        counts = demo_plates or Counter(item["plate"] for item in readable)
         if not counts:
-            pytest.skip("no readable plates in the recent window")
+            pytest.skip("no readable plate that is not already on the watchlist")
         plate = counts.most_common(1)[0][0]
 
-        # Start from a known state.
-        existing = (
-            await client.get(f"/api/v1/watchlist?plate={plate}", headers=admin)
-        ).json()
-        for entry in existing if isinstance(existing, list) else []:
-            if entry["plate_normalised"] == plate:
-                await client.delete(f"/api/v1/watchlist/{entry['id']}", headers=admin)
-
-        # Only an alert raised after this moment can be the one under test. A
-        # plate the pipeline keeps reading also collects trajectory-anomaly
-        # alerts at their own priorities (medium for a slow leg, high for an
-        # impossible hop), and taking "the newest alert for this plate" read
-        # one of those as a mis-prioritised watchlist hit, twice.
+        # Only an alert raised after this moment, by this entry, can be the one
+        # under test. A plate the pipeline keeps reading also collects
+        # trajectory-anomaly alerts at their own priorities (medium for a slow
+        # leg, high for an impossible hop), and taking "the newest alert for
+        # this plate" read one of those as a mis-prioritised watchlist hit,
+        # twice (readiness plan B7).
         started = datetime.now(UTC) - timedelta(seconds=5)
         created = await client.post(
             "/api/v1/watchlist",
@@ -213,52 +236,63 @@ class TestMomentThree:
                 "plate": plate,
                 "category": "stolen",
                 "priority": "critical",
-                "case_ref": "FIR/E2E/JUDGE",
+                "case_ref": E2E_CASE,
+                "remarks": E2E_REMARK,
             },
         )
-        assert created.status_code in (201, 409), created.text
-        entry_id = created.json().get("id") if created.status_code == 201 else None
+        # 201 for a new entry, and for this suite's own retired one reinstated.
+        assert created.status_code == 201, created.text
+        entry_id = created.json()["id"]
 
         try:
+            hit = None
             deadline = time.monotonic() + 180
-            while time.monotonic() < deadline:
+            while hit is None and time.monotonic() < deadline:
                 alerts = (
-                    await client.get(
-                        f"/api/v1/alerts?plate={plate}&limit=50", headers=admin
-                    )
+                    await client.get(f"/api/v1/alerts?plate={plate}&limit=50", headers=admin)
                 ).json()
                 hit = next(
                     (
                         a
                         for a in alerts["items"]
                         if a["alert_type"] == "watchlist_hit"
+                        and a["watchlist_id"] == entry_id
                         and datetime.fromisoformat(a["created_at"].replace("Z", "+00:00"))
                         >= started
                     ),
                     None,
                 )
-                if hit is not None:
-                    assert hit["priority"] == "critical"
-                    return
-                time.sleep(5)
-            pytest.fail(f"{plate} was watchlisted but raised no alert within 180 s")
+                if hit is None:
+                    await asyncio.sleep(5)
+            if hit is None:
+                pytest.fail(f"{plate} was watchlisted but raised no alert within 180 s")
+            # An exact read raises at the entry's own priority; only a
+            # one-character near match is capped (as `possible_match`).
+            assert hit["priority"] == "critical"
+
+            acknowledged = await client.post(
+                f"/api/v1/alerts/{hit['id']}/transition",
+                headers=admin,
+                json={"status": "acknowledged", "notes": "Acknowledged by the end-to-end test."},
+            )
+            assert acknowledged.status_code == 200, acknowledged.text
+            assert acknowledged.json()["status"] == "acknowledged"
+            assert acknowledged.json()["acknowledged_by"], "an acknowledgement names who made it"
         finally:
-            if entry_id:
-                await client.delete(f"/api/v1/watchlist/{entry_id}", headers=admin)
-
-    async def test_an_alert_can_be_acknowledged(self, client, admin):
-        alerts = (await client.get("/api/v1/alerts?limit=5", headers=admin)).json()
-        target = next((a for a in alerts["items"] if a["status"] == "new"), None)
-        if target is None:
-            pytest.skip("no new alert to acknowledge")
-
-        response = await client.post(
-            f"/api/v1/alerts/{target['id']}/transition",
-            headers=admin,
-            json={"status": "acknowledged", "notes": "e2e"},
-        )
-        assert response.status_code == 200, response.text
-        assert response.json()["status"] == "acknowledged"
+            # Retired first, so it raises nothing more while its alarms close.
+            await client.delete(f"/api/v1/watchlist/{entry_id}", headers=admin)
+            # Every alarm the entry raised — the hit, and any near match on a
+            # misread of the plate — closed, never deleted: they happened.
+            open_alerts = (
+                await client.get("/api/v1/alerts?open_only=true&limit=200", headers=admin)
+            ).json()
+            for alert in open_alerts["items"]:
+                if alert["watchlist_id"] == entry_id:
+                    await client.post(
+                        f"/api/v1/alerts/{alert['id']}/transition",
+                        headers=admin,
+                        json={"status": "closed", "notes": E2E_CLOSE_NOTE},
+                    )
 
 
 class TestMomentFour:

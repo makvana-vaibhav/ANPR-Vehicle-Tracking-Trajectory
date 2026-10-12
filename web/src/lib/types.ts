@@ -1005,10 +1005,16 @@ export interface TrafficResponse {
   window: AnalyticsWindow
   group_by: 'camera' | 'corridor'
   zones: TrafficZone[]
+  /** Vehicles every figure was computed from — the rows read. */
   total_vehicles: number
   totals_by_type: VehicleTypeCounts
   active_cameras: number
   fleet_cameras: number
+  /** The read is bounded and newest first: rows read, rows in the window, and
+   *  whether the window held more than was read. */
+  rows_read: number
+  rows_total: number
+  truncated: boolean
   possible_obstructions: PossibleObstruction[]
   /** Worst-first, for the "top congested roads" panel. */
   most_congested: string[]

@@ -101,12 +101,19 @@ class VehicleType(StrEnum):
 
 
 class WatchlistCategory(StrEnum):
+    """Why a plate is watched. The API accepts any short word (a department may
+    need one this list lacks); these are the ones the platform and its seed
+    data use."""
+
     STOLEN = "stolen"
     WANTED = "wanted"
     SUSPECT = "suspect"
     BOLO = "bolo"  # be on the lookout
     VIP = "vip"
     TEST = "test"
+    BLACKLISTED = "blacklisted"
+    ECHALLAN = "echallan"  # unpaid traffic e-challan
+    EXPIRED = "expired"  # registration or permit lapsed
 
 
 class Priority(StrEnum):
@@ -123,6 +130,44 @@ class AlertType(StrEnum):
     CONVOY = "convoy"
     ANOMALY = "anomaly"
     CAMERA_DOWN = "camera_down"
+    #: A face on an `analytics:faces` camera agreed, over several frames, with
+    #: an approved persons-watchlist entry. Always a *possible* match: raised at
+    #: `high`, never `critical`, and a person must compare the two faces before
+    #: anyone acts (app/services/persons.py).
+    PERSON_MATCH = "person_match"
+
+
+class PersonCategory(StrEnum):
+    """Why a person is on the persons watchlist.
+
+    Deliberately few, and each one a status a case file can establish — never
+    a judgement the platform makes (CLAUDE.md §1, language discipline):
+
+    * `missing` — reported missing; the entry exists to find them.
+    * `wanted` — sought under a warrant or court order named by the case
+      reference. The warrant is the fact; the platform asserts nothing.
+    * `demo` — a demonstration entry against recorded footage, with a case
+      reference marked fictional. Never a real investigation.
+    """
+
+    MISSING = "missing"
+    WANTED = "wanted"
+    DEMO = "demo"
+
+
+class PersonStatus(StrEnum):
+    """An entry's lifecycle. Only `active` entries are matched.
+
+    `pending_approval` → `active` needs a second account (four-eyes);
+    `pending_approval` → `rejected` the same. Either `pending_approval` or
+    `active` → `retired` ends the entry, by hand or on expiry. No path leads
+    back: a retired entry is re-enrolled and re-approved, never revived.
+    """
+
+    PENDING_APPROVAL = "pending_approval"
+    ACTIVE = "active"
+    REJECTED = "rejected"
+    RETIRED = "retired"
 
 
 class AlertStatus(StrEnum):

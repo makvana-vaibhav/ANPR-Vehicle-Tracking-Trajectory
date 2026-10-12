@@ -142,7 +142,9 @@ async def _prune(args: argparse.Namespace) -> int:
 
     async with SessionLocal() as session:
         doomed = (await session.execute(criterion())).scalars().all()
-        kept = (await session.execute(select(func.count()).select_from(Camera))).scalar_one()
+        kept = (
+            await session.execute(select(func.count()).select_from(Camera))
+        ).scalar_one()
 
         if not doomed:
             print(f"  registry: {kept} cameras, none {rule} — nothing to prune")

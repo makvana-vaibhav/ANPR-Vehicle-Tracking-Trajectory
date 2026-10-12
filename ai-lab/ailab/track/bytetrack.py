@@ -192,7 +192,9 @@ class STrack:
         if not live:
             return
 
-        means = np.asarray([t.mean.copy() for t in live])
+        # Stacking a list always allocates a fresh array, so the tracks' own
+        # state is never aliased by the edits below.
+        means = np.asarray([t.mean for t in live])
         covs = np.asarray([t.covariance for t in live])
         for i, track in enumerate(live):
             if track.state != TrackState.TRACKED:

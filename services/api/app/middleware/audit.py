@@ -63,6 +63,9 @@ _RESOURCE_TYPES = {
     "audit": "audit",
     "departments": "department",
     "vms": "vms_instance",
+    # The persons watchlist records its own `person.*` rows; a request that
+    # fails before it does falls back to this, under the same prefix.
+    "persons": "person",
 }
 
 
@@ -71,6 +74,14 @@ _RESOURCE_TYPES = {
 #: belongs to is audited explicitly when the stream is opened (`camera.view`);
 #: a row per heartbeat would add four a minute per viewer and say nothing new.
 _EXCLUDED_SUFFIXES = ("/focus",)
+
+#: Set on `request.state` by an endpoint whose explicit row *replaces* this
+#: middleware's generic one rather than adding detail beside it. Reading the
+#: trail is the case: both rows were `audit.read`, so every view of the Audit
+#: screen counted twice and "who reviewed the trail, how often" was wrong by
+#: a factor of two. Opt-in, so an endpoint that fails before recording still
+#: leaves this middleware's row — with its error result — behind.
+RECORDED_EXPLICITLY = "audit_recorded_explicitly"
 
 
 def _should_audit(request: Request) -> bool:
@@ -145,6 +156,9 @@ class AuditMiddleware(BaseHTTPMiddleware):
             return response
         if response.status_code == 403:
             # Recorded in detail by the RBAC dependency.
+            return response
+        if getattr(request.state, RECORDED_EXPLICITLY, False):
+            # The endpoint wrote the row for this request itself.
             return response
 
         result = AuditResult.SUCCESS if response.status_code < 400 else AuditResult.ERROR

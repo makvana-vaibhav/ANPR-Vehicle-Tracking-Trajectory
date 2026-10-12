@@ -93,7 +93,8 @@ async def check_database() -> dict[str, Any]:
                 "WHERE extname IN ('postgis', 'timescaledb', 'pg_trgm')"
             )
         )
-        found = dict(extensions_row.all())
+        # `.tuples()` is typing only: it returns the same result object.
+        found: dict[str, str] = dict(extensions_row.tuples().all())
 
     required = {"postgis", "timescaledb", "pg_trgm"}
     missing = sorted(required - set(found))

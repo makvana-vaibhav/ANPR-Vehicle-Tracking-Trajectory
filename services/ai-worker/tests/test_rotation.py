@@ -230,7 +230,9 @@ class TestWatchedCamerasGoFirst:
         r.update_assignment(streams("A", "C"))
         r.take_slot("C", now=100.0)
         r.focused = frozenset({"C"})
-        assert r.expired(now=200.0) == [], "gave a watched camera's slot to an unwatched one"
+        assert (
+            r.expired(now=200.0) == []
+        ), "gave a watched camera's slot to an unwatched one"
 
         r.update_assignment(streams("A", "C", "D"))
         r.focused = frozenset({"C", "D"})

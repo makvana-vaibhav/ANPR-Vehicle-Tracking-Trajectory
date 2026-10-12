@@ -43,27 +43,35 @@ async def journey():
     over 10 km away, and once at a camera whose position is a placeholder."""
     async with SessionLocal() as session:
         pair = (
-            await session.execute(
-                text(
-                    "SELECT a.id AS a_id, a.camera_code AS a_code,"
-                    " b.id AS b_id, b.camera_code AS b_code FROM cameras a"
-                    " JOIN cameras b ON a.camera_code < b.camera_code"
-                    " WHERE a.location IS NOT NULL AND b.location IS NOT NULL"
-                    " AND NOT ('placement:unknown' = ANY(a.tags))"
-                    " AND NOT ('placement:unknown' = ANY(b.tags))"
-                    " AND ST_Distance(a.location::geography, b.location::geography) > 10000"
-                    " ORDER BY a.camera_code, b.camera_code LIMIT 1"
+            (
+                await session.execute(
+                    text(
+                        "SELECT a.id AS a_id, a.camera_code AS a_code,"
+                        " b.id AS b_id, b.camera_code AS b_code FROM cameras a"
+                        " JOIN cameras b ON a.camera_code < b.camera_code"
+                        " WHERE a.location IS NOT NULL AND b.location IS NOT NULL"
+                        " AND NOT ('placement:unknown' = ANY(a.tags))"
+                        " AND NOT ('placement:unknown' = ANY(b.tags))"
+                        " AND ST_Distance(a.location::geography, b.location::geography) > 10000"
+                        " ORDER BY a.camera_code, b.camera_code LIMIT 1"
+                    )
                 )
             )
-        ).mappings().first()
+            .mappings()
+            .first()
+        )
         unplaced = (
-            await session.execute(
-                text(
-                    "SELECT id, camera_code FROM cameras"
-                    " WHERE 'placement:unknown' = ANY(tags) ORDER BY camera_code LIMIT 1"
+            (
+                await session.execute(
+                    text(
+                        "SELECT id, camera_code FROM cameras"
+                        " WHERE 'placement:unknown' = ANY(tags) ORDER BY camera_code LIMIT 1"
+                    )
                 )
             )
-        ).mappings().first()
+            .mappings()
+            .first()
+        )
     if pair is None or unplaced is None:
         pytest.skip("needs two placed cameras 10 km apart and one unplaced — run the grid sync")
 
@@ -167,9 +175,7 @@ class TestTheRouteReport:
         assert first["arrived_ist"] == "2024-05-06 13:30:00"
         assert first["arrived_utc"] == "2024-05-06T08:00:00+00:00"
 
-    async def test_the_export_is_audited(
-        self, client: AsyncClient, auth_headers, journey
-    ) -> None:
+    async def test_the_export_is_audited(self, client: AsyncClient, auth_headers, journey) -> None:
         await client.get(
             f"/api/v1/reports/vehicle/{journey['plate']}.csv",
             params=WINDOW,

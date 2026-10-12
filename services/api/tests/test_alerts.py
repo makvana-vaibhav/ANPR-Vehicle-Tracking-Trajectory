@@ -12,14 +12,19 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from app.models.enums import AlertStatus
+from app.models.enums import AlertStatus, AlertType, Priority
 from app.models.intelligence import Alert
 from app.services.alerts import (
     ALLOWED_TRANSITIONS,
     AlertDeduper,
     InvalidTransition,
+    deduper,
+    raise_for_anomaly,
+    raise_for_match,
     transition,
 )
+from app.services.anomaly import Reason
+from app.services.watchlist import Match, WatchlistEntry
 
 
 class TestDeduplication:
@@ -66,6 +71,119 @@ class TestDeduplication:
             d.remember(f"GJ03AB{i:04d}", "CAM-1", uuid.uuid4(), now=now - timedelta(seconds=60))
         d.seen("TRIGGER", "CAM-1", now=now)
         assert len(d._recent) <= 1
+
+    def test_an_anomaly_and_a_watchlist_hit_never_fold_into_each_other(self) -> None:
+        """Same plate, same camera, same minute: still two different facts."""
+        d = AlertDeduper()
+        d.remember("GJ03AB1234", "CAM-1", uuid.uuid4(), kind="anomaly")
+        assert d.seen("GJ03AB1234", "CAM-1") is None
+        assert d.seen("GJ03AB1234", "CAM-1", kind="anomaly") is not None
+
+
+class _Session:
+    """Just enough of a session for the raise functions, which add and flush."""
+
+    def __init__(self) -> None:
+        self.added: list[Alert] = []
+
+    def add(self, alert: Alert) -> None:
+        self.added.append(alert)
+
+    async def flush(self) -> None:
+        return None
+
+
+def _critical_entry(plate: str = "GJ03AB1234") -> WatchlistEntry:
+    return WatchlistEntry(
+        id=uuid.uuid4(),
+        plate=plate,
+        category="stolen",
+        priority=Priority.CRITICAL.value,
+        case_ref="FIR/TEST/0001",
+        valid_from=None,
+        valid_to=None,
+    )
+
+
+@pytest.fixture
+def fresh_deduper():
+    deduper.clear()
+    yield
+    deduper.clear()
+
+
+class TestRealPriorityOnTheDay:
+    """B7 (readiness plan): a critical entry was seen to raise a medium alert.
+
+    The medium alert is the near match, capped by design — a one-character
+    misread is a lead, not a stolen car. What must hold is the other half: the
+    exact read of the same car raises its own alert at the entry's priority,
+    whatever was raised for that plate and camera just before it.
+    """
+
+    @pytest.mark.asyncio
+    async def test_the_exact_read_after_a_near_miss_is_raised_at_its_real_priority(
+        self, fresh_deduper
+    ) -> None:
+        entry = _critical_entry()
+        session = _Session()
+
+        near = await raise_for_match(
+            session,
+            match=Match(entry=entry, exact=False, distance=1),
+            plate="GJ03AB1284",
+            camera_id=None,
+            camera_code="CAM-1",
+            detection_id=None,
+            detection_ts=None,
+            confidence=0.8,
+        )
+        exact = await raise_for_match(
+            session,
+            match=Match(entry=entry, exact=True, distance=0),
+            plate="GJ03AB1234",
+            camera_id=None,
+            camera_code="CAM-1",
+            detection_id=None,
+            detection_ts=None,
+            confidence=0.93,
+        )
+
+        assert near is not None and exact is not None
+        assert (near.alert_type, near.priority) == (
+            AlertType.POSSIBLE_MATCH.value,
+            Priority.MEDIUM.value,
+        )
+        assert (exact.alert_type, exact.priority) == (
+            AlertType.WATCHLIST_HIT.value,
+            Priority.CRITICAL.value,
+        )
+
+    @pytest.mark.asyncio
+    async def test_a_trajectory_anomaly_cannot_swallow_a_watchlist_hit(self, fresh_deduper) -> None:
+        session = _Session()
+        anomaly_alert = await raise_for_anomaly(
+            session,
+            plate="GJ03AB1234",
+            camera_id=None,
+            camera_code="CAM-1",
+            arrived_at=datetime.now(UTC),
+            reasons=[Reason("impossible_hop", "CAM-0 → CAM-1: not physically plausible")],
+        )
+        hit = await raise_for_match(
+            session,
+            match=Match(entry=_critical_entry(), exact=True, distance=0),
+            plate="GJ03AB1234",
+            camera_id=None,
+            camera_code="CAM-1",
+            detection_id=None,
+            detection_ts=None,
+            confidence=0.93,
+        )
+
+        assert anomaly_alert is not None
+        assert hit is not None, "the watchlist hit was folded into the anomaly"
+        assert hit.priority == Priority.CRITICAL.value
 
 
 class TestLifecycle:

@@ -86,7 +86,7 @@ const CLOCK = new Intl.DateTimeFormat('en-IN', {
   timeZone: 'Asia/Kolkata',
   hour: '2-digit',
   minute: '2-digit',
-  hour12: false,
+  hourCycle: 'h23',
 })
 const clock = (ms: number) => CLOCK.format(new Date(ms))
 
@@ -137,7 +137,7 @@ export default function FleetHealthPage() {
       setParams((prev) => withParams(prev, { camera: code }), { replace: true })
       if (code && scroll) {
         window.requestAnimationFrame(() =>
-          historyRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }),
+          historyRef.current?.scrollIntoView?.({ behavior: 'smooth', block: 'start' }),
         )
       }
     },

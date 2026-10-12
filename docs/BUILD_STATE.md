@@ -1097,6 +1097,59 @@ detection merges two vehicles.
 
 ---
 
+## Event readiness: quiet alarms, honest reads, tests that leave no trace ✅
+
+12 Oct, branch `sentinel-gj`, the morning of the Sentinel live test.
+
+**Recorded footage.** The stream reader's discontinuity detector cannot say
+"the clip looped": ffmpeg's `-stream_loop` keeps PTS rising, so it never fires on
+CAM-DEMO-01, and on the grid 1,453 of 1,486 "discontinuities" on 11 Oct were
+~1.2 s PTS jitter, not loops (each one rebuilds the tracker — an ai-lab issue).
+The `recorded-footage` tag is the signal. `anomaly.py` now takes a recording's
+sightings out of a journey before scoring, re-measures the live legs that
+remain (`_without_recordings`), and keeps recordings out of the history depth;
+`route_history` raises the alert at the live camera. Skipping only the legs
+touching a recording had also hidden the live A→B leg around a replayed read.
+
+**Triage.** `sort=priority`: anomalies after every other alarm, then severity,
+then watchlist hit → near match → rest. The deduper is keyed by kind, so a
+trajectory anomaly can no longer fold a watchlist hit on the same plate and
+camera (it could, in one process). B7: the medium alert was a near match capped
+by design plus a test that read an anomaly as the hit; the e2e run on 12 Oct
+raised the exact hit at **critical**.
+
+**Reads that say what they cover.** `/analytics/traffic` reads newest first and
+returns `rows_read`, `rows_total`, `truncated` (live, 24 h: 20,000 of 32,578);
+the traffic screen uses them instead of its mirrored `TRAFFIC_ROW_CAP`. The
+printed vehicle report asks for crops with `evidenceFloor` (`web/src/lib/
+evidence.ts`, shared with Investigate). One Audit view writes one `audit.read`
+row (the endpoint marks the request; the middleware skips its generic row).
+
+**Data.** `data/seed/watchlist.csv`: ten fictional vehicles, `DEMO/` case refs,
+plates ≥3 edits from all 1,516 plates read so far; seeded by default now
+(`SEED_WATCHLIST=false` to opt out), applied to the live DB through the API.
+
+**Tests that cleaned up the live database the wrong way:**
+
+| Test | Did | Now |
+|---|---|---|
+| `test_watchlist_api.py` | hard-deleted every `GJ01%` watchlist row — two live demo entries went | `ZZWL` prefix |
+| `test_retention.py` | left a `GJ00KEEP0000` read per run | deletes its row |
+| `test_users_api.py` | left a new inactive `test.*` account per run | reuses `test.self-service` |
+| e2e `TestMomentThree` | retired any entry on its plate; acknowledged the newest open alarm, whosever | picks an unwatched plate, acknowledges and closes only its own |
+
+**Verified:** API 639 passed / 16 skipped (need ≥3 corridor-tagged cameras),
+AI worker 116, simulator 22, web 34 files / 332, e2e 34; a before/after
+snapshot of the live DB around each suite differs only by the closed e2e
+alarm. Runbooks: `docs/DEMO_SCRIPT.md` rewritten for the live test,
+`docs/PANIC.md` on the new screens.
+
+**Open:** the grid's PTS jitter (above); 16 analytics tests skip on a registry
+with one corridor-tagged camera; the four inactive `test.*` accounts from
+earlier runs cannot be deleted (they acted) and stay deactivated.
+
+---
+
 ## Phase 10 — Scale profile & the 80,000-camera proof ✅
 
 - [x] `docker-compose.scale.yml` — API stops ingesting (`INGEST_ENABLED=false`),

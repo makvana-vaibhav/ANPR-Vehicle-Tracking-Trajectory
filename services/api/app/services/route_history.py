@@ -136,7 +136,12 @@ async def snapshot(session: AsyncSession) -> dict[str, Any]:
         if await correlator.persist_route(session, route) is not None:
             persisted += 1
             if reasons:
-                newest = new_hops[-1]
+                # Attributed to a live camera: a replayed sighting can be the
+                # newest hop, and is never what a finding is about.
+                newest = next(
+                    (hop for hop in reversed(new_hops) if hop.camera_code not in recorded),
+                    new_hops[-1],
+                )
                 alert = await alerts.raise_for_anomaly(
                     session,
                     plate=route.plate,

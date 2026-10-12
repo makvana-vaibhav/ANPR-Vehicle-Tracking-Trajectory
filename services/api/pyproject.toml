@@ -68,7 +68,11 @@ line-ending = "lf"
 #  mypy
 # ══════════════════════════════════════════════════════════════════════
 [tool.mypy]
+# Run `mypy` from services/api (`make lint` and CI both do). The simulator is
+# checked here too: it runs in this image and imports this package.
+files = ["app", "../simulator/simulator"]
 python_version = "3.11"
+platform = "linux"
 warn_return_any = true
 warn_unused_configs = true
 warn_redundant_casts = true
@@ -80,8 +84,20 @@ check_untyped_defs = true
 plugins = ["pydantic.mypy"]
 
 [[tool.mypy.overrides]]
-module = ["geoalchemy2.*", "opensearchpy.*", "aioboto3.*", "shapely.*"]
+# Installed, but ship no type information (no py.typed marker, and no stubs
+# package is pinned). Their values are Any, so annotate where they are used.
+# GeoAlchemy2 and opensearch-py are typed and need no entry here.
+module = ["aioboto3.*", "botocore.*", "defusedxml.*", "shapely.*"]
 ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+# The lab's face module, imported lazily for persons-watchlist enrolment
+# (app/services/face_enrol.py). It is type-checked by `make lint-anpr` against
+# the AI worker's pinned numpy/OpenCV; checking it again here, against this
+# image's different numpy, would report the same code twice and differently.
+module = ["ailab.*", "cv2.*"]
+ignore_missing_imports = true
+follow_imports = "skip"
 
 [[tool.mypy.overrides]]
 module = "tests.*"

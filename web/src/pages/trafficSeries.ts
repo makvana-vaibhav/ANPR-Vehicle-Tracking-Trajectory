@@ -9,38 +9,37 @@
  * what a forecast picture includes, and when a server read was cut short.
  */
 
+import type { TrafficResponse } from '@/lib/types'
+
 export const MINUTE = 60_000
 export const HOUR = 60 * MINUTE
 export const DAY = 24 * HOUR
 /** IST is UTC+05:30 all year — no daylight saving to account for. */
 const IST_OFFSET_MS = 5.5 * HOUR
 
-/**
- * Mirrors `MAX_OBSERVATION_ROWS` in `app/routers/analytics.py`. The traffic
- * endpoint reads at most this many detection rows per request — **oldest
- * first** — and its response does not say when it stopped. Past it, its
- * vehicle total is the cap, not the count, and the type mix, road state and
- * obstructions describe the start of the window rather than all of it.
- *
- * The bucketed history endpoint counts in SQL with no cap, so its buckets sum
- * to the true number of vehicles. The traffic screen shows that number as the
- * total and labels every figure built on the capped read as a sample of it.
- */
-export const TRAFFIC_ROW_CAP = 20_000
+/** A traffic read that covered only part of its window. */
+export interface TrafficSample {
+  /** Vehicles the road figures were computed from: the window's latest. */
+  read: number
+  /** Vehicles in the whole window, counted by the server. */
+  observed: number
+}
 
 /**
- * Whether the traffic endpoint stopped reading before the window ended.
+ * What the traffic endpoint's read covered, when it was not the whole window.
  *
- * Only when the read stopped exactly at the cap *and* the uncapped buckets saw
- * more. Either alone is not evidence: a window can hold exactly the cap's
- * worth of vehicles, and a detection can land between the two queries.
+ * The server reads a bounded number of detection rows, **newest first**, and
+ * says when the window held more (`truncated`, with `rows_read` and
+ * `rows_total`). Past the bound the type mix, road state and obstructions
+ * describe the latest part of the window, and the screen says so beside each
+ * of them. This used to be inferred here from a mirrored copy of the server's
+ * cap and the uncapped bucket total; the server now states it.
  */
-export function isTruncatedRead(
-  read: number,
-  bucketTotal: number | null,
-  cap: number = TRAFFIC_ROW_CAP,
-): boolean {
-  return read === cap && bucketTotal !== null && bucketTotal > read
+export function trafficSample(
+  traffic: Pick<TrafficResponse, 'truncated' | 'rows_read' | 'rows_total'> | null,
+): TrafficSample | null {
+  if (!traffic?.truncated) return null
+  return { read: traffic.rows_read, observed: traffic.rows_total }
 }
 
 /**

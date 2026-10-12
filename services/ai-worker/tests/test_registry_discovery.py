@@ -171,26 +171,34 @@ class TestExplicitAssignment:
 
     async def test_only_the_listed_cameras_are_returned(self, roster) -> None:
         roster([entry(f"CAM-DEMO-0{i}") for i in (1, 2, 3)], rtsp_ok=True)
-        streams = await discover_registry("redis://x", 0, 1, only=frozenset({"CAM-DEMO-02"}))
+        streams = await discover_registry(
+            "redis://x", 0, 1, only=frozenset({"CAM-DEMO-02"})
+        )
         assert [s.camera_code for s in streams] == ["CAM-DEMO-02"]
 
     async def test_the_list_replaces_the_shard_test(self, roster) -> None:
         """A process that names its camera owns it whatever the hash says."""
         roster([entry(f"CAM-DEMO-0{i}") for i in (1, 2, 3)], rtsp_ok=True)
         # index 5 of 7 owns nothing by hash; the list still yields the camera.
-        streams = await discover_registry("redis://x", 5, 7, only=frozenset({"CAM-DEMO-03"}))
+        streams = await discover_registry(
+            "redis://x", 5, 7, only=frozenset({"CAM-DEMO-03"})
+        )
         assert [s.camera_code for s in streams] == ["CAM-DEMO-03"]
 
     async def test_a_listed_camera_keeps_its_regions_and_url(self, roster) -> None:
         """The whole point of narrowing rather than bypassing."""
         roster([entry("CAM-DEMO-01", plate_regions=["IN", "GB"])], rtsp_ok=True)
-        streams = await discover_registry("redis://x", 0, 1, only=frozenset({"CAM-DEMO-01"}))
+        streams = await discover_registry(
+            "redis://x", 0, 1, only=frozenset({"CAM-DEMO-01"})
+        )
         assert streams[0].plate_regions == ("IN", "GB")
         assert streams[0].rtsp_url == entry("CAM-DEMO-01")["rtsp_url"]
 
     async def test_the_list_is_case_insensitive(self, roster) -> None:
         roster([entry("CAM-DEMO-01")], rtsp_ok=True)
-        streams = await discover_registry("redis://x", 0, 1, only=frozenset({"cam-demo-01"}))
+        streams = await discover_registry(
+            "redis://x", 0, 1, only=frozenset({"cam-demo-01"})
+        )
         assert [s.camera_code for s in streams] == ["CAM-DEMO-01"]
 
     async def test_an_empty_list_means_shard_as_before(self, roster) -> None:

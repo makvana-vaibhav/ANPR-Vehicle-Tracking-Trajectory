@@ -42,8 +42,21 @@ import redis
 
 # Gujarat RTO prefixes, so generated plates look like the real fleet.
 RTO_CODES = (
-    "GJ01", "GJ02", "GJ03", "GJ05", "GJ06", "GJ07", "GJ09",
-    "GJ10", "GJ11", "GJ12", "GJ15", "GJ16", "GJ18", "GJ21", "GJ27",
+    "GJ01",
+    "GJ02",
+    "GJ03",
+    "GJ05",
+    "GJ06",
+    "GJ07",
+    "GJ09",
+    "GJ10",
+    "GJ11",
+    "GJ12",
+    "GJ15",
+    "GJ16",
+    "GJ18",
+    "GJ21",
+    "GJ27",
 )
 VEHICLE_TYPES = ("car", "truck", "bus", "motorcycle", "auto")
 
@@ -106,7 +119,14 @@ def build_event(camera_code: str, vehicle_id: int, plate_text: str) -> dict[str,
             # Where the vehicle was in the `captured_at` frame, as opposed to
             # its best-looking frame above. The generator has one box, so the
             # two coincide here; on a real worker they do not.
-            "live_bbox": {"x1": x1, "y1": y1, "x2": x1 + w, "y2": y1 + h, "w": w, "h": h},
+            "live_bbox": {
+                "x1": x1,
+                "y1": y1,
+                "x2": x1 + w,
+                "y2": y1 + h,
+                "w": w,
+                "h": h,
+            },
             "first_seen_s": 120.0,
             "last_seen_s": 138.5,
             "duration_s": 18.5,
@@ -138,9 +158,18 @@ def build_event(camera_code: str, vehicle_id: int, plate_text: str) -> dict[str,
             "state": "GJ",
             "rto": plate_text[:4],
             "candidates": [
-                {"text": plate_text, "score": confidence, "support": 4, "grammar_valid": True},
-                {"text": near_miss, "score": round(confidence * 0.6, 4), "support": 1,
-                 "grammar_valid": True},
+                {
+                    "text": plate_text,
+                    "score": confidence,
+                    "support": 4,
+                    "grammar_valid": True,
+                },
+                {
+                    "text": near_miss,
+                    "score": round(confidence * 0.6, 4),
+                    "support": 1,
+                    "grammar_valid": True,
+                },
             ],
             "evidence": {
                 "reads_total": 5,
@@ -148,10 +177,18 @@ def build_event(camera_code: str, vehicle_id: int, plate_text: str) -> dict[str,
                 "agreement": 0.8,
                 "disagreement": 0.2,
                 "method": "char_vote",
-                "char_confidences": [round(random.uniform(0.6, 1.0), 4) for _ in plate_text],
+                "char_confidences": [
+                    round(random.uniform(0.6, 1.0), 4) for _ in plate_text
+                ],
             },
-            "bbox": {"x1": x1 + 40, "y1": y1 + h - 60, "x2": x1 + 150, "y2": y1 + h - 30,
-                     "w": 110.0, "h": 30.0},
+            "bbox": {
+                "x1": x1 + 40,
+                "y1": y1 + h - 60,
+                "x2": x1 + 150,
+                "y2": y1 + h - 30,
+                "w": 110.0,
+                "h": 30.0,
+            },
             "detection_confidence": confidence,
         },
         "evidence": {
@@ -265,16 +302,32 @@ class RateGenerator:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Statewide event-rate generator")
-    parser.add_argument("--cameras", type=int, default=80_000,
-                        help="distinct camera identities to spread events across")
-    parser.add_argument("--rate", type=float, default=2667.0,
-                        help="target events/s (80,000 cameras / 30 s = 2667)")
-    parser.add_argument("--duration", type=float, default=60.0, help="seconds to sustain")
+    parser.add_argument(
+        "--cameras",
+        type=int,
+        default=80_000,
+        help="distinct camera identities to spread events across",
+    )
+    parser.add_argument(
+        "--rate",
+        type=float,
+        default=2667.0,
+        help="target events/s (80,000 cameras / 30 s = 2667)",
+    )
+    parser.add_argument(
+        "--duration", type=float, default=60.0, help="seconds to sustain"
+    )
     parser.add_argument("--prefix", default="CAM-LOAD", help="camera code prefix")
-    parser.add_argument("--redis-url", default=os.getenv("REDIS_URL", "redis://redis:6379/0"))
-    parser.add_argument("--stream", default=os.getenv("EVENT_STREAM_KEY",
-                                                      "nagarnetra:events:detections"))
-    parser.add_argument("--watchlist", default="", help="comma-separated plates to inject")
+    parser.add_argument(
+        "--redis-url", default=os.getenv("REDIS_URL", "redis://redis:6379/0")
+    )
+    parser.add_argument(
+        "--stream",
+        default=os.getenv("EVENT_STREAM_KEY", "nagarnetra:events:detections"),
+    )
+    parser.add_argument(
+        "--watchlist", default="", help="comma-separated plates to inject"
+    )
     args = parser.parse_args()
 
     cameras = [f"{args.prefix}-{i:06d}" for i in range(args.cameras)]

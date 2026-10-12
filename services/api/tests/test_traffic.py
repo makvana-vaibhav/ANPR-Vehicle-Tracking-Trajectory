@@ -87,23 +87,29 @@ class TestOccupancy:
 
 
 class TestCongestion:
-    def test_the_scale_behaves_across_its_whole_range(
-        self, thresholds: TrafficThresholds
-    ) -> None:
+    def test_the_scale_behaves_across_its_whole_range(self, thresholds: TrafficThresholds) -> None:
         quiet = assess_congestion(
-            peak_vehicles=2, speed_ratio=0.95, travel_time_delta_pct=0.0,
+            peak_vehicles=2,
+            speed_ratio=0.95,
+            travel_time_delta_pct=0.0,
             thresholds=thresholds,
         )
         busy = assess_congestion(
-            peak_vehicles=6, speed_ratio=0.70, travel_time_delta_pct=25.0,
+            peak_vehicles=6,
+            speed_ratio=0.70,
+            travel_time_delta_pct=25.0,
             thresholds=thresholds,
         )
         heavy = assess_congestion(
-            peak_vehicles=9, speed_ratio=0.45, travel_time_delta_pct=80.0,
+            peak_vehicles=9,
+            speed_ratio=0.45,
+            travel_time_delta_pct=80.0,
             thresholds=thresholds,
         )
         gridlock = assess_congestion(
-            peak_vehicles=12, speed_ratio=0.20, travel_time_delta_pct=180.0,
+            peak_vehicles=12,
+            speed_ratio=0.20,
+            travel_time_delta_pct=180.0,
             thresholds=thresholds,
         )
         assert quiet.level == "free"
@@ -126,17 +132,19 @@ class TestCongestion:
         rather than an edge one.
         """
         stopped = assess_congestion(
-            peak_vehicles=None, speed_ratio=0.0, travel_time_delta_pct=None,
+            peak_vehicles=None,
+            speed_ratio=0.0,
+            travel_time_delta_pct=None,
             thresholds=thresholds,
         )
         assert stopped.score == 1.0
         assert stopped.level == "severe"
 
-    def test_speed_and_travel_time_without_occupancy(
-        self, thresholds: TrafficThresholds
-    ) -> None:
+    def test_speed_and_travel_time_without_occupancy(self, thresholds: TrafficThresholds) -> None:
         assessment = assess_congestion(
-            peak_vehicles=None, speed_ratio=0.35, travel_time_delta_pct=140.0,
+            peak_vehicles=None,
+            speed_ratio=0.35,
+            travel_time_delta_pct=140.0,
             thresholds=thresholds,
         )
         assert assessment.level == "severe"
@@ -146,7 +154,9 @@ class TestCongestion:
         self, thresholds: TrafficThresholds
     ) -> None:
         assessment = assess_congestion(
-            peak_vehicles=None, speed_ratio=None, travel_time_delta_pct=None,
+            peak_vehicles=None,
+            speed_ratio=None,
+            travel_time_delta_pct=None,
             thresholds=thresholds,
         )
         assert assessment.level is None
@@ -154,12 +164,12 @@ class TestCongestion:
         assert assessment.status == "insufficient_data"
         assert [f.factor for f in assessment.factors] == ["no_signal"]
 
-    def test_every_level_carries_its_reasons(
-        self, thresholds: TrafficThresholds
-    ) -> None:
+    def test_every_level_carries_its_reasons(self, thresholds: TrafficThresholds) -> None:
         """CLAUDE.md's explainability rule: a score with no reasons is a bug."""
         assessment = assess_congestion(
-            peak_vehicles=9, speed_ratio=0.45, travel_time_delta_pct=80.0,
+            peak_vehicles=9,
+            speed_ratio=0.45,
+            travel_time_delta_pct=80.0,
             thresholds=thresholds,
         )
         assert {f.factor for f in assessment.factors} == {
@@ -192,7 +202,9 @@ class TestCongestion:
     ) -> None:
         """Clamped, so one absurd input cannot dominate the others."""
         assessment = assess_congestion(
-            peak_vehicles=9_999, speed_ratio=-5.0, travel_time_delta_pct=99_999.0,
+            peak_vehicles=9_999,
+            speed_ratio=-5.0,
+            travel_time_delta_pct=99_999.0,
             thresholds=thresholds,
         )
         assert assessment.score == 1.0
@@ -216,16 +228,12 @@ class TestQueues:
         queue = detect_queue(self._samples([(6, 45), (1, 5)]), thresholds)
         assert not queue.present
 
-    def test_enough_vehicles_but_none_of_them_waiting(
-        self, thresholds: TrafficThresholds
-    ) -> None:
+    def test_enough_vehicles_but_none_of_them_waiting(self, thresholds: TrafficThresholds) -> None:
         """Eight vehicles flowing through is traffic, not a queue."""
         queue = detect_queue(self._samples([(8, 10), (9, 12)]), thresholds)
         assert not queue.present
 
-    def test_a_long_wait_by_too_few_vehicles(
-        self, thresholds: TrafficThresholds
-    ) -> None:
+    def test_a_long_wait_by_too_few_vehicles(self, thresholds: TrafficThresholds) -> None:
         queue = detect_queue(self._samples([(2, 90), (2, 95)]), thresholds)
         assert not queue.present
 
@@ -247,21 +255,15 @@ class TestQueues:
         assert later.length_vehicles == 9
         assert earlier.length_vehicles == 9
 
-    def test_no_samples_is_not_an_empty_road(
-        self, thresholds: TrafficThresholds
-    ) -> None:
+    def test_no_samples_is_not_an_empty_road(self, thresholds: TrafficThresholds) -> None:
         queue = detect_queue([], thresholds)
         assert not queue.present
         assert queue.status == "insufficient_data"
 
 
 class TestPossibleObstruction:
-    def test_a_vehicle_stopped_for_two_minutes(
-        self, thresholds: TrafficThresholds
-    ) -> None:
-        assert is_possible_obstruction(
-            direction="stationary", dwell_s=120.0, thresholds=thresholds
-        )
+    def test_a_vehicle_stopped_for_two_minutes(self, thresholds: TrafficThresholds) -> None:
+        assert is_possible_obstruction(direction="stationary", dwell_s=120.0, thresholds=thresholds)
 
     def test_a_vehicle_queueing_briefly_is_not_an_obstruction(
         self, thresholds: TrafficThresholds
@@ -286,9 +288,7 @@ class TestPossibleObstruction:
         stopped vehicles out of tracker noise, on a panel whose whole value is
         that an operator can trust it enough to look.
         """
-        assert not is_possible_obstruction(
-            direction=None, dwell_s=300.0, thresholds=thresholds
-        )
+        assert not is_possible_obstruction(direction=None, dwell_s=300.0, thresholds=thresholds)
         assert not is_possible_obstruction(
             direction="stationary", dwell_s=None, thresholds=thresholds
         )

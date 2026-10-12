@@ -14,7 +14,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 from httpx import AsyncClient
-from sqlalchemy import func, select, text
+from sqlalchemy import delete, func, select, text
 
 from app.core.config import Settings, settings
 from app.db.session import SessionLocal
@@ -131,15 +131,25 @@ class TestExpiryActuallyDeletes:
             )
             await session.commit()
 
-        await retention.sweep(dry_run=False)
+        try:
+            await retention.sweep(dry_run=False)
 
-        async with SessionLocal() as session:
-            survived = (
-                await session.execute(
-                    select(func.count()).select_from(Detection).where(Detection.id == detection_id)
-                )
-            ).scalar_one()
-        assert survived == 1, "the sweep deleted a detection well inside its retention"
+            async with SessionLocal() as session:
+                survived = (
+                    await session.execute(
+                        select(func.count())
+                        .select_from(Detection)
+                        .where(Detection.id == detection_id)
+                    )
+                ).scalar_one()
+            assert survived == 1, "the sweep deleted a detection well inside its retention"
+        finally:
+            # Today's row is inside retention by design, so nothing else ever
+            # removes it: left behind, every run added a GJ00KEEP0000 "plate
+            # read" with no camera to the live database's reports.
+            async with SessionLocal() as session:
+                await session.execute(delete(Detection).where(Detection.id == detection_id))
+                await session.commit()
 
 
 class TestPolicyShape:

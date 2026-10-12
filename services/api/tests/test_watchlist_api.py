@@ -22,6 +22,14 @@ from app.models.intelligence import Watchlist
 pytestmark = pytest.mark.asyncio
 
 
+#: No Indian plate starts with ZZ — it is not a state code — so nothing an
+#: operator watchlists can ever match this. It used to be `GJ01`: Ahmedabad's
+#: own series, and the sweep below hard-deleted every real `GJ01…` entry on
+#: the live watchlist each time the suite ran (12 Oct: two demo entries gone,
+#: with no audit row, since the delete bypasses the API's retire-only rule).
+TEST_PLATE_PREFIX = "ZZWL"
+
+
 def a_plate() -> str:
     """A plate no other test — and no earlier run — is using.
 
@@ -30,7 +38,7 @@ def a_plate() -> str:
     test fails on its *first* insert. 10 hex characters makes that vanishingly
     unlikely without exceeding the 24-character column.
     """
-    return f"GJ01{uuid.uuid4().hex[:10].upper()}"
+    return f"{TEST_PLATE_PREFIX}{uuid.uuid4().hex[:10].upper()}"
 
 
 @pytest.fixture(autouse=True)
@@ -40,11 +48,14 @@ async def _remove_test_entries():
     Autouse and pattern-based rather than a per-call helper, because the
     failure is a test *forgetting* to register its cleanup — and 151 stray
     entries had accumulated in the demo database before anyone noticed. A
-    sweep catches call sites that do not exist yet.
+    sweep catches call sites that do not exist yet. The pattern must match
+    nothing real: this runs against the live database.
     """
     yield
     async with SessionLocal() as db:
-        await db.execute(delete(Watchlist).where(Watchlist.plate_normalised.like("GJ01%")))
+        await db.execute(
+            delete(Watchlist).where(Watchlist.plate_normalised.like(f"{TEST_PLATE_PREFIX}%"))
+        )
         await db.commit()
 
 
@@ -171,8 +182,12 @@ class TestReissuingARetiredEntry:
     async def test_reissuing_under_the_same_case_reactivates(self, client, auth_headers):
         admin = await auth_headers("admin")
         plate = a_plate()
-        body = {"plate": plate, "category": "stolen", "priority": "high",
-                "case_ref": "FIR/REISSUE/0001"}
+        body = {
+            "plate": plate,
+            "category": "stolen",
+            "priority": "high",
+            "case_ref": "FIR/REISSUE/0001",
+        }
 
         first = await client.post("/api/v1/watchlist", headers=admin, json=body)
         assert first.status_code == 201, first.text
@@ -194,12 +209,14 @@ class TestReissuingARetiredEntry:
         """Reinstating a retired entry must not become a way to duplicate a live one."""
         admin = await auth_headers("admin")
         plate = a_plate()
-        body = {"plate": plate, "category": "stolen", "priority": "high",
-                "case_ref": "FIR/REISSUE/0002"}
+        body = {
+            "plate": plate,
+            "category": "stolen",
+            "priority": "high",
+            "case_ref": "FIR/REISSUE/0002",
+        }
 
-        assert (
-            await client.post("/api/v1/watchlist", headers=admin, json=body)
-        ).status_code == 201
+        assert (await client.post("/api/v1/watchlist", headers=admin, json=body)).status_code == 201
         clash = await client.post("/api/v1/watchlist", headers=admin, json=body)
         assert clash.status_code == 409
 

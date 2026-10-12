@@ -65,6 +65,7 @@ def clean_source_file(v: str | None) -> str | None:
         raise ValueError(f"source_file must be a video file ({allowed})")
     return v
 
+
 Latitude = Annotated[float, Field(ge=-90, le=90, examples=[22.3039])]
 Longitude = Annotated[float, Field(ge=-180, le=180, examples=[70.8022])]
 

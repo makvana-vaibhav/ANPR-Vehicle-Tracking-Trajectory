@@ -105,7 +105,7 @@ export function readFromDetection(row: Detection): PlateRead | null {
 export function timeIST(iso: string): string {
   const at = new Date(iso)
   if (Number.isNaN(at.getTime())) return '—'
-  return at.toLocaleTimeString('en-IN', { timeZone: 'Asia/Kolkata', hour12: false })
+  return at.toLocaleTimeString('en-IN', { timeZone: 'Asia/Kolkata', hourCycle: 'h23' })
 }
 
 /** What the watch hit says, in words — never just a colour. */

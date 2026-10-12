@@ -196,9 +196,7 @@ class Hop:
             "bearing_deg": round(self.bearing, 1) if self.bearing is not None else None,
             "flags": list(self.flags),
             "plausible": self.plausible,
-            "best_detection_id": (
-                str(self.best_detection_id) if self.best_detection_id else None
-            ),
+            "best_detection_id": (str(self.best_detection_id) if self.best_detection_id else None),
         }
 
 
@@ -591,9 +589,7 @@ async def build_route(
     hops = cluster_into_hops(sightings)
     headings = {s.camera_id: s.heading_deg for s in sightings}
     score_legs(hops, headings)
-    return Route(
-        plate=plate, hops=hops, window_from=since, window_to=until, unplaced=unplaced
-    )
+    return Route(plate=plate, hops=hops, window_from=since, window_to=until, unplaced=unplaced)
 
 
 # ─────────────────────────────────────────────────────────────────────

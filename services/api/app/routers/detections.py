@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import UTC, datetime, timedelta
-from typing import Annotated
+from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, Query, Request
 from sqlalchemy import Select, func, select
@@ -145,7 +145,8 @@ async def list_detections(
     else:
         vehicle_types = None
 
-    filters = {
+    # Keyword arguments for `_apply_filters`, whose signature types each one.
+    filters: dict[str, Any] = {
         "camera_id": camera_id,
         "plate": plate,
         "plate_prefix": plate_prefix,

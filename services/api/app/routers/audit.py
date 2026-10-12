@@ -18,6 +18,7 @@ from fastapi import APIRouter, Depends, Query, Request
 
 from app.api.deps import CurrentUserDep, DbSession
 from app.core.rbac import Permission, require_permission
+from app.middleware.audit import RECORDED_EXPLICITLY
 from app.schemas.auth import AuditEntry, AuditPage
 from app.services import audit
 
@@ -67,6 +68,10 @@ async def read_audit(
             "returned": len(rows),
         },
     )
+    # This row says more than the middleware's generic one (the filters, the
+    # window, how many rows were shown), so it is the only one: two rows per
+    # view counted every reviewer twice.
+    setattr(request.state, RECORDED_EXPLICITLY, True)
 
     return AuditPage(
         items=[AuditEntry.model_validate(row) for row in rows],

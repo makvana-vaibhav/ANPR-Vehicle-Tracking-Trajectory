@@ -110,29 +110,66 @@ class TestAccountCreation:
         assert created["must_change_password"] is True
 
     async def test_choosing_your_own_password_clears_the_flag(
-        self, client: AsyncClient, make_user
+        self, client: AsyncClient, auth_headers
     ):
-        """The change that makes a password personal must say so."""
-        created = await make_user()
-        assert created["must_change_password"] is True
+        """The change that makes a password personal must say so.
 
-        signed_in = await client.post(
-            "/api/v1/auth/login",
-            json={"username": created["username"], "password": STRONG},
-        )
-        assert signed_in.status_code == 200, signed_in.text
-        headers = {"Authorization": f"Bearer {signed_in.json()['access_token']}"}
+        One fixed account, reused run after run. This is the test whose account
+        acts — it signs in — and an account that has acted can only be
+        deactivated, never deleted, so a fresh `test.*` name per run left
+        another inactive account in the live registry every time the suite ran.
+        """
+        admin = await auth_headers("admin")
+        username = "test.self-service"
+        listed = (await client.get("/api/v1/users", headers=admin)).json()["items"]
+        existing = next((u for u in listed if u["username"] == username), None)
+        if existing is None:
+            response = await client.post(
+                "/api/v1/users",
+                headers=admin,
+                json={"username": username, "password": STRONG, "role": "operator"},
+            )
+            assert response.status_code == 201, response.text
+            account = response.json()
+        else:
+            # An administrator setting the password again is what puts the
+            # flag back, exactly as creating the account did.
+            reactivated = await client.patch(
+                f"/api/v1/users/{existing['id']}", headers=admin, json={"is_active": True}
+            )
+            assert reactivated.status_code == 200, reactivated.text
+            response = await client.post(
+                f"/api/v1/users/{existing['id']}/password",
+                headers=admin,
+                json={"new_password": STRONG, "must_change_password": True},
+            )
+            assert response.status_code == 200, response.text
+            account = response.json()
 
-        changed = await client.post(
-            "/api/v1/auth/password",
-            headers=headers,
-            json={"current_password": STRONG, "new_password": "Saputara-Mist-88"},
-        )
-        assert changed.status_code == 200, changed.text
+        try:
+            assert account["must_change_password"] is True
 
-        me = await client.get("/api/v1/auth/me", headers=headers)
-        assert me.status_code == 200, me.text
-        assert me.json()["must_change_password"] is False
+            signed_in = await client.post(
+                "/api/v1/auth/login",
+                json={"username": username, "password": STRONG},
+            )
+            assert signed_in.status_code == 200, signed_in.text
+            headers = {"Authorization": f"Bearer {signed_in.json()['access_token']}"}
+
+            changed = await client.post(
+                "/api/v1/auth/password",
+                headers=headers,
+                json={"current_password": STRONG, "new_password": "Saputara-Mist-88"},
+            )
+            assert changed.status_code == 200, changed.text
+
+            me = await client.get("/api/v1/auth/me", headers=headers)
+            assert me.status_code == 200, me.text
+            assert me.json()["must_change_password"] is False
+        finally:
+            await client.patch(
+                f"/api/v1/users/{account['id']}", headers=admin, json={"is_active": False}
+            )
 
     async def test_a_weak_password_is_refused_at_creation(self, client: AsyncClient, auth_headers):
         headers = await auth_headers("admin")

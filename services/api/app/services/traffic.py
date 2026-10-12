@@ -341,9 +341,7 @@ class QueueSample:
     median_dwell_s: float
 
 
-def detect_queue(
-    samples: list[QueueSample], thresholds: TrafficThresholds
-) -> QueueAssessment:
+def detect_queue(samples: list[QueueSample], thresholds: TrafficThresholds) -> QueueAssessment:
     """A queue is accumulation that *persists*.
 
     Both conditions have to hold in the same bucket — enough vehicles, each

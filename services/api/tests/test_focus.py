@@ -89,9 +89,7 @@ class TestTheHeartbeat:
         assert response.status_code == 403
         assert DEMO not in await focus.watched()
 
-    async def test_an_unknown_camera_is_not_found(
-        self, client: AsyncClient, auth_headers
-    ) -> None:
+    async def test_an_unknown_camera_is_not_found(self, client: AsyncClient, auth_headers) -> None:
         response = await client.post(
             f"/api/v1/cameras/{uuid.uuid4()}/focus", headers=await auth_headers("operator")
         )
