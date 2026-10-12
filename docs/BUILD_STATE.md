@@ -1389,6 +1389,97 @@ only an officer's reading. Not attributed to a case reference by force — the
 
 ---
 
+## Grid ops: calm health, placed cameras, district gaps, honest Insights ✅
+
+12 Oct, branch `sentinel-gj`, during the live test. The judge review's P0-3,
+P0-4, P0-5, P0-7 and P1-3 (`docs/review/SENTINEL_JUDGE_REVIEW.md` §6).
+
+**Health that does not flap** (`services/health_monitor.py`, rewritten). The
+grid swung between accepting and refusing our session every few minutes; 30
+cameras flipped unknown ⇄ online with each swing, a catalogue fetch queued
+behind 30 probes crossed the 4 s "degraded" line (5,880 grid probes in 12 h),
+and the integration alarm opened and closed 11 times in one hour. Now:
+
+- A probe that could not ask (`STATUS_HOLD_ERRORS` in `adapters/base.py`: the
+  grid refused us, a VMS did not answer, …) **holds** the camera's last known
+  status; `GET /cameras` and `/cameras/{id}` carry `status_stale_reason` and
+  `status_confirmed_at`, and the UI marks it "last known".
+- The grid's refusal has its own code, `grid_refused` (`grid_session.catalogue.refused`),
+  apart from `sandbox_unreachable`; the grid's catalogue time is never the
+  camera's latency (kept in `detail`).
+- Every status change is debounced both ways: `HEALTH_OFFLINE_AFTER_FAILURES`
+  (2) to go down, `HEALTH_STATUS_CHANGE_AFTER_PROBES` (3) for anything else; a
+  held probe neither counts nor breaks a streak. Camera-down alarms open only on
+  a debounced flip to offline and close on a debounced recovery.
+- One integration state per VMS: one alarm after `HEALTH_INTEGRATION_DOWN_AFTER_SWEEPS`
+  (4) sweeps that could ask nothing, worded "… is refusing our session (its
+  watch-time cooldown) …" for a refusal (medium), closed after
+  `HEALTH_INTEGRATION_RECOVER_AFTER_SWEEPS` (20 = 5 min) steady sweeps.
+- The AI workers are witnesses: a fresh report in `nagarnetra:ai:workers`
+  listing the camera's stream open, or a detection within
+  `HEALTH_WORKER_EVIDENCE_SECONDS` (120), makes a failed probe an answer.
+- `GET /health/fleet` adds `stale` and `integrations[]`; uptime (camera detail,
+  reliability gaps) is over answered probes, refused ones counted as `not_asked`.
+  Fleet health shows one notice per integration in the alarm's words; Command's
+  tile says "grid refusing us · N last known"; the camera strip draws refused
+  probes blue, not red. `POST /cameras/{id}/probe` also holds (`status_held`).
+
+**Camera positions** (`data/seed/camera_positions.csv`, `services/camera_positions.py`).
+Each grid name geocoded once with OpenStreetMap Nominatim (74 requests, ≤1/s,
+descriptive User-Agent, cached in the session scratchpad), with query, OSM
+object, confidence and a note per row; attribution in `data/seed/README.md`.
+Only `geocoded` rows at high/medium confidence move a camera, only while its
+name still matches, never over the grid's coordinates or an operator's
+(`override_for`). Applied by `scripts/sync_sandbox.py` on every sync (so a
+re-sync never reverts it), by `--positions-only` (registry only, no grid
+contact) and by `seed.py --only positions`; tag `placement:geocoded`; districts
+rewritten in the boundary file's spelling from the point. **Live:** 14 placed
+(cam01, 03, 04, 06, 11, 12, 13, 15, 17, 19, 21, 25, 26, 30), 13 still town
+centre, 3 unknown (cam20 Mohanpura, **cam22 BK Mervada** — the best reader, not
+in OSM — and cam23 Kheram); one `camera.positions_applied` audit row. The UI
+says "approx. · from name" and "Approximate — geocoded from the name … ©
+OpenStreetMap contributors". cam25/26 are the weakest (a hospital and a PHC,
+the only OSM features of those names in Gujarat).
+
+**Gap report over Gujarat's 33 districts** (`services/fleet.py`, `routers/gap_report.py`).
+`CITY_TALUKAS` is gone; each camera is placed in a district by point-in-polygon
+on `data/seed/gujarat_districts.geojson` (shapely, cached); recorded footage and
+`placement:unknown` cameras cover no district and are named apart. New ageing
+bucket (installed ≥ 5 years) and an honest "install date unknown" list — all
+32 live cameras today; nothing is assumed. CSV gains `installed_on`, `age_years`
+and gap types `ageing`, `install_date_unknown`, `position_unknown`. Live: 25 of
+33 districts without a placed camera.
+
+**Branding** (sub-agent): FastAPI title/description and `GET /` say Contrail /
+Sentinel; VMS "Recorded demo feed (local simulator)" (seed renames the old row
+in place); CAM-DEMO-01 "Recorded demo clip (UK road) — not a Gujarat camera"
+(audited PATCH); diagrams' titles and PNGs re-rendered. Internal identifiers
+(`nagarnetra:*`, bucket, DB, JWT issuer) unchanged.
+
+**Insights honesty** (sub-agent): every traffic endpoint and
+`/predictions/congestion` excludes `recorded-footage` cameras in SQL before the
+row cap unless `include_recorded=true`, and says so in `recorded_footage`;
+Insights has an "Include recorded clips" toggle (`?recorded=1`). CAM-DEMO-01 was
+93.4% of 24 h detections. Command asks for recordings on purpose (pipeline
+activity) and names them in the tile.
+
+**Verified:** API 904 passed / 16 skipped (new `test_health_debounce.py` 17 —
+replays SBX-cam22's recorded 09:01–09:35 sequence: one alarm, no camera moved;
+`test_camera_positions.py` 9; `test_fleet_health.py` +5; `test_gap_report.py`
+updated); web 42 files / 416; `tsc` clean; mypy 108 files clean. Deployed:
+`restart api ingest`, web rebuilt; ingest logs `held=30` with `grid_refused`;
+`flows.mjs --skip watchlist-alarm` 13/13; screenshots in
+`tests/browser/out/gridops/`.
+
+**Open:** the integration alarm open since 09:35 IST keeps its old wording
+until it closes (dedup); camera statuses already flipped to `unknown` before the
+deploy stay so until the grid answers 3 sweeps running; `probeHistory` in Fleet
+health still charts refused probes as unanswered (the info text says so);
+`pursuit.py` keeps its own copy of `RECORDED_TAG`; `scripts/output_report.py`
+(untracked, another session's) fails `ruff format --check`.
+
+---
+
 ## Phase 10 — Scale profile & the 80,000-camera proof ✅
 
 - [x] `docker-compose.scale.yml` — API stops ingesting (`INGEST_ENABLED=false`),

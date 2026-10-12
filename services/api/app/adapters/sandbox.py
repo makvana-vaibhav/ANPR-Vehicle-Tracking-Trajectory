@@ -149,6 +149,9 @@ class HostedGridAdapter(CameraAdapter):
                         await grid_session.session.refused(headers.get("Cookie"))
                         headers = await grid_session.session.headers()
                         grid_session.catalogue.clear()
+                        # No session was accepted: the grid turning us away,
+                        # not the network failing.
+                        refused = True
                         continue
                     payload = response.json()
                     grid_session.catalogue.put(payload)
@@ -253,15 +256,22 @@ class HostedGridAdapter(CameraAdapter):
         started = time.perf_counter()
 
         payload, _url, error = await self._fetch_catalogue(self.timeout_seconds)
+        # The time to read the catalogue is the CDN's, not this camera's, and
+        # thirty probes queue on one fetch: reported as the camera's latency it
+        # crossed the 4 s "degraded" line at random (5,880 grid probes in 12
+        # hours on 12 Oct) and flipped healthy cameras to degraded. Kept in
+        # the detail, never in `latency_ms`.
+        waited_ms = int((time.perf_counter() - started) * 1000)
         if payload is None:
             return HealthProbe(
                 reachable=False,
-                latency_ms=int((time.perf_counter() - started) * 1000),
-                error_code="sandbox_unreachable",
+                # A refusal is the grid asking us to wait (its watch-time
+                # cooldown, or one session per IP); unreachable is a fault.
+                error_code=(
+                    "grid_refused" if grid_session.catalogue.refused else "sandbox_unreachable"
+                ),
                 detail=error,
             )
-
-        latency_ms = int((time.perf_counter() - started) * 1000)
 
         for item in extract_list(payload):
             if str(pick(item, "id") or "") != external_id:
@@ -269,16 +279,17 @@ class HostedGridAdapter(CameraAdapter):
             live = as_bool(pick(item, "live"))
             return HealthProbe(
                 reachable=live if live is not None else True,
-                latency_ms=latency_ms,
                 fps_actual=as_float(pick(item, "fps")),
                 error_code=None if live is not False else "reported_offline",
-                detail=f"codec={pick(item, 'codec') or 'unknown'}",
+                detail=(
+                    f"codec={pick(item, 'codec') or 'unknown'}; "
+                    f"catalogue answered in {waited_ms} ms"
+                ),
             )
 
         # The guide warns the set of cameras can change under us.
         return HealthProbe(
             reachable=False,
-            latency_ms=latency_ms,
             error_code="unknown_to_vms",
             detail="Camera id is no longer present in the sandbox catalogue",
         )

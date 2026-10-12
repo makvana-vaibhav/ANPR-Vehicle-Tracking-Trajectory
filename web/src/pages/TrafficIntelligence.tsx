@@ -36,6 +36,11 @@
  *   "20,000 vehicles" over a window that held 27,000. The total shown is the
  *   server's count of the whole window, and every panel built on the bounded
  *   read says it covers the latest part of the window, not all of it.
+ * - A camera replaying a recorded clip on a loop is not traffic. CAM-DEMO-01's
+ *   15-second clip was ~93% of every vehicle this page counted and its road
+ *   was rated severe congestion. The server leaves such cameras out unless
+ *   "Include recorded clips" is ticked, and this page names the cameras it
+ *   left out, from the response, so the note describes the figures on screen.
  *
  * The caveats sit behind the `ⓘ` beside each title, and the panels are
  * grouped into four tabs so each is one screenful.
@@ -50,8 +55,9 @@
  *
  * ## The view is in the URL
  *
- * Tab, window and corridor live in the query string, so "the forecast for
- * Ashram Road over the last six hours" is a link that can be handed over.
+ * Tab, window, corridor and whether recorded clips count (`recorded=1`) live
+ * in the query string, so "the forecast for Ashram Road over the last six
+ * hours" is a link that can be handed over.
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
@@ -75,6 +81,7 @@ import type { BadgeTone, IconName } from '@/components/ui'
 import {
   Badge,
   Button,
+  Checkbox,
   ErrorBanner,
   Icon,
   InfoHint,
@@ -117,6 +124,7 @@ import type {
   FlowResponse,
   HotspotResponse,
   Priority,
+  RecordedFootage,
   RouteDensityResponse,
   SpeedResponse,
   TrafficFactor,
@@ -429,6 +437,9 @@ export default function TrafficIntelligence() {
   const tab = parseTab(params.get('tab'))
   const hours = parseHours(params.get('window'))
   const corridor = params.get('corridor') ?? ''
+  /** Off unless the link says otherwise — a looping clip is not traffic (see
+   *  the file comment). */
+  const includeRecorded = params.get('recorded') === '1'
   const windowDef = WINDOWS.find((w) => w.hours === hours) ?? WINDOWS[2]
   const bucket = windowDef.bucket
 
@@ -496,6 +507,9 @@ export default function TrafficIntelligence() {
     setLoading(true)
     try {
       const windowSince = since(hours)
+      // The same to every request: panels that disagreed about whether the
+      // loop counts would disagree with each other on screen.
+      const include_recorded = includeRecorded
       const [
         flowBody,
         speedBody,
@@ -506,20 +520,32 @@ export default function TrafficIntelligence() {
         trafficBody,
         historyBody,
       ] = await Promise.all([
-        api.getAnalyticsFlow({ since: windowSince, bucket, group_by: 'corridor', corridor }),
-        api.getAnalyticsSpeed({ since: windowSince, corridor }),
-        api.getAnalyticsRoutes({ since: windowSince, limit: 15 }),
-        api.getAnalyticsTravelTime({ since: windowSince }),
-        api.getAnalyticsHotspots({ since: windowSince, limit: 8 }),
-        api.getCongestionForecast({ group_by: 'camera', corridor }),
+        api.getAnalyticsFlow({
+          since: windowSince,
+          bucket,
+          group_by: 'corridor',
+          corridor,
+          include_recorded,
+        }),
+        api.getAnalyticsSpeed({ since: windowSince, corridor, include_recorded }),
+        api.getAnalyticsRoutes({ since: windowSince, limit: 15, include_recorded }),
+        api.getAnalyticsTravelTime({ since: windowSince, include_recorded }),
+        api.getAnalyticsHotspots({ since: windowSince, limit: 8, include_recorded }),
+        api.getCongestionForecast({ group_by: 'camera', corridor, include_recorded }),
         // Grouped by corridor: a road is what an operator acts on, and it is
         // also the only grouping for which speed and travel time exist at all
         // — both come from the distance between two cameras.
-        api.getTrafficState({ since: windowSince, group_by: 'corridor', corridor }),
+        api.getTrafficState({
+          since: windowSince,
+          group_by: 'corridor',
+          corridor,
+          include_recorded,
+        }),
         api.getTrafficHistory({
           since: windowSince,
           group_by: 'corridor',
           key: corridor || undefined,
+          include_recorded,
         }),
       ])
       if (mine !== sequence.current) return
@@ -539,7 +565,7 @@ export default function TrafficIntelligence() {
     } finally {
       if (mine === sequence.current) setLoading(false)
     }
-  }, [hours, corridor, bucket])
+  }, [hours, corridor, bucket, includeRecorded])
 
   useEffect(() => {
     void load()
@@ -711,6 +737,19 @@ export default function TrafficIntelligence() {
                   options={WINDOWS.map((w) => ({ value: w.value, label: w.label }))}
                 />
               </ToolbarField>
+              {/* A group, not a label: the checkbox carries its own label, and
+                  a label inside a label hands clicks to the wrong control. */}
+              <ToolbarField label="Footage" group>
+                <div className="flex h-8 items-center">
+                  <Checkbox
+                    checked={includeRecorded}
+                    onChange={(e) => update({ recorded: e.target.checked ? '1' : null })}
+                    label="Include recorded clips"
+                    labelClassName="gap-2 text-xs text-muted-foreground"
+                    title="Count cameras that replay a recorded clip on a loop. Off by default: a loop is the same few vehicles again and again, not traffic."
+                  />
+                </div>
+              </ToolbarField>
               <Button
                 variant="outline"
                 onClick={() => void load()}
@@ -729,6 +768,12 @@ export default function TrafficIntelligence() {
           <div className="mt-3">
             <ErrorBanner>{error}</ErrorBanner>
           </div>
+        )}
+
+        {/* Optional-chained: a server from before the field existed sends no
+            `recorded_footage`, and the page must not fall over on it. */}
+        {traffic?.recorded_footage && (
+          <RecordedNote footage={traffic.recorded_footage} className="mt-3" />
         )}
 
         {/* ── KPI tiles ─────────────────────────────────────────────── */}
@@ -1346,6 +1391,53 @@ function SampleNote({ sample, className = '' }: { sample: SampleInfo; className?
         per request, newest first, so the start of the window is not in this panel.
         {sample.canNarrow ? ' A shorter window may fit within that.' : ''}
       </span>
+    </p>
+  )
+}
+
+/** "CAM-DEMO-01", "CAM-DEMO-01 and CAM-DEMO-02", "A, B and C". */
+function listed(codes: readonly string[]): string {
+  if (codes.length <= 1) return codes.join('')
+  return `${codes.slice(0, -1).join(', ')} and ${codes[codes.length - 1]}`
+}
+
+/**
+ * Names the cameras replaying a recorded clip, and says whether the figures
+ * on screen count them. Read from the response, not from the checkbox, so
+ * while a new request is in flight the note still describes the figures it
+ * sits above. Nothing to say when no camera replays a recording.
+ */
+function RecordedNote({
+  footage,
+  className = '',
+}: {
+  footage: RecordedFootage
+  className?: string
+}) {
+  if (footage.cameras.length === 0) return null
+  const one = footage.cameras.length === 1
+  const what = one
+    ? 'a recorded clip that loops, not live traffic'
+    : 'recorded clips that loop, not live traffic'
+  return (
+    <p
+      data-testid="recorded-note"
+      className={`flex items-start gap-2 rounded-md border border-border bg-background/50 px-3 py-2 text-xs leading-relaxed text-muted-foreground ${className}`}
+    >
+      <Icon name="info" size={14} className="mt-px shrink-0 text-faint" />
+      {footage.included ? (
+        <span>
+          Including {listed(footage.cameras)} — {what}. {one ? 'It shows' : 'They show'} the
+          same few vehicles again on every loop, so the counts and congestion below
+          describe the footage as well as the roads.
+        </span>
+      ) : (
+        <span>
+          Excluding {listed(footage.excluded_cameras)} — {what}. Every figure on this page
+          leaves {one ? 'it' : 'them'} out; tick “Include recorded clips” to count{' '}
+          {one ? 'it' : 'them'}.
+        </span>
+      )}
     </p>
   )
 }

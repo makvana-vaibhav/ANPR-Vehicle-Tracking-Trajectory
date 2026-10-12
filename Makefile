@@ -51,14 +51,16 @@ help: ## Show this help
 # ── Environment ───────────────────────────────────────────────────────
 
 .PHONY: env
-env: ## Create .env from .env.example if absent
+env: ## Create .env from .env.example if absent, and generate every secret it lacks
 	@if [ -f .env ]; then \
-	  printf "\033[2m.env already exists — leaving it alone\033[0m\n"; \
+	  printf "\033[2m.env already exists — keeping its values\033[0m\n"; \
 	else \
 	  cp .env.example .env; \
 	  printf "\033[32mcreated .env from .env.example\033[0m\n"; \
-	  printf "\033[2mDevelopment defaults are fine for the demo.\033[0m\n"; \
 	fi
+	@# Passwords are generated per install, never taken from the repository;
+	@# names are printed, values never are. docs/SECURITY.md §8.
+	@python3 scripts/gen_secrets.py --env .env
 
 .PHONY: preflight
 preflight: ## Check Docker is running and has enough memory
@@ -154,6 +156,21 @@ seed: ## Seed cameras, watchlist, and users
 demo: ## Full judge demo: fresh data, fleet, worker, verified
 	@./scripts/demo_up.sh
 	@command -v open >/dev/null 2>&1 && open "$(WEB_URL)" || true
+
+# ── Backups (scripts/backup.sh) ───────────────────────────────────────
+
+.PHONY: backup backup-verify restore
+backup: ## Back up the database + object store to ./backups/<UTC time>/, then verify it
+	@./scripts/backup.sh backup
+
+backup-verify: ## Restore BACKUP=backups/<ts> into a throwaway Postgres and check row counts
+	@if [ -z "$(BACKUP)" ]; then printf "\033[31musage: make backup-verify BACKUP=backups/<timestamp>\033[0m\n"; exit 2; fi
+	@./scripts/backup.sh verify "$(BACKUP)"
+	@./scripts/backup.sh drill-objects "$(BACKUP)"
+
+restore: ## DESTRUCTIVE: restore BACKUP=backups/<ts> into the running stack (asks first)
+	@if [ -z "$(BACKUP)" ]; then printf "\033[31musage: make restore BACKUP=backups/<timestamp> [CONFIRM=<db name>] [DRY_RUN=1]\033[0m\n"; exit 2; fi
+	@CONFIRM="$(CONFIRM)" DRY_RUN="$(DRY_RUN)" ./scripts/backup.sh restore "$(BACKUP)"
 
 .PHONY: models
 models: ## Download and export AI model weights to ONNX
@@ -317,7 +334,7 @@ load-operators: ## k6: can operators still work while ingest runs at full rate?
 	@# Containerised so no k6 install is needed, and on the compose network so
 	@# it reaches the API by service name rather than through the host.
 	@docker run --rm -i --network contrail-net \
-		-e API_URL=http://api:8000 -e API_PASSWORD="$${BOOTSTRAP_ADMIN_PASSWORD:-NagarNetra@2026}" \
+		-e API_URL=http://api:8000 -e API_PASSWORD="$$(sed -n 's/^BOOTSTRAP_ADMIN_PASSWORD=//p' .env | tail -1)" \
 		-v "$(PWD)/tests/load/k6:/scripts:ro" \
 		grafana/k6:0.54.0 run /scripts/api_load.js
 

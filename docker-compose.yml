@@ -22,6 +22,21 @@ x-logging: &default-logging
 x-restart: &default-restart
   restart: unless-stopped
 
+# ── Secrets ───────────────────────────────────────────────────────────
+# Every password comes from .env (gitignored), which `make env` creates and
+# fills with generated values (scripts/gen_secrets.py). There are no fallback
+# development passwords: a missing secret stops compose with the message
+# below rather than starting the stack on a value published in the repository.
+x-database-url: &database-url "postgresql+asyncpg://${POSTGRES_USER:-nagarnetra}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is not set - run make env}@postgres:5432/${POSTGRES_DB:-nagarnetra}"
+x-redis-url: &redis-url "redis://:${REDIS_PASSWORD:?REDIS_PASSWORD is not set - run make env}@redis:6379/0"
+
+# ── Exposure ──────────────────────────────────────────────────────────
+# Only the command centre listens beyond this machine: web on 8080 (HTTP) and
+# 8443 (HTTPS). Every data-tier and media port is published on 127.0.0.1 only,
+# for the browser and tools on this laptop; a browser on another machine uses
+# https://<host>:8443, where nginx proxies the API, the WebSocket feed, crops
+# (/media/) and video (/gateway/) on its own origin (docs/SECURITY.md §6).
+
 services:
 
   # ── PostgreSQL 16 + PostGIS 3.4 + TimescaleDB ───────────────────────
@@ -34,12 +49,12 @@ services:
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-nagarnetra}
       POSTGRES_USER: ${POSTGRES_USER:-nagarnetra}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-nagarnetra_dev_pw}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is not set - run make env}
       # Enable both extensions at first boot
       POSTGRES_INITDB_ARGS: "--data-checksums"
       TZ: UTC
     ports:
-      - "${POSTGRES_HOST_PORT:-5432}:5432"
+      - "127.0.0.1:${POSTGRES_HOST_PORT:-5432}:5432"
     volumes:
       - postgres-data:/home/postgres/pgdata
       - ./infra/postgres/init:/docker-entrypoint-initdb.d:ro
@@ -77,20 +92,23 @@ services:
     image: redis:7.4.11-alpine
     container_name: contrail-redis
     <<: *default-restart
+    # Password required. The bus carries the detections every alert is raised
+    # from, so an open Redis let anyone on the network XADD a sighting and
+    # raise a real-looking alarm. Passed through the environment rather than
+    # interpolated into the command line, so `docker ps` does not show it.
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?REDIS_PASSWORD is not set - run make env}
     command:
-      - redis-server
-      - --appendonly
-      - "yes"
-      - --maxmemory
-      - 512mb
-      - --maxmemory-policy
-      - noeviction        # never silently drop events off the bus
+      - sh
+      - -c
+      # maxmemory-policy noeviction: never silently drop events off the bus.
+      - exec redis-server --appendonly yes --maxmemory 512mb --maxmemory-policy noeviction --requirepass "$$REDIS_PASSWORD"
     ports:
-      - "${REDIS_HOST_PORT:-6379}:6379"
+      - "127.0.0.1:${REDIS_HOST_PORT:-6379}:6379"
     volumes:
       - redis-data:/data
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: ["CMD-SHELL", "REDISCLI_AUTH=\"$$REDIS_PASSWORD\" redis-cli ping | grep -q PONG"]
       interval: 5s
       timeout: 3s
       retries: 10
@@ -106,11 +124,11 @@ services:
     command: server /data --console-address ":9001"
     environment:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER:-nagarnetra}
-      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-nagarnetra_dev_pw}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?MINIO_ROOT_PASSWORD is not set - run make env}
       MINIO_BROWSER_REDIRECT_URL: http://localhost:${MINIO_CONSOLE_HOST_PORT:-9001}
     ports:
-      - "${MINIO_API_HOST_PORT:-9000}:9000"
-      - "${MINIO_CONSOLE_HOST_PORT:-9001}:9001"
+      - "127.0.0.1:${MINIO_API_HOST_PORT:-9000}:9000"
+      - "127.0.0.1:${MINIO_CONSOLE_HOST_PORT:-9001}:9001"
     volumes:
       - minio-data:/data
     healthcheck:
@@ -131,7 +149,7 @@ services:
         condition: service_healthy
     entrypoint: >
       /bin/sh -c "
-      mc alias set local http://minio:9000 ${MINIO_ROOT_USER:-nagarnetra} ${MINIO_ROOT_PASSWORD:-nagarnetra_dev_pw} &&
+      mc alias set local http://minio:9000 ${MINIO_ROOT_USER:-nagarnetra} ${MINIO_ROOT_PASSWORD:?MINIO_ROOT_PASSWORD is not set - run make env} &&
       mc mb --ignore-existing local/${MINIO_BUCKET:-nagarnetra-media} &&
       mc anonymous set none local/${MINIO_BUCKET:-nagarnetra-media} &&
       mc mb --ignore-existing local/${MINIO_PERSONS_BUCKET:-nagarnetra-persons} &&
@@ -155,15 +173,17 @@ services:
       node.name: nagarnetra-os-01
       bootstrap.memory_lock: "true"
       OPENSEARCH_JAVA_OPTS: ${OPENSEARCH_JAVA_OPTS:--Xms512m -Xmx512m}
-      # Local-only demo stack on an isolated bridge network; TLS and the
-      # security plugin are configured for production in docs/SECURITY.md.
+      # Security plugin off, so the port is published on loopback only and
+      # the index is reachable from the bridge network and this machine, not
+      # the LAN. TLS and the security plugin are the production posture
+      # (docs/SECURITY.md).
       DISABLE_SECURITY_PLUGIN: "true"
       DISABLE_INSTALL_DEMO_CONFIG: "true"
     ulimits:
       memlock: { soft: -1, hard: -1 }
       nofile: { soft: 65536, hard: 65536 }
     ports:
-      - "${OPENSEARCH_HOST_PORT:-9200}:9200"
+      - "127.0.0.1:${OPENSEARCH_HOST_PORT:-9200}:9200"
     volumes:
       - opensearch-data:/usr/share/opensearch/data
     healthcheck:
@@ -188,12 +208,19 @@ services:
       # Without an explicit host candidate, Docker Desktop's NAT hands the
       # browser ICE candidates it cannot reach and WebRTC silently fails.
       MTX_WEBRTCADDITIONALHOSTS: ${MEDIAMTX_ADDITIONAL_HOSTS:-127.0.0.1}
+    # Every read and publish is authorised by the API (authMethod: http in
+    # infra/mediamtx/mediamtx.yml): browsers present the camera-scoped stream
+    # token, the workers and the simulator their own identities. Loopback
+    # only on the host — the :8080 demo on this laptop plays from here, and a
+    # browser elsewhere plays through https://<host>:8443/gateway/.
+    # MEDIAMTX_HOST_BIND=0.0.0.0 widens HLS/WHEP/ICE for a LAN viewer on
+    # plain HTTP; the token check still applies.
     ports:
-      - "${MEDIAMTX_RTSP_PORT:-8554}:8554"       # RTSP
-      - "${MEDIAMTX_HLS_PORT:-8888}:8888"        # HLS
-      - "${MEDIAMTX_WEBRTC_PORT:-8889}:8889"     # WebRTC / WHEP
-      - "${MEDIAMTX_API_PORT:-9997}:9997"        # control API
-      - "8189:8189/udp"                          # WebRTC ICE/UDP
+      - "127.0.0.1:${MEDIAMTX_RTSP_PORT:-8554}:8554"                     # RTSP
+      - "${MEDIAMTX_HOST_BIND:-127.0.0.1}:${MEDIAMTX_HLS_PORT:-8888}:8888"     # HLS
+      - "${MEDIAMTX_HOST_BIND:-127.0.0.1}:${MEDIAMTX_WEBRTC_PORT:-8889}:8889"  # WebRTC / WHEP
+      - "127.0.0.1:${MEDIAMTX_API_PORT:-9997}:9997"                      # control API
+      - "${MEDIAMTX_HOST_BIND:-127.0.0.1}:8189:8189/udp"                 # WebRTC ICE/UDP
     volumes:
       - ./infra/mediamtx/mediamtx.yml:/mediamtx.yml:ro
       - ./data/videos:/videos:ro
@@ -219,15 +246,32 @@ services:
     image: contrail/api:dev
     container_name: contrail-api
     <<: *default-restart
+    # As the image's CMD, with uvicorn's own proxy-header handling off: the
+    # app decides which peers may vouch for a client address
+    # (FORWARDED_ALLOW_IPS below, app/main.py). Here so the change does not
+    # wait for an image rebuild.
+    command:
+      ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000",
+       "--app-dir", "/app/services/api", "--no-proxy-headers"]
     env_file: [.env]
     environment:
-      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-nagarnetra}:${POSTGRES_PASSWORD:-nagarnetra_dev_pw}@postgres:5432/${POSTGRES_DB:-nagarnetra}
-      REDIS_URL: redis://redis:6379/0
+      DATABASE_URL: *database-url
+      REDIS_URL: *redis-url
       OPENSEARCH_URL: http://opensearch:9200
       MINIO_ENDPOINT: minio:9000
       MEDIAMTX_API_URL: http://mediamtx:9997
+      # The two gateway identities, so the API can answer MediaMTX's
+      # authorisation callback (app/routers/gateway_auth.py).
+      MEDIAMTX_PUBLISH_PASSWORD: ${MEDIAMTX_PUBLISH_PASSWORD:?MEDIAMTX_PUBLISH_PASSWORD is not set - run make env}
+      MEDIAMTX_READ_PASSWORD: ${MEDIAMTX_READ_PASSWORD:?MEDIAMTX_READ_PASSWORD is not set - run make env}
+      # Only the web tier's nginx may tell the API who the client is. Its
+      # address is pinned below (web → networks); everyone else is the
+      # socket peer, whatever X-Forwarded-For they send.
+      FORWARDED_ALLOW_IPS: 172.31.250.10
     ports:
-      - "${API_HOST_PORT:-8000}:8000"
+      # Loopback: the :8080 bundle on this laptop calls http://localhost:8000.
+      # Other machines reach the API through nginx on :8443 (/api/, /ws/).
+      - "127.0.0.1:${API_HOST_PORT:-8000}:8000"
     volumes:
       # Live reload during development; the image is self-contained without it.
       - ./services/api:/app/services/api
@@ -294,6 +338,11 @@ services:
       # self-signed pair is generated into it at start and reused after.
       # Gitignored.
       - ./infra/tls:/etc/nginx/tls
+      # The server configuration, mounted like the other services' source so
+      # a proxy or header change takes effect on restart without rebuilding
+      # the bundle. The image carries the same two files.
+      - ./web/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./web/nginx/contrail-app.conf:/etc/nginx/contrail/app.conf:ro
     depends_on:
       api: { condition: service_healthy }
     healthcheck:
@@ -303,7 +352,12 @@ services:
       retries: 12
       start_period: 10s
     logging: *default-logging
-    networks: [contrail]
+    networks:
+      contrail:
+        # Fixed, because the API believes X-Forwarded-For from this address
+        # and no other (FORWARDED_ALLOW_IPS on the api service). High in the
+        # subnet, clear of the addresses Docker hands out in order.
+        ipv4_address: 172.31.250.10
 
   # ── Ingest — fleet health monitor ───────────────────────────────────
   # Runs the staggered probe loop against every camera through its VMS
@@ -318,8 +372,8 @@ services:
     command: ["python", "-m", "app.ingest.monitor"]
     env_file: [.env]
     environment:
-      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-nagarnetra}:${POSTGRES_PASSWORD:-nagarnetra_dev_pw}@postgres:5432/${POSTGRES_DB:-nagarnetra}
-      REDIS_URL: redis://redis:6379/0
+      DATABASE_URL: *database-url
+      REDIS_URL: *redis-url
       MEDIAMTX_API_URL: http://mediamtx:9997
     volumes:
       - ./services/api:/app/services/api
@@ -394,10 +448,13 @@ services:
     environment: &ai-worker-env
       # An explicit camera list for this process; empty means its hash shard.
       AI_WORKER_CAMERAS: ${AI_WORKER_CAMERAS_1:-}
-      REDIS_URL: redis://redis:6379/0
+      REDIS_URL: *redis-url
       EVENT_STREAM_KEY: nagarnetra:events:detections
       MEDIAMTX_API_URL: http://mediamtx:9997
       MEDIAMTX_HOST: mediamtx
+      # The reader identity for our own gateway (CAM-DEMO-01/02); MediaMTX
+      # refuses an anonymous read. Federated cameras are unaffected.
+      MEDIAMTX_READ_PASSWORD: ${MEDIAMTX_READ_PASSWORD:?MEDIAMTX_READ_PASSWORD is not set - run make env}
       AI_CONFIG: stream
       AI_MODELS_DIR: /models
       # The registry is the source of truth for which cameras exist: it lists
@@ -555,7 +612,11 @@ services:
        "--app-dir", "/app/services/simulator"]
     env_file: [.env]
     environment:
-      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-nagarnetra}:${POSTGRES_PASSWORD:-nagarnetra_dev_pw}@postgres:5432/${POSTGRES_DB:-nagarnetra}
+      DATABASE_URL: *database-url
+      REDIS_URL: *redis-url
+      # Publishing needs the publisher identity; MediaMTX refuses anyone else,
+      # so nobody on the network can replace a camera's feed.
+      MEDIAMTX_PUBLISH_PASSWORD: ${MEDIAMTX_PUBLISH_PASSWORD:?MEDIAMTX_PUBLISH_PASSWORD is not set - run make env}
       SIM_VIDEO_DIR: /data/videos
       # 0 = publish only the cameras with footage pinned below. Raise it to
       # replay clips across the fleet for load testing, where synthetic video
@@ -571,7 +632,7 @@ services:
       SIM_OFFSET_STEP_S: ${SIM_OFFSET_STEP_S:-}
       PYTHONPATH: /app/services/simulator:/app/services/api
     ports:
-      - "${SIMULATOR_HOST_PORT:-9100}:9100"
+      - "127.0.0.1:${SIMULATOR_HOST_PORT:-9100}:9100"
     volumes:
       - ./services/simulator:/app/services/simulator
       - ./services/api:/app/services/api
@@ -631,8 +692,9 @@ services:
     profiles: ["monitoring"]
     environment:
       GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
-      # From .env; the default is a development value, like every other here.
-      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-nagarnetra_dev_pw}
+      # From .env, generated by `make env`. Applied when Grafana first creates
+      # its database; afterwards `grafana cli admin reset-admin-password`.
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?GRAFANA_ADMIN_PASSWORD is not set - run make env}
       GF_USERS_ALLOW_SIGN_UP: "false"
       # Viewers need no account on this loopback-only port; changing a
       # dashboard still needs the admin login.

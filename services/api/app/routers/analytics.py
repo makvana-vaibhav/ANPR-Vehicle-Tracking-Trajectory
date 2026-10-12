@@ -37,6 +37,21 @@ impressively large numbers.
 So every query here starts from `DISTINCT ON (plate_normalised) ... ORDER BY
 created_at DESC`: the latest snapshot per plate, which holds that plate's
 complete journey exactly once.
+
+## Recorded footage is not traffic
+
+A camera tagged `recorded-footage` replays a clip on a loop (see
+`app.services.recorded_footage`). CAM-DEMO-01's 15-second clip alone was ~93% of
+every vehicle this module counted, and its zone was rated severe congestion —
+a figure about the edit of a video, not about a road. So every endpoint here
+leaves such cameras out **by default, in SQL** (before any row cap, so a bounded
+read is bounded over live rows), takes `include_recorded=true` to put them
+back, and says which cameras it left out in `recorded_footage`.
+
+A leg is left out when either end is a recording. The leg between the two live
+cameras either side of a replayed sighting is not rebuilt here: the hops carry
+distance and time only relative to the hop before them, so stitching them
+would mean recomputing both, and a guessed leg is worse than a missing one.
 """
 
 from __future__ import annotations
@@ -66,6 +81,7 @@ from app.schemas.analytics import (
     HotspotResponse,
     PossibleObstruction,
     QueueState,
+    RecordedFootage,
     RouteDensityResponse,
     RoutePair,
     SegmentSpeed,
@@ -81,7 +97,8 @@ from app.schemas.analytics import (
     VehicleTypeCounts,
     Window,
 )
-from app.services import traffic
+from app.services import recorded_footage, traffic
+from app.services.recorded_footage import live_only_sql
 
 router = APIRouter(prefix="/api/v1/analytics", tags=["analytics"])
 log = get_logger(__name__)
@@ -128,12 +145,39 @@ def _window(since: datetime | None, until: datetime | None) -> tuple[datetime, d
     return start, end
 
 
+#: The query parameter every traffic figure takes. Off by default: see
+#: "Recorded footage is not traffic" above.
+IncludeRecorded = Annotated[
+    bool,
+    Query(
+        description=(
+            "Count cameras tagged recorded-footage — clips replayed on a loop, "
+            "not live traffic. Off by default."
+        )
+    ),
+]
+
+
+async def _recorded_scope(session: AsyncSession, include_recorded: bool) -> RecordedFootage:
+    """What a response says about recordings: which exist, and whether they are in it."""
+    cameras = sorted(await recorded_footage.recorded_cameras(session))
+    return RecordedFootage(
+        included=include_recorded,
+        cameras=cameras,
+        excluded_cameras=[] if include_recorded else cameras,
+    )
+
+
 #: The legs of every journey, deduplicated to one snapshot per plate.
 #:
 #: `lag` over the hop ordinality supplies the *from* camera: each hop already
 #: carries distance, elapsed time and implied speed relative to the hop before
 #: it, but names only the camera it arrived at.
-_LEGS_SQL = """
+#:
+#: A leg with a recording at either end is dropped after `lag`, not before:
+#: dropping the hop first would pair the next hop's distance and time — which
+#: are relative to the recording — with the camera before it.
+_LEGS_SQL = f"""
 WITH latest AS (
     SELECT DISTINCT ON (plate_normalised) plate_normalised, hops
     FROM vehicle_tracks
@@ -165,15 +209,19 @@ LEFT JOIN cameras ct ON ct.camera_code = legs.to_camera
 WHERE legs.from_camera IS NOT NULL
   AND legs.arrived_at >= :start
   AND legs.arrived_at <  :end
-"""
+  AND {live_only_sql("cf")}
+  AND {live_only_sql("ct")}
+"""  # noqa: S608 — interpolates only a fixed predicate over literal aliases; values are bound
 
 
-async def _segment_legs(session: AsyncSession, start: datetime, end: datetime) -> list[Any]:
+async def _segment_legs(
+    session: AsyncSession, start: datetime, end: datetime, *, include_recorded: bool = False
+) -> list[Any]:
     """Every observed camera-to-camera movement in the window.
 
     Snapshots are read from a window wider than the report itself, because a
     journey that began before `start` is still the row that holds the legs
-    inside it.
+    inside it. Legs touching a recording are left out unless asked for.
     """
     rows = await session.execute(
         text(_LEGS_SQL),
@@ -181,6 +229,7 @@ async def _segment_legs(session: AsyncSession, start: datetime, end: datetime) -
             "snapshot_since": start - timedelta(days=BASELINE_DAYS + 1),
             "start": start,
             "end": end,
+            **recorded_footage.sql_params(include_recorded=include_recorded),
         },
     )
     return list(rows.mappings())
@@ -218,6 +267,7 @@ async def flow(
     bucket: str = Query(default="15m", description=f"One of {', '.join(BUCKETS)}"),
     group_by: str = Query(default="camera", pattern="^(camera|corridor)$"),
     corridor: str | None = None,
+    include_recorded: IncludeRecorded = False,
 ) -> FlowResponse:
     start, end = _window(since, until)
     interval, seconds = BUCKETS.get(bucket, BUCKETS["15m"])
@@ -252,11 +302,20 @@ async def flow(
         WHERE d.ts >= :start AND d.ts < :end
           AND (CAST(:corridor AS text) IS NULL OR c.corridor = :corridor)
           AND {grouping} IS NOT NULL
+          AND {live_only_sql("c")}
         GROUP BY bucket, key
         ORDER BY key, bucket
     """
     rows = (
-        await session.execute(text(sql), {"start": start, "end": end, "corridor": corridor})
+        await session.execute(
+            text(sql),
+            {
+                "start": start,
+                "end": end,
+                "corridor": corridor,
+                **recorded_footage.sql_params(include_recorded=include_recorded),
+            },
+        )
     ).mappings()
 
     series: dict[str, FlowSeries] = {}
@@ -290,6 +349,7 @@ async def flow(
         group_by=group_by,
         series=sorted(series.values(), key=lambda s: -s.total)[:MAX_ROWS],
         total_vehicles=total,
+        recorded_footage=await _recorded_scope(session, include_recorded),
     )
 
 
@@ -305,6 +365,7 @@ async def speed(
     since: datetime | None = None,
     until: datetime | None = None,
     corridor: str | None = None,
+    include_recorded: IncludeRecorded = False,
 ) -> SpeedResponse:
     """Speed along each corridor, from legs the correlator believes.
 
@@ -322,7 +383,7 @@ async def speed(
     where inter-camera timing is real.
     """
     start, end = _window(since, until)
-    legs = await _segment_legs(session, start, end)
+    legs = await _segment_legs(session, start, end, include_recorded=include_recorded)
 
     considered = 0
     excluded = 0
@@ -420,6 +481,7 @@ async def speed(
             note=note,
         ),
         corridors=corridors,
+        recorded_footage=await _recorded_scope(session, include_recorded),
     )
 
 
@@ -435,6 +497,7 @@ async def routes(
     since: datetime | None = None,
     until: datetime | None = None,
     limit: int = Query(default=25, ge=1, le=MAX_ROWS),
+    include_recorded: IncludeRecorded = False,
 ) -> RouteDensityResponse:
     """Which movements traffic actually makes, ranked by how often.
 
@@ -443,7 +506,7 @@ async def routes(
     re-persisted while it was still moving.
     """
     start, end = _window(since, until)
-    legs = await _segment_legs(session, start, end)
+    legs = await _segment_legs(session, start, end, include_recorded=include_recorded)
 
     pairs: dict[tuple[str, str], dict[str, Any]] = {}
     for leg in legs:
@@ -484,19 +547,24 @@ async def routes(
         window=Window(start=start, end=end, bucket_seconds=0),
         pairs=result,
         total_journeys=sum(p.journeys for p in result),
+        recorded_footage=await _recorded_scope(session, include_recorded),
     )
 
 
 # ── travel time ───────────────────────────────────────────────────────
-async def _travel_times(session: AsyncSession, start: datetime, end: datetime) -> list[TravelTime]:
+async def _travel_times(
+    session: AsyncSession, start: datetime, end: datetime, *, include_recorded: bool = False
+) -> list[TravelTime]:
     """Current segment durations against the same time of day on earlier days."""
-    current_legs = await _segment_legs(session, start, end)
+    current_legs = await _segment_legs(session, start, end, include_recorded=include_recorded)
 
     # The baseline covers the same clock hours on the preceding days, which is
     # what makes it a fair comparison: 09:00 traffic is compared with 09:00
     # traffic, not with the daily average that includes the small hours.
     baseline_start = start - timedelta(days=BASELINE_DAYS)
-    baseline_legs = await _segment_legs(session, baseline_start, start)
+    baseline_legs = await _segment_legs(
+        session, baseline_start, start, include_recorded=include_recorded
+    )
     hours = {(start + timedelta(hours=offset)).hour for offset in range(0, 24)}
     window_hours = {
         (start + timedelta(seconds=s)).hour
@@ -569,6 +637,7 @@ async def travel_time(
     _user: Annotated[object, Depends(_read)],
     since: datetime | None = None,
     until: datetime | None = None,
+    include_recorded: IncludeRecorded = False,
 ) -> TravelTimeResponse:
     """Current duration per segment versus the same time of day on earlier days.
 
@@ -581,16 +650,24 @@ async def travel_time(
     start, end = _window(since, until)
     return TravelTimeResponse(
         window=Window(start=start, end=end, bucket_seconds=0),
-        segments=(await _travel_times(session, start, end))[:MAX_ROWS],
+        segments=(await _travel_times(session, start, end, include_recorded=include_recorded))[
+            :MAX_ROWS
+        ],
         baseline_window_days=BASELINE_DAYS,
+        recorded_footage=await _recorded_scope(session, include_recorded),
     )
 
 
 # ── hotspots ──────────────────────────────────────────────────────────
 async def _volume_by_camera(
-    session: AsyncSession, start: datetime, end: datetime, limit: int
+    session: AsyncSession,
+    start: datetime,
+    end: datetime,
+    limit: int,
+    *,
+    include_recorded: bool = False,
 ) -> list[Any]:
-    sql = """
+    sql = f"""
         SELECT c.camera_code, c.name, c.corridor,
                ST_Y(c.location::geometry) AS lat,
                ST_X(c.location::geometry) AS lon,
@@ -598,11 +675,20 @@ async def _volume_by_camera(
         FROM detections d
         JOIN cameras c ON c.id = d.camera_id
         WHERE d.ts >= :start AND d.ts < :end
+          AND {live_only_sql("c")}
         GROUP BY c.camera_code, c.name, c.corridor, c.location
         ORDER BY vehicles DESC
         LIMIT :limit
     """
-    rows = await session.execute(text(sql), {"start": start, "end": end, "limit": limit})
+    rows = await session.execute(
+        text(sql),
+        {
+            "start": start,
+            "end": end,
+            "limit": limit,
+            **recorded_footage.sql_params(include_recorded=include_recorded),
+        },
+    )
     return list(rows.mappings())
 
 
@@ -617,6 +703,7 @@ async def hotspots(
     since: datetime | None = None,
     until: datetime | None = None,
     limit: int = Query(default=10, ge=1, le=MAX_ROWS),
+    include_recorded: IncludeRecorded = False,
 ) -> HotspotResponse:
     """Two rankings, deliberately kept apart.
 
@@ -628,7 +715,7 @@ async def hotspots(
     list is empty and says why.
     """
     start, end = _window(since, until)
-    rows = await _volume_by_camera(session, start, end, limit)
+    rows = await _volume_by_camera(session, start, end, limit, include_recorded=include_recorded)
     busiest = max((row["vehicles"] for row in rows), default=0)
 
     by_volume = [
@@ -644,7 +731,11 @@ async def hotspots(
         for row in rows
     ]
 
-    slowdowns = [t for t in await _travel_times(session, start, end) if t.status == "ok"]
+    slowdowns = [
+        t
+        for t in await _travel_times(session, start, end, include_recorded=include_recorded)
+        if t.status == "ok"
+    ]
     slowdowns.sort(key=lambda t: -(t.delta_pct or 0.0))
 
     if slowdowns:
@@ -664,6 +755,7 @@ async def hotspots(
         by_slowdown=slowdowns[:limit],
         slowdown_status=status,
         note=note,
+        recorded_footage=await _recorded_scope(session, include_recorded),
     )
 
 
@@ -678,6 +770,7 @@ async def heatmap(
     _user: Annotated[object, Depends(_read)],
     since: datetime | None = None,
     until: datetime | None = None,
+    include_recorded: IncludeRecorded = False,
 ) -> HeatmapResponse:
     """GeoJSON points weighted by detection count.
 
@@ -686,7 +779,7 @@ async def heatmap(
     weighting of the same points, not a different dataset.
     """
     start, end = _window(since, until)
-    rows = await _volume_by_camera(session, start, end, MAX_ROWS)
+    rows = await _volume_by_camera(session, start, end, MAX_ROWS, include_recorded=include_recorded)
     busiest = max((row["vehicles"] for row in rows), default=0)
 
     return HeatmapResponse(
@@ -705,6 +798,7 @@ async def heatmap(
         ],
         window=Window(start=start, end=end, bucket_seconds=0),
         max_vehicles=busiest,
+        recorded_footage=await _recorded_scope(session, include_recorded),
     )
 
 
@@ -740,7 +834,10 @@ QUEUE_BUCKET_SECONDS = 300
 #: Per-vehicle observations in the window: what was seen, for how long, and
 #: whether it moved. One row per vehicle — `detections` holds one row per
 #: retired track, so there is no per-frame inflation to undo here.
-_OBSERVATIONS_SQL = """
+#:
+#: Recordings are filtered here, before the `LIMIT`: filtered after it, the
+#: loop would fill the cap and leave a few live vehicles behind.
+_OBSERVATIONS_SQL = f"""
     SELECT c.camera_code, c.name AS camera_name, c.corridor,
            ST_Y(c.location::geometry) AS lat,
            ST_X(c.location::geometry) AS lon,
@@ -750,19 +847,30 @@ _OBSERVATIONS_SQL = """
     JOIN cameras c ON c.id = d.camera_id
     WHERE d.ts >= :start AND d.ts < :end
       AND (CAST(:corridor AS text) IS NULL OR c.corridor = :corridor)
+      AND {live_only_sql("c")}
     ORDER BY d.ts DESC
     LIMIT :limit
 """
 
 #: How many rows `_OBSERVATIONS_SQL` would have returned uncapped. Asked only
 #: when the read filled the cap, so a window under it costs nothing extra.
-_OBSERVATIONS_COUNT_SQL = """
+#: Same filter, so `rows_total` counts what the read could have returned.
+_OBSERVATIONS_COUNT_SQL = f"""
     SELECT count(*)
     FROM detections d
     JOIN cameras c ON c.id = d.camera_id
     WHERE d.ts >= :start AND d.ts < :end
       AND (CAST(:corridor AS text) IS NULL OR c.corridor = :corridor)
-"""
+      AND {live_only_sql("c")}
+"""  # noqa: S608 — interpolates only a fixed predicate over a literal alias; values are bound
+
+#: The fleet the "active cameras" figure is a fraction of — the same cameras
+#: the read above could have returned rows for.
+_FLEET_SQL = f"""
+    SELECT count(*) FROM cameras c
+    WHERE c.anpr_enabled
+      AND {live_only_sql("c")}
+"""  # noqa: S608 — interpolates only a fixed predicate over a literal alias; values are bound
 
 
 def _rounded(value: float | None, places: int = 2) -> float | None:
@@ -867,7 +975,7 @@ def _dwell_intervals(rows: list[Any]) -> list[tuple[float, float]]:
 
 
 async def _corridor_speeds(
-    session: AsyncSession, start: datetime, end: datetime
+    session: AsyncSession, start: datetime, end: datetime, *, include_recorded: bool = False
 ) -> dict[str, float]:
     """Median plausible speed per corridor, over the legs the speed endpoint uses.
 
@@ -875,7 +983,7 @@ async def _corridor_speeds(
     implausible and the correlator excludes them, which is correct and is why
     congestion renormalises over whichever signals survive.
     """
-    legs = await _segment_legs(session, start, end)
+    legs = await _segment_legs(session, start, end, include_recorded=include_recorded)
     by_corridor: dict[str, list[float]] = {}
     for leg in legs:
         if not leg["plausible"] or leg["implied_kmph"] is None:
@@ -906,6 +1014,7 @@ async def traffic_state(
     until: datetime | None = None,
     group_by: Annotated[str, Query(pattern="^(camera|corridor)$")] = "camera",
     corridor: str | None = None,
+    include_recorded: IncludeRecorded = False,
 ) -> TrafficResponse:
     """Everything the traffic dashboard shows, for one window.
 
@@ -923,6 +1032,7 @@ async def traffic_state(
     start, end = _window(since, until)
     window_seconds = (end - start).total_seconds()
     thresholds = _thresholds()
+    scope = recorded_footage.sql_params(include_recorded=include_recorded)
 
     result = await session.execute(
         text(_OBSERVATIONS_SQL),
@@ -931,6 +1041,7 @@ async def traffic_state(
             "end": end,
             "corridor": corridor,
             "limit": MAX_OBSERVATION_ROWS,
+            **scope,
         },
     )
     # Read newest first so a full read keeps the latest traffic; put back in
@@ -939,20 +1050,21 @@ async def traffic_state(
     rows_total = len(rows)
     if len(rows) >= MAX_OBSERVATION_ROWS:
         counted = await session.execute(
-            text(_OBSERVATIONS_COUNT_SQL), {"start": start, "end": end, "corridor": corridor}
+            text(_OBSERVATIONS_COUNT_SQL),
+            {"start": start, "end": end, "corridor": corridor, **scope},
         )
         rows_total = max(int(counted.scalar() or 0), len(rows))
 
-    fleet = await session.execute(text("SELECT count(*) FROM cameras WHERE anpr_enabled"))
+    fleet = await session.execute(text(_FLEET_SQL), scope)
     fleet_cameras = int(fleet.scalar() or 0)
 
-    speeds = await _corridor_speeds(session, start, end)
+    speeds = await _corridor_speeds(session, start, end, include_recorded=include_recorded)
 
     # Travel-time delta per corridor, from the existing segment comparison.
     # Keyed on the arriving camera's corridor, which is how `_travel_times`
     # already attributes a leg.
     deltas: dict[str, list[float]] = {}
-    for segment in await _travel_times(session, start, end):
+    for segment in await _travel_times(session, start, end, include_recorded=include_recorded):
         if segment.corridor and segment.delta_pct is not None:
             deltas.setdefault(segment.corridor, []).append(segment.delta_pct)
 
@@ -1071,6 +1183,7 @@ async def traffic_state(
             "— no camera here is calibrated. Speed is estimated from "
             "multi-camera timing and is absent where no plausible leg exists."
         ),
+        recorded_footage=await _recorded_scope(session, include_recorded),
     )
 
 
@@ -1086,6 +1199,7 @@ async def traffic_history(
     until: datetime | None = None,
     group_by: Annotated[str, Query(pattern="^(camera|corridor)$")] = "corridor",
     key: str | None = None,
+    include_recorded: IncludeRecorded = False,
 ) -> TrafficHistoryResponse:
     """Volume and stationary-vehicle counts per bucket over the window.
 
@@ -1113,10 +1227,19 @@ async def traffic_history(
         JOIN cameras c ON c.id = d.camera_id
         WHERE d.ts >= :start AND d.ts < :end
           AND (CAST(:key AS text) IS NULL OR {column} = :key)
+          AND {live_only_sql("c")}
         GROUP BY bucket
         ORDER BY bucket
     """  # `column` is one of two literals chosen above, never caller input
-    rows = await session.execute(text(sql), {"start": start, "end": end, "key": key})
+    rows = await session.execute(
+        text(sql),
+        {
+            "start": start,
+            "end": end,
+            "key": key,
+            **recorded_footage.sql_params(include_recorded=include_recorded),
+        },
+    )
 
     return TrafficHistoryResponse(
         window=Window(start=start, end=end, bucket_seconds=QUEUE_BUCKET_SECONDS),
@@ -1131,4 +1254,5 @@ async def traffic_history(
             )
             for row in rows.mappings()
         ],
+        recorded_footage=await _recorded_scope(session, include_recorded),
     )

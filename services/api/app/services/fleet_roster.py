@@ -34,8 +34,11 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import json
-from typing import Any
+import time
+from collections.abc import Awaitable
+from typing import Any, cast
 
 import redis.asyncio as aioredis
 from sqlalchemy import or_, select
@@ -61,6 +64,39 @@ PUBLISH_INTERVAL_S = 30.0
 #: idle every worker, but not so long that a dead API leaves workers chasing a
 #: fleet that has since changed.
 ROSTER_TTL_S = 300
+
+#: A digest of the roster's content, rewritten with it. A worker reads this one
+#: short key every couple of seconds (ai_worker/worker.py) and re-reads the
+#: roster the moment it changes, so a camera onboarded, edited or deleted
+#: reaches the workers in about two seconds instead of at the next 30-second
+#: publish plus a 20-second rediscovery. Content-addressed rather than a
+#: counter, so the periodic republish of an unchanged fleet wakes nobody.
+ROSTER_VERSION_KEY = "nagarnetra:fleet:anpr:version"
+
+#: When the database was read for the roster now in Redis (unix seconds). A
+#: publish whose read is older than that is discarded rather than written: the
+#: periodic loop can start reading just before an onboarding commits and
+#: finish just after the onboarding's own publish, and writing last would
+#: quietly take the new camera back out of the fleet.
+ROSTER_BUILT_AT_KEY = "nagarnetra:fleet:anpr:built_at"
+
+#: Writes roster, version and read time together, unless a newer read is
+#: already published. Atomic in Redis, so it holds across API replicas too.
+_PUBLISH_IF_NEWER = """
+local current = tonumber(redis.call('GET', KEYS[3]) or '0')
+if tonumber(ARGV[1]) < current then
+  return 0
+end
+redis.call('SET', KEYS[1], ARGV[2], 'EX', ARGV[4])
+redis.call('SET', KEYS[2], ARGV[3], 'EX', ARGV[4])
+redis.call('SET', KEYS[3], ARGV[1], 'EX', ARGV[4])
+return 1
+"""
+
+
+def roster_version(payload: str) -> str:
+    """The content digest a worker compares to know the fleet changed."""
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
 
 
 def plate_regions(camera: Camera) -> list[str]:
@@ -172,16 +208,32 @@ class RosterPublisher:
         self.last_size = 0
 
     async def publish_once(self) -> int:
+        # Taken before the database is read, so the guard in
+        # `_PUBLISH_IF_NEWER` compares what each publish actually saw.
+        read_at = time.time()
         roster = await build_roster()
+        payload = json.dumps({"cameras": roster})
         client = aioredis.from_url(settings.redis_url, decode_responses=True)
         try:
-            await client.set(
-                ROSTER_KEY,
-                json.dumps({"cameras": roster}),
-                ex=ROSTER_TTL_S,
+            # redis-py types EVAL for its sync and async clients at once.
+            written = await cast(
+                Awaitable[int],
+                client.eval(
+                    _PUBLISH_IF_NEWER,
+                    3,
+                    ROSTER_KEY,
+                    ROSTER_VERSION_KEY,
+                    ROSTER_BUILT_AT_KEY,
+                    f"{read_at:.6f}",
+                    payload,
+                    roster_version(payload),
+                    str(ROSTER_TTL_S),
+                ),
             )
         finally:
             await client.aclose()
+        if not written:
+            log.debug("roster.superseded", cameras=len(roster))
         self.published += 1
         self.last_size = len(roster)
         return len(roster)
@@ -214,3 +266,27 @@ class RosterPublisher:
 
 
 publisher = RosterPublisher()
+
+#: How long a change notification may hold up the request that caused it.
+NOTIFY_TIMEOUT_S = 5.0
+
+
+async def notify_changed(reason: str, camera_code: str | None = None) -> bool:
+    """Republish the roster now, because the registry just changed.
+
+    Called by the camera endpoints *after* their transaction commits (the
+    roster is read in a fresh session and would not see uncommitted rows).
+    The workers notice the new version within their two-second focus poll.
+
+    Never raises: the periodic publish is still the fallback, so a Redis blip
+    here costs at most the old 30-to-50-second pickup, not the onboarding.
+    """
+    try:
+        count = await asyncio.wait_for(publisher.publish_once(), timeout=NOTIFY_TIMEOUT_S)
+    except Exception:
+        # A supervisor boundary for a best-effort side effect: whatever went
+        # wrong, the request that triggered it has already succeeded.
+        log.warning("roster.notify_failed", reason=reason, camera_code=camera_code, exc_info=True)
+        return False
+    log.info("roster.notified", reason=reason, camera_code=camera_code, cameras=count)
+    return True

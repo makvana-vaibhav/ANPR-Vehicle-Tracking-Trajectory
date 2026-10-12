@@ -32,6 +32,7 @@ from app.schemas.camera import (
     GeoJSONFeatureCollection,
     GeoJSONGeometry,
 )
+from app.services import camera_credentials
 
 log = get_logger("api.cameras")
 
@@ -82,6 +83,8 @@ def to_out(camera: Camera, *, distance_km: float | None = None) -> CameraOut:
         tags=camera.tags,
         # A boolean, never the URL. See CameraOut.has_stream.
         has_stream=bool(camera.stream_url),
+        # Likewise a boolean: the login is write-only.
+        has_credentials=bool(camera.credentials_ref),
         # Returned in full, unlike stream_url: a clip name carries no
         # credentials, and the edit form cannot show which clip is currently
         # pinned without it.
@@ -389,6 +392,18 @@ async def _resolve_vms(session: AsyncSession, name: str | None) -> uuid.UUID | N
     return vms_id
 
 
+def _sealed_login(payload: CameraCreate | CameraUpdate) -> str | None:
+    """The `credentials_ref` for a payload's login, or None when it has none.
+
+    Raises `CredentialStoreUnavailable` when there is a login and no key to
+    seal it with: refusing is the only safe answer, never storing it in clear.
+    """
+    if not payload.stream_username:
+        return None
+    password = payload.stream_password.get_secret_value() if payload.stream_password else None
+    return camera_credentials.seal(payload.stream_username, password)
+
+
 async def create_camera(session: AsyncSession, payload: CameraCreate) -> Camera:
     """Register one camera. Raises IntegrityError on a duplicate code."""
     camera = Camera(
@@ -406,6 +421,8 @@ async def create_camera(session: AsyncSession, payload: CameraCreate) -> Camera:
         protocol=payload.protocol.value if payload.protocol else None,
         stream_url=payload.stream_url,
         sub_stream_url=payload.sub_stream_url,
+        # Sealed before the row exists, so a refusal leaves nothing behind.
+        credentials_ref=_sealed_login(payload),
         # Omitted here until now, so a camera registered with a clip already
         # chosen was stored without one and fell back to the round-robin. The
         # field list is explicit rather than a model_dump, which is what let a
@@ -429,7 +446,24 @@ async def create_camera(session: AsyncSession, payload: CameraCreate) -> Camera:
 
 async def update_camera(session: AsyncSession, camera: Camera, payload: CameraUpdate) -> Camera:
     """Apply a partial update."""
-    data = payload.model_dump(exclude_unset=True)
+    # The login is handled on its own, never by the generic loop below: it is
+    # not a column, and what is stored is its sealed pointer.
+    data = payload.model_dump(
+        exclude_unset=True,
+        exclude={"stream_username", "stream_password", "clear_credentials"},
+    )
+    if payload.clear_credentials:
+        camera.credentials_ref = None
+    elif payload.stream_username:
+        if payload.stream_password is None and camera.credentials_ref:
+            # A new username alone keeps the stored password: the form cannot
+            # show it, so leaving it blank must not mean "now empty".
+            stored = camera_credentials.resolve(camera.credentials_ref)
+            camera.credentials_ref = camera_credentials.seal(
+                payload.stream_username, stored.password if stored else None
+            )
+        else:
+            camera.credentials_ref = _sealed_login(payload)
 
     if "department_code" in data:
         camera.department_id = await _resolve_department(session, data.pop("department_code"))
@@ -464,6 +498,11 @@ CSV_COLUMNS = (
     "protocol",
     "stream_url",
     "sub_stream_url",
+    # The camera's login, for an estate exported from an NVR. Sealed on import
+    # like the form's; a `rtsp://user:pass@…` in `stream_url` is split the same
+    # way. Never echoed back in the row-by-row report.
+    "stream_username",
+    "stream_password",
     "resolution",
     "fps",
     "anpr_enabled",
@@ -578,6 +617,22 @@ async def bulk_upload(
             skipped += 1
             continue
 
+        if payload.stream_username and not camera_credentials.store_available():
+            # Caught in a dry run too, so the check before committing says
+            # what the commit would say.
+            failed += 1
+            errors.append(
+                BulkRowError(
+                    row=index,
+                    camera_code=payload.camera_code,
+                    errors=[
+                        "Camera credentials cannot be stored: no encryption key is "
+                        "configured (ENCRYPTION_KEYS)"
+                    ],
+                )
+            )
+            continue
+
         if dry_run:
             if existing is None:
                 created += 1
@@ -598,6 +653,12 @@ async def bulk_upload(
                     ),
                 )
                 updated += 1
+        except camera_credentials.CredentialStoreUnavailable as exc:
+            failed += 1
+            errors.append(
+                BulkRowError(row=index, camera_code=payload.camera_code, errors=[str(exc)])
+            )
+            continue
         except IntegrityError as exc:
             # Roll back to a savepoint so one bad row does not poison the
             # transaction and take the whole file down with it.

@@ -40,11 +40,13 @@ from ai_worker.config import WorkerSettings
 from ai_worker.crops import MinioCropStore
 from ai_worker.face_pool import FaceModelsPool
 from ai_worker.gallery import GalleryCache
+from ai_worker.roster_watch import RosterWatch
 from ai_worker.discovery import (
     CameraStream,
     discover,
     discover_registry,
     discover_sandbox,
+    with_gateway_credentials,
 )
 from ai_worker.pipeline_pool import PipelinePool
 from ai_worker.rotation import Rotation
@@ -191,6 +193,9 @@ class AiWorker:
         )
         #: Cameras on someone's screen now, as the API last recorded them.
         self._focus: frozenset[str] = frozenset()
+        #: The roster version this worker last acted on; a change means a
+        #: camera was onboarded, edited or deleted. See ai_worker.roster_watch.
+        self._roster_watch = RosterWatch()
         #: When each owned camera was last on someone's screen (monotonic).
         self._last_watched: dict[str, float] = {}
         self._focus_redis: aioredis.Redis | None = None
@@ -249,6 +254,15 @@ class AiWorker:
                 # once, so a camera someone opens is analysed in seconds rather
                 # than at the next full pass.
                 focus = await self._read_focus()
+                # And so is the fleet: a camera onboarded a moment ago is
+                # rediscovered now rather than at the next full pass.
+                if await self._roster_changed():
+                    self._focus = focus
+                    await self._reconcile()
+                    next_pass = time.monotonic() + self.settings.discovery_interval_s
+                    # Read again now that the new camera is owned: if it is
+                    # already on someone's screen, it opens in this same pass.
+                    focus = await self._read_focus()
                 await self._refresh_gallery()
                 await self._publish_stats()
                 # So is a stream that has just opened: a camera opened because
@@ -298,6 +312,17 @@ class AiWorker:
             log.debug("could not read focus: %s", exc)
             return self._focus
         return frozenset(code for code in codes if code in self._assigned)
+
+    async def _roster_changed(self) -> bool:
+        """Whether the registry roster changed since this worker last looked.
+
+        Only the registry source has a roster. See ai_worker.roster_watch.
+        """
+        if self.settings.ai_worker_source != "registry" or self._focus_redis is None:
+            return False
+        return await self._roster_watch.poll(
+            self._focus_redis, self.settings.roster_version_key
+        )
 
     async def _publish_stats(self) -> None:
         """Report this worker's counters for the platform's exporter.
@@ -468,7 +493,18 @@ class AiWorker:
         minutes each time. Inference slots are what rotates: a camera's stream
         stays up while it waits, so its turn costs the far end nothing.
         """
-        self._assigned = {s.camera_code: s for s in await self._discover()}
+        gateway_hosts = frozenset(
+            {self.settings.mediamtx_host, self.settings.roster_gateway_host}
+        )
+        self._assigned = {
+            s.camera_code: with_gateway_credentials(
+                s,
+                gateway_hosts,
+                self.settings.mediamtx_read_user,
+                self.settings.mediamtx_read_password,
+            )
+            for s in await self._discover()
+        }
         self._backoff.retain(frozenset(self._assigned))
         now = time.monotonic()
         open_set, analysable = self._wanted(now)

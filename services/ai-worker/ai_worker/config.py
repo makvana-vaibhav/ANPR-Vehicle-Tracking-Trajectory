@@ -44,6 +44,12 @@ class WorkerSettings(BaseSettings):
     # native macOS worker, at localhost — has those URLs rewritten to
     # `mediamtx_host`. Inside compose both are "mediamtx" and nothing changes.
     roster_gateway_host: str = "mediamtx"
+    # The identity this worker reads our own gateway with. MediaMTX refuses an
+    # anonymous read (it asks the API, app/routers/gateway_auth.py); empty
+    # means none is sent and our own cameras are refused, which is the safe
+    # failure. Federated cameras are unaffected.
+    mediamtx_read_user: str = "contrail-reader"
+    mediamtx_read_password: str = ""
 
     # ── Object storage for evidence crops ──
     minio_endpoint: str = "minio:9000"
@@ -127,6 +133,12 @@ class WorkerSettings(BaseSettings):
     ai_models_dir: str = "/models"
     # Rediscover publishing cameras this often.
     discovery_interval_s: float = 20.0
+    # A digest of the registry roster, rewritten by the API whenever a camera
+    # is onboarded, edited or deleted (app/services/fleet_roster.py). Read on
+    # every focus poll; a change means "rediscover now", so a new camera is
+    # owned within ~2 s instead of at the next pass. The interval above stays
+    # as the fallback — an API that predates the key simply never changes it.
+    roster_version_key: str = "nagarnetra:fleet:anpr:version"
     # Wait this long before reopening a stream that failed, doubling on each
     # further failure up to the max: the grid's guide asks for ~2s rising to
     # ~30s. See ai_worker.backoff.

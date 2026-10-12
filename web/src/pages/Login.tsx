@@ -48,8 +48,6 @@ const DEMO_ACCOUNTS: { username: string; role: Role; can: string }[] = [
   { username: 'auditor', role: 'auditor', can: 'Read the audit trail — no plate search' },
 ]
 
-const DEMO_PASSWORD = 'NagarNetra@2026'
-
 /** What the product does, in the words the rest of the interface uses. Every
  *  line names something that exists behind this screen today. */
 const CAPABILITIES: { icon: IconName; label: string }[] = [
@@ -62,7 +60,10 @@ const CAPABILITIES: { icon: IconName; label: string }[] = [
 export default function Login() {
   const { signIn } = useAuth()
   const [username, setUsername] = useState('admin')
-  const [password, setPassword] = useState(DEMO_PASSWORD)
+  // Never prefilled. The demo accounts each have their own password, generated
+  // per install into .env and issued by the administrator (scripts/seed.py);
+  // they used to share one printed on this screen and committed to the repo.
+  const [password, setPassword] = useState('')
   const [error, setError] = useState<{ message: string; status: number | null } | null>(null)
   const [busy, setBusy] = useState(false)
   const [showAccounts, setShowAccounts] = useState(false)
@@ -110,13 +111,14 @@ export default function Login() {
         </div>
 
         <div className="relative max-w-[40rem] px-10 pb-10">
-          <p className="eyebrow">City-wide vehicle intelligence</p>
+          <p className="eyebrow">Statewide CCTV and vehicle intelligence</p>
           <h1 className="mt-3 text-[40px] font-semibold leading-[1.08] tracking-[-0.01em] [text-wrap:balance]">
             Every sighting, joined into a journey.
           </h1>
           <p className="mt-4 max-w-[34rem] text-[15px] leading-relaxed text-muted-foreground">
             Cameras see vehicles one frame at a time. Contrail connects those
-            sightings across the city — into journeys, traffic and alerts.
+            sightings across departmental camera networks — into journeys,
+            traffic and alerts.
           </p>
           <ul className="mt-7 flex flex-wrap gap-x-6 gap-y-2.5 text-[13px] text-muted-foreground">
             {CAPABILITIES.map((item) => (
@@ -140,7 +142,7 @@ export default function Login() {
               <span className="text-[18px] font-semibold">Contrail</span>
             </div>
             <p className="mt-3 text-[13px] leading-relaxed text-muted-foreground">
-              City-wide vehicle intelligence — camera sightings joined into
+              Statewide CCTV and vehicle intelligence — camera sightings joined into
               journeys, traffic and alerts.
             </p>
           </div>
@@ -254,21 +256,21 @@ export default function Login() {
                 />
                 Demo accounts
                 <span className="ml-auto text-[10px] font-medium uppercase tracking-[0.06em] text-faint">
-                  seeded credentials
+                  one per role
                 </span>
               </button>
 
               {showAccounts && (
                 <ul className="border-t border-border">
                   {DEMO_ACCOUNTS.map((account) => {
-                    const chosen = username === account.username && password === DEMO_PASSWORD
+                    const chosen = username === account.username
                     return (
                       <li key={account.username}>
                         <button
                           type="button"
                           onClick={() => {
                             setUsername(account.username)
-                            setPassword(DEMO_PASSWORD)
+                            setPassword('')
                             setError(null)
                           }}
                           aria-pressed={chosen}
@@ -293,8 +295,7 @@ export default function Login() {
                     )
                   })}
                   <li className="px-3.5 py-2 text-[11px] text-muted-foreground">
-                    All use{' '}
-                    <span className="font-mono text-foreground/80">{DEMO_PASSWORD}</span>
+                    Each account has its own password, issued by the administrator.
                   </li>
                 </ul>
               )}

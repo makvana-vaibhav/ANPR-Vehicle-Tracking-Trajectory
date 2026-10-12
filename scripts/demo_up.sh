@@ -23,7 +23,10 @@ fail()  { printf '  %s✗%s %s\n' "$RED" "$RESET" "$1"; }
 
 API=${API_URL:-http://localhost:8000}
 WEB=${WEB_URL:-http://localhost:8080}
-ADMIN_PW=${BOOTSTRAP_ADMIN_PASSWORD:-NagarNetra@2026}
+# From the environment, else .env — generated per install by `make env`; there
+# is no published default (docs/SECURITY.md §8). Never printed.
+ADMIN_PW=${BOOTSTRAP_ADMIN_PASSWORD:-$(sed -n 's/^BOOTSTRAP_ADMIN_PASSWORD=//p' .env 2>/dev/null | tail -1)}
+[ -n "$ADMIN_PW" ] || { printf 'BOOTSTRAP_ADMIN_PASSWORD is not set — run make env\n'; exit 1; }
 
 wait_for() {  # wait_for <url> <seconds> <label>
     local url=$1 limit=$2 label=$3 waited=0
@@ -216,5 +219,5 @@ curl -sf "$WEB" >/dev/null 2>&1 && ok "command centre reachable" || fail "web is
 
 # ── Done ─────────────────────────────────────────────────────────────
 printf '\n%s%sDemo ready%s → %s\n' "$BOLD" "$GREEN" "$RESET" "$WEB"
-printf '%s  admin / %s · script: docs/DEMO_SCRIPT.md · if it breaks: docs/PANIC.md%s\n\n' \
-    "$DIM" "$ADMIN_PW" "$RESET"
+printf '%s  sign in: passwords are in .env (BOOTSTRAP_ADMIN_PASSWORD, DEMO_PASSWORD_*) · script: docs/DEMO_SCRIPT.md · if it breaks: docs/PANIC.md%s\n\n' \
+    "$DIM" "$RESET"

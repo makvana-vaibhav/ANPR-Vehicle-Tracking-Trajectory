@@ -22,6 +22,7 @@ from __future__ import annotations
 import asyncio
 import functools
 import os
+import re
 import shutil
 import subprocess
 from dataclasses import dataclass, field
@@ -30,6 +31,15 @@ from pathlib import Path
 from app.core.logging import get_logger
 
 log = get_logger("simulator.publisher")
+
+#: `user:password@` in any URL ffmpeg echoes back in an error.
+_URL_CREDENTIALS = re.compile(r"(?<=://)[^/@\s:]*:[^/@\s]*@")
+
+
+def _redact(text: str) -> str:
+    """ffmpeg's stderr with publish credentials masked, for the log."""
+    return _URL_CREDENTIALS.sub("***@", text)
+
 
 #: Video extensions we will replay.
 VIDEO_SUFFIXES = (".mp4", ".mkv", ".mov", ".avi", ".ts")
@@ -734,7 +744,7 @@ class StreamPublisher:
                         "simulator.stream_abandoned",
                         camera_code=code,
                         restarts=stream.restarts,
-                        detail=stderr.decode(errors="replace")[-300:],
+                        detail=_redact(stderr.decode(errors="replace"))[-300:],
                     )
                     self._streams.pop(code, None)
                     continue
@@ -744,7 +754,7 @@ class StreamPublisher:
                     camera_code=code,
                     exit_code=stream.process.returncode,
                     restarts=stream.restarts + 1,
-                    detail=stderr.decode(errors="replace")[-300:],
+                    detail=_redact(stderr.decode(errors="replace"))[-300:],
                 )
                 restarts = stream.restarts + 1
                 await self.start(stream.spec)

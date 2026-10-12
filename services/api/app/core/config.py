@@ -33,7 +33,7 @@ class Settings(BaseSettings):
     # ── Core ──────────────────────────────────────────────────────────
     environment: Environment = "development"
     log_level: LogLevel = "INFO"
-    app_name: str = "NagarNetra"
+    app_name: str = "Contrail"
     api_v1_prefix: str = "/api/v1"
 
     # Storage and transport are UTC everywhere. This is the *display* zone,
@@ -118,6 +118,38 @@ class Settings(BaseSettings):
     mediamtx_rtsp_port: int = 8554
     mediamtx_public_webrtc_url: str = "http://localhost:8889"
     mediamtx_public_hls_url: str = "http://localhost:8888"
+    # MediaMTX asks this API whether to allow every publish and every read
+    # (`authMethod: http`, infra/mediamtx/mediamtx.yml; app/routers/gateway_auth.py).
+    # Two internal identities, each allowed one thing: the simulator publishes,
+    # the ANPR workers read. Browsers hold neither — they present a camera-scoped
+    # stream token instead. Empty passwords match nothing, so an unset secret
+    # fails closed rather than open.
+    mediamtx_publish_user: str = "contrail-publisher"
+    mediamtx_publish_password: str = ""
+    mediamtx_read_user: str = "contrail-reader"
+    mediamtx_read_password: str = ""
+
+    # ── Simulator control (recorded-video cameras) ────────────────────
+    # Where the API tells the simulator to start or stop replaying a camera's
+    # recorded clip, on the internal network, so onboarding with "Recorded
+    # video" plays at once. Each call carries a short-lived HMAC token derived
+    # from JWT_SECRET_KEY (app/core/service_auth.py), which the simulator
+    # holds too. Empty disables the calls (the test suite's default).
+    simulator_control_url: str = "http://simulator:9100"
+    # Probe a camera once, straight after it is onboarded, instead of leaving
+    # its status "unknown" until the health monitor's next sweep reaches it
+    # (up to a probe interval later). A wrong password then shows at once, as
+    # `unauthorized`. Federated cameras are never probed this way.
+    probe_on_onboard: bool = True
+
+    # ── Client address ────────────────────────────────────────────────
+    # Peers whose X-Forwarded-For / X-Forwarded-Proto are believed: the web
+    # tier's nginx, pinned to a fixed address in docker-compose.yml. Anyone
+    # else's forwarded headers are ignored and the socket peer is the client,
+    # so a caller cannot choose the address the login limiter and the audit
+    # trail see. Comma-separated addresses or CIDRs; "*" trusts everyone and
+    # must not be used where the API port is reachable by clients.
+    forwarded_allow_ips: str = "127.0.0.1"
 
     # ── Auth ──────────────────────────────────────────────────────────
     # No default: the application refuses to start rather than sign tokens
@@ -181,7 +213,25 @@ class Settings(BaseSettings):
     # ── Health monitor ────────────────────────────────────────────────
     health_probe_interval_seconds: int = 30
     health_probe_timeout_seconds: int = 5
+    #: Consecutive probes that must agree a camera is offline (or its state
+    #: unknowable) before its status changes and a camera-down alarm opens.
     health_offline_after_failures: int = 2
+    #: Consecutive probes that must agree on any other change — back online,
+    #: degraded, recovered from degraded — before the status moves. Debounced
+    #: both ways: one good probe between two bad ones used to close an alarm
+    #: that the next sweep opened again.
+    health_status_change_after_probes: int = 3
+    #: Consecutive sweeps in which an integration (a recorder, the organisers'
+    #: grid) could not be asked about any of its cameras before ONE
+    #: integration alarm opens.
+    health_integration_down_after_sweeps: int = 4
+    #: Consecutive sweeps in which it answered again before that alarm closes.
+    #: Long on purpose: the grid alternated between accepting and refusing our
+    #: session every few minutes on 12 Oct, and each swing was an alarm.
+    health_integration_recover_after_sweeps: int = 20
+    #: A camera the AI workers decoded video from, or read a vehicle at, within
+    #: this many seconds is answering, whatever its integration's catalogue says.
+    health_worker_evidence_seconds: int = 120
 
     # ── Retention (enforced by app/services/retention.py) ─────────────
     # Under the DPDP Act the stated period is the lawful basis for holding the
@@ -284,11 +334,16 @@ class Settings(BaseSettings):
         name suggests a credential is replaced, never truncated (a truncated
         secret is still a leaked secret).
         """
+        from app.core.urls import redact
+
         secret_markers = ("password", "secret", "key", "token", "credentials")
         out: dict[str, str] = {}
         for name, value in self.model_dump().items():
             if any(marker in name for marker in secret_markers):
                 out[name] = "***redacted***"
+            elif name.endswith("_url"):
+                # DATABASE_URL and REDIS_URL carry their password in the URL.
+                out[name] = str(redact(str(value)))
             else:
                 out[name] = str(value)
         return out

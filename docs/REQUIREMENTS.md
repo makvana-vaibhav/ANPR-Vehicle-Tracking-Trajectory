@@ -67,13 +67,13 @@ quoted is **MEASURED** unless labelled, and the source is named.
 
 | Requirement | Contrail | State |
 |---|---|---|
-| **Secure** | argon2id, JWT with rotation and revocation, RBAC, audit, camera-scoped stream tokens, Redis rate limits, secrets as pointers, AES-256-GCM for sealed values. **TLS and at-rest encryption are not implemented** ([SECURITY.md §8](SECURITY.md#8-what-is-not-implemented)) | 🟡 |
+| **Secure** | argon2id, JWT with rotation and revocation, RBAC, audit, camera-scoped stream tokens, Redis rate limits, secrets as pointers, AES-256-GCM for sealed values. **TLS only at the web tier (:8443); no at-rest encryption; network exposure and shared demo accounts still open.** Zones, threat model and the gap list: [HLD §16](HLD.md#16-cybersecurity-architecture) | 🟡 |
 | **Scalable to ~80,000 cameras without redesign** | Edge workers sharded by hash, with no coordinator (`ai_worker/discovery.py`). Consumer-group ingest scales by replicas (`docker-compose.scale.yml`). Measured at 80,000 camera identities: **2,774 events/s, 0 failed**. p95 latency **5.7 s missed its 3 s target** | 🟡 throughput ✅, latency ❌ |
 | **Interoperable** | One `CameraAdapter` interface (`adapters/base.py`), with RTSP, ONVIF, vendor VMS (Milestone, Genetec, CP Plus and Hikvision vocabularies), the hosted grid, and simulated. An unknown vendor degrades to RTSP rather than vanishing | 🟡 RTSP and HostedGrid are proven live. ONVIF and VendorVMS are tested only on fixtures |
 | **Cost-effective, reusing existing infrastructure** | No camera, NVR or VMS is replaced. Video stays in departments' recorders. Capex and opex computed per fleet size ([INFRASTRUCTURE §7](INFRASTRUCTURE.md#7-hardware-bill-of-materials-and-cost-80000-cameras)) | ✅ (costs ASSUMED) |
-| **~26 departments** | `departments` table; cameras and VMS carry `department_id`; filters and reports by department. Federated cameras get their owner from the catalogue, else from their name, with provenance tagged | 🟡 **Six departments are seeded, and there is no API to add one.** 26 needs a seed or migration change |
+| **~26 departments** | `departments` table, all 26 seeded (`scripts/seed.py`); cameras and VMS carry `department_id`; filters and reports by department. Federated cameras get their owner from the catalogue, else from their name, with provenance tagged. What each department contributes and needs back: [HLD §20](HLD.md#20-department-wise-information-requirements) | 🟡 **No API to add a department, and no department-scoped RBAC**: every role sees every department's cameras (HLD §20.1) |
 | **Analog and IP** | IP: RTSP, ONVIF, VMS. Analog: through the DVR/encoder's RTSP, or through the VMS. A camera with no encoder can be registered and mapped (status `unknown`) | 🟡 no analog-specific adapter |
-| **Up to ~1,000 km apart** | Only ~2 KB events cross the WAN: ~1.3 Mbps per 2,400 cameras (ARITHMETIC). Video is pulled on demand | ✅ design; 📐 a site spool for link outages is not built ([HLD §11](HLD.md#11-low-bandwidth-mode)) |
+| **Up to ~1,000 km apart** | Only ~2 KB events cross the WAN: ~1.3 Mbps per 2,400 cameras (ARITHMETIC). Video is pulled on demand | ✅ design; ✅ an edge spool holds sightings through a link outage and replays them in order ([HLD §5.4](HLD.md#54-inside-the-edge-worker)); the hour-long WAN pull has not been run |
 
 ---
 
@@ -105,14 +105,14 @@ quoted is **MEASURED** unless labelled, and the source is named.
 
 | Ask | Where it is answered | State |
 |---|---|---|
-| **Database structure** | [HLD §6](HLD.md#6-database-structure), derived from migrations `0001`–`0009` | ✅ |
-| **Matching logic** | [HLD §7](HLD.md#7-matching-logic). Vehicle: exact or one-edit, capped near matches, validity windows, dedup. Persons: YuNet + SFace, thresholds, frames, margin, server re-check | ✅ vehicles · 🔧 persons |
+| **Database structure** | [HLD §6](HLD.md#6-database-structure), derived from migrations `0001`–`0010` | ✅ |
+| **Matching logic** | [HLD §7](HLD.md#7-matching-logic). Vehicle: exact or one-edit, capped near matches, validity windows, dedup. Persons: YuNet + SFace, thresholds, frames, margin, server re-check | ✅ |
 | **Alerting mechanism** | [HLD §8](HLD.md#8-alerting-mechanism). Producers, priorities, triage order, `reasons`, delivery to every replica, a lifecycle with separate permissions, self-closing camera alerts | ✅ |
 | **UI** | Seven workspaces plus ⌘K ([README](../README.md#the-command-centre)); browser flows in `tests/browser/flows.mjs` | ✅ |
 | **Representative watchlist: stolen vehicles** | `data/seed/watchlist.csv`: four `stolen` entries, all fictional, `DEMO/…` case refs | ✅ |
 | **… blacklisted vehicles** | One `blacklisted` entry; category supported | ✅ |
 | **… suspect lists** | One `suspect` entry; `wanted`, `bolo` and `echallan` also supported | ✅ |
-| **… wanted or missing persons** | `person_watchlist` (migration `0009`), categories `missing`, `wanted`, `demo`. Enrolment needs a case reference, a purpose and a second approver. `scripts/demo_persons.py`; demo camera `CAM-DEMO-02` | 🔧 backend and edge in the working tree; operator screen not finished; confirmation before acting not yet enforced |
+| **… wanted or missing persons** | `person_watchlist` (migration `0009`), categories `missing`, `wanted`, `demo`. Enrolment needs a case reference, a purpose and a second approver. `scripts/demo_persons.py`; demo camera `CAM-DEMO-02` | ✅ committed with its operator screens; the confirmation step before acknowledge or dispatch is designed, not enforced ([HLD §7.2](HLD.md#72-persons-watchlist-yunet-and-sface)) |
 
 ---
 
@@ -124,14 +124,17 @@ quoted is **MEASURED** unless labelled, and the source is named.
 | Compute sizing | `scripts/capacity_model.py`. CPU: 0.46 core per camera, **911 × 40-core nodes** at 80,000 (ARITHMETIC from MEASURED throughput). Per-frame costs measured in Docker and native CoreML ([INFRASTRUCTURE §2](INFRASTRUCTURE.md#2-cpu-per-camera-docker-against-native-coreml)) | ✅ (no x86 server measured) |
 | **GPU needs** | `device: auto/cpu/cuda/coreml` is wired. GPU scenarios are **EXTRAPOLATED** (91–228 nodes) and need hardware decode, which is not built ([INFRASTRUCTURE §4](INFRASTRUCTURE.md#4-gpu-scenarios--extrapolated), [GPU.md](GPU.md)) | 🟡 |
 | Bandwidth | 43.7 Mbps of events against 320 Gbps of video (ARITHMETIC). On-demand video at 4 Mbps per viewer ([INFRASTRUCTURE §5](INFRASTRUCTURE.md#5-bandwidth)) | ✅ |
-| **Low-bandwidth modes** | Events only ✅. On-demand pull with a 60 s release ✅. Sub-stream probing ✅. Sub-stream viewing 📐. Regional crops 📐. Overlay gated to on-screen cameras 📐. Site spool 📐 ([HLD §11](HLD.md#11-low-bandwidth-mode)) | 🟡 |
-| **Hot / warm / cold against 7–15+ day retention** | Video stays in departmental recorders under their retention. Contrail tiers: hot 7–15 d (3.3–7.1 TB), warm 90 d (361 TB), cold 5 y (861 TB). Today: one Postgres hypertable, 365-day `drop_chunks`, no compression, **vehicle-crop expiry not wired** ([HLD §12](HLD.md#12-storage-tiers-against-retention)) | 🟡 |
+| **Low-bandwidth modes** | Events only ✅. On-demand pull with a 60 s release ✅. Sub-stream probing ✅. Sub-stream viewing 📐. Regional crops 📐. Overlay gated to on-screen cameras 📐. Edge spool through link outages ✅ ([HLD §11](HLD.md#11-low-bandwidth-mode)) | 🟡 |
+| **Hot / warm / cold against 7–15+ day retention** | Video stays in departmental recorders under their retention. Contrail tiers: hot 7–15 d (3.3–7.1 TB), warm 90 d (361 TB), cold 5 y (861 TB). Today: one Postgres hypertable, 365-day `drop_chunks`, no compression; plate crops expire after 90 days ([HLD §12](HLD.md#12-storage-tiers-against-retention)) | 🟡 |
 | **Load balancing** | Stateless API (tailer/consumer split makes N replicas correct); consumer replicas share one group | 🟡 no load-balancer config ships |
 | **High availability** | [HLD §13](HLD.md#13-high-availability-and-disaster-recovery): Patroni Postgres, Redpanda ×3 (RF=3), MinIO erasure coding and replication | 📐 single instances today |
-| **Disaster recovery** | DR site at 60% of central; WAL archiving; a timed restore drill as a rollout gate | 📐 **no backups exist; no RPO or RTO claimed** |
-| **Monitoring** | `/health`, `/ready`, `/metrics` (JSON), worker coverage ✅. Prometheus exposition, Prometheus and Grafana 📐 ([HLD §14](HLD.md#14-monitoring)) | 🟡 |
-| **Security** | [HLD §16](HLD.md#16-security), [SECURITY.md](SECURITY.md) | 🟡 (TLS, at-rest encryption) |
+| **Disaster recovery** | DR site at 60% of central; WAL archiving; RPO/RTO targets per failure ([HLD §13.1](HLD.md#131-recovery-targets-by-failure)); a timed restore drill as a rollout gate | 🟡 manual backups, verified by restore on the demo data; **no RPO or RTO claimed** |
+| **Monitoring** | `/health`, `/ready`, `/metrics` (JSON), worker coverage ✅. Prometheus exposition, Prometheus, Grafana and tested alert rules ✅ (`monitoring` profile). Paging and host/database exporters 📐 ([HLD §14](HLD.md#14-monitoring)) | 🟡 |
+| **Security** | [HLD §16](HLD.md#16-cybersecurity-architecture): zones, flows, identity, threat model, and the prototype's open gaps against production (§16.7); [SECURITY.md](SECURITY.md) | 🟡 TLS only at the web tier; no at-rest encryption; network exposure and shared demo accounts open (HLD §16.7) |
 | **Costs** | INR capex and opex per fleet size; ₹39.31 crore and ₹8.78 crore/yr at 80,000 on CPU (unit prices ASSUMED) | ✅ |
+| **Cost-benefit** | Contrail against a Model 4 central VMS at the same unit prices: capex ₹39.31 vs ₹63.50–91.15 crore, opex ₹8.78 vs ₹56.28 crore/yr, plus sensitivities and non-monetary benefits ([HLD §19](HLD.md#19-cost-benefit-analysis)) | ✅ (ARITHMETIC; prices ASSUMED) |
+| **Scalability strategy** | Per dimension: mechanism, evidence, first limit, what replaces it ([HLD §21](HLD.md#21-scalability-strategy)) | ✅ |
+| **Future roadmap** | 30 / 90 / 180 days and the statewide stage, each item tied to built, measured or designed ([HLD §22](HLD.md#22-future-roadmap)) | ✅ |
 | **Rollout plan for 80,000 cameras** | One district → one range → the state, each gated on measured numbers ([HLD §17](HLD.md#17-rollout-plan)) | ✅ |
 
 ---
@@ -148,9 +151,9 @@ quoted is **MEASURED** unless labelled, and the source is named.
 | Vehicle counting | `GET /api/v1/analytics/flow`, `/traffic`, `/traffic/history`, `/heatmap`, `/hotspots` (`routers/analytics.py`). Direction of travel is emitted by the edge | ✅ |
 | Anomaly detection | `services/anomaly.py`: impossible hop, rare transition, slow or fast transition, with `alerts.reasons` | ✅ |
 | Congestion forecast | `GET /api/v1/predictions/congestion`, with a self-backtested error | ✅ |
-| Face recognition | YuNet + SFace (`ai-lab/ailab/face/`), persons watchlist with safeguards ([HLD §7.2](HLD.md#72-persons-watchlist-yunet-and-sface-being-built)) | 🔧 |
+| Face recognition | YuNet + SFace (`ai-lab/ailab/face/`), persons watchlist with safeguards ([HLD §7.2](HLD.md#72-persons-watchlist-yunet-and-sface)) | ✅ (checked on one stock clip, not validated on real CCTV faces) |
 | Crowd counting | — | ❌ not built |
-| VAHAN / SARTHI / eGujCop / AFIS / NAFIS | — | ❌ not built. These services are not publicly reachable. The integration would be an adapter behind an interface, with any stand-in data clearly labelled as such |
+| VAHAN / SARTHI / eGujCop / AFIS / NAFIS | `app/adapters/registries/` (one `RegistryAdapter` interface), `routers/registries.py`, migration `0010`, Investigate → Registries | ✅ interface, audited lookups and mismatch flags · answers come from a **labelled fictional reference dataset** (`source: reference`); live access needs an MoU |
 
 ---
 
@@ -167,10 +170,10 @@ quoted is **MEASURED** unless labelled, and the source is named.
 | Completeness | HLD, infrastructure, security, requirements, runbooks, API docs | `docs/` |
 | Bonus: hybrid architecture | Models 1 + 3 + selective 2 | ✅ |
 | Bonus: cross-camera tracking | Correlator with flagged legs | ✅ |
-| Bonus: extra analytics | Anomalies, traffic, forecast, faces 🔧 | ✅ / 🔧 |
+| Bonus: extra analytics | Anomalies, traffic, forecast, faces | ✅ |
 | Bonus: edge processing | AI next to the video; events only | ✅ |
 | Bonus: low bandwidth | On-demand video, events only | ✅ / 📐 (§6) |
-| Bonus: security | Audit, RBAC, scoped tokens, four-eyes on persons | ✅ / 🔧 |
+| Bonus: security | Audit, RBAC, scoped tokens, four-eyes on persons; zones and threat model ([HLD §16](HLD.md#16-cybersecurity-architecture)) | ✅ / 🟡 (HLD §16.7) |
 | Bonus: dashboards | Seven workspaces | ✅ |
 | Bonus: APIs | OpenAPI at `/docs`; [API.md](API.md) generated from it | ✅ |
 
@@ -180,10 +183,10 @@ quoted is **MEASURED** unless labelled, and the source is named.
 
 | Topic | Statement | Source |
 |---|---|---|
-| ANPR accuracy | **No system figure is claimed.** On 60 AI-labelled legible grid crops: 61.7% exact as shipped, 83.3% with raw crops. Night yield on the grid: 11–20% of four-wheelers, 0% of two-wheelers | [research](research/ANPR_ACCURACY_LATENCY.md) §3 |
+| ANPR accuracy | **No system figure is claimed.** On 60 AI-labelled legible grid crops: 61.7% exact as shipped, 83.3% with raw crops. On the rebuilt two-labeller set: 77.8% → 87.0% (gold, n=54) with the deployed configuration. Night yield on the grid: 11–20% of four-wheelers, 0% of two-wheelers | [research](research/ANPR_ACCURACY_LATENCY.md) §3; `ai-lab/FINDINGS.md` §9; [HLD §15.3](HLD.md#153-anpr-accuracy-stated-plainly) |
 | Ingest latency at scale | p95 5.7 s against a 3 s target | `tests/load/results/load-20260905T064430.json` |
 | GPU | Never executed | [GPU.md](GPU.md) |
-| RPO / RTO | None claimed; no backups | [HLD §13](HLD.md#13-high-availability-and-disaster-recovery) |
+| RPO / RTO | None claimed. Targets per failure are designed; backups are manual, verified by restore on the demo data only | [HLD §13](HLD.md#13-high-availability-and-disaster-recovery) |
 
 ---
 

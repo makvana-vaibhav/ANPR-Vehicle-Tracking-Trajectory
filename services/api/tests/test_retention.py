@@ -246,11 +246,13 @@ class TestRateLimiting:
                 self.client = type("C", (), {"host": "10.0.0.9"})()
 
         assert client_key(FakeRequest(user_id="abc")) == "user:abc"
-        assert client_key(FakeRequest(forwarded="203.0.113.7")) == "ip:203.0.113.7"
         assert client_key(FakeRequest()) == "ip:10.0.0.9"
 
-    async def test_the_first_forwarded_address_is_the_client(self):
-        """X-Forwarded-For accumulates hops; the client is the leftmost."""
+    async def test_the_limiter_never_reads_a_forwarded_header_itself(self):
+        """It used to key on the first X-Forwarded-For entry as sent, so a
+        caller on the API port could name a fresh "client" on every guess.
+        Which address counts is decided once, by the trusted-proxy middleware
+        (tests/test_client_address.py), and handed over as `request.client`."""
         from starlette.datastructures import Headers
 
         from app.core.ratelimit import client_key
@@ -260,4 +262,4 @@ class TestRateLimiting:
             headers = Headers({"x-forwarded-for": "203.0.113.7, 10.0.0.1, 10.0.0.2"})
             client = type("C", (), {"host": "10.0.0.9"})()
 
-        assert client_key(FakeRequest()) == "ip:203.0.113.7"
+        assert client_key(FakeRequest()) == "ip:10.0.0.9"

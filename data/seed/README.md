@@ -41,3 +41,25 @@ These cameras have no `stream_url`, so they onboard as registry records with no
 feed. That is honest, and it is what onboarding a camera the state has recorded
 but not yet connected actually looks like. Delete them from the admin panel
 when you are done demonstrating.
+
+## camera_positions.csv — OpenStreetMap attribution
+
+The organisers' grid publishes a name for each of its 30 cameras, never
+coordinates. `camera_positions.csv` holds an approximate position for each,
+geocoded from that name with **OpenStreetMap Nominatim** on **12 Oct 2026**
+(74 rate-limited requests, one per query, cached).
+
+**These positions are approximate.** Each is the OSM feature the camera's name
+matched (a junction, landmark, locality, village or town), not a surveyed
+camera position. The file records the query, the OSM object and a confidence
+for every row. If the organisers publish real coordinates, those must win.
+
+- 19 of 30 placed: 14 `geocoded` (6 high, 8 medium confidence) and 5 `city`
+  (the name gives only a town: Rajkot, Dehgam, Bilimora ×3).
+- 11 of 30 left `unknown` with empty coordinates, because no OSM feature
+  matched or the name was ambiguous. Each row's `note` says why.
+
+Geodata © OpenStreetMap contributors, available under the Open Database
+Licence (ODbL) 1.0 — <https://www.openstreetmap.org/copyright>. Any screen or
+export that shows these positions must carry the attribution
+"© OpenStreetMap contributors".

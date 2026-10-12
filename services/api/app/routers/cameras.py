@@ -8,10 +8,11 @@ no route in this file can return the whole estate.
 from __future__ import annotations
 
 import uuid
-from typing import Annotated
+from typing import Annotated, Any
 
 from fastapi import (
     APIRouter,
+    BackgroundTasks,
     Depends,
     File,
     HTTPException,
@@ -28,6 +29,7 @@ from app.api.deps import CurrentUser, DbSession
 from app.core.config import settings
 from app.core.logging import get_logger
 from app.core.rbac import Permission, require_permission
+from app.db.session import SessionLocal
 from app.models.enums import (
     AdapterType,
     CameraStatus,
@@ -50,7 +52,15 @@ from app.schemas.camera import (
     VendorEnumOut,
     VmsInstanceOut,
 )
-from app.services import audit, gateway
+from app.services import (
+    audit,
+    camera_credentials,
+    fleet,
+    fleet_roster,
+    gateway,
+    health_monitor,
+    simulator_control,
+)
 from app.services import camera as camera_service
 
 log = get_logger("api.cameras")
@@ -325,6 +335,8 @@ async def list_cameras(
         anpr_enabled=anpr_enabled,
         search=search,
     )
+    # A status held at its last known value says so, beside the status.
+    await fleet.annotate_staleness(session, items)
     return CameraPage(items=items, total=total, limit=limit, offset=offset)
 
 
@@ -341,10 +353,58 @@ async def get_camera(
     camera = await camera_service.get_camera(session, camera_id)
     if camera is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Camera not found")
-    return camera_service.to_out(camera)
+    out = camera_service.to_out(camera)
+    await fleet.annotate_staleness(session, [out])
+    return out
 
 
 # ══ Mutations ═════════════════════════════════════════════════════════
+
+
+def _credentials_refused(exc: camera_credentials.CredentialStoreUnavailable) -> HTTPException:
+    """The answer when a login arrives and there is no key to seal it with."""
+    return HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc))
+
+
+async def first_probe(camera_id: uuid.UUID) -> None:
+    """Probe a just-onboarded camera once, so its status is known in seconds.
+
+    The health monitor would reach it at its next sweep — up to a full probe
+    interval later — and until then the registry shows "unknown", which reads
+    like a fault to someone watching a camera being integrated. A wrong
+    password shows here as `unauthorized`, while the operator is still at the
+    form. Run after the response, in a session of its own; never raises.
+    """
+    try:
+        async with SessionLocal() as session:
+            camera = await camera_service.get_camera(session, camera_id)
+            if camera is None or not camera.stream_url:
+                return
+            if camera.vms is not None and camera.vms.adapter_type in gateway.FEDERATED_ADAPTERS:
+                # Somebody else's gateway, with its own session budget.
+                return
+            probe = await health_monitor.probe_camera(session, camera)
+            camera.status = health_monitor.status_after_manual_probe(camera.status, probe)
+            await session.commit()
+            log.info(
+                "camera.first_probe",
+                camera_code=camera.camera_code,
+                status=camera.status,
+                error_code=probe.error_code,
+            )
+    except Exception:
+        # A supervisor boundary for a best-effort follow-up: the camera is
+        # registered either way, and the monitor's sweep will probe it.
+        log.warning("camera.first_probe_failed", camera_id=str(camera_id), exc_info=True)
+
+
+def _source_kind(camera: Any) -> str:
+    """How the camera gets its pictures, for the audit row. Never the URL."""
+    if getattr(camera, "stream_url", None):
+        return "stream"
+    if getattr(camera, "source_file", None):
+        return "recorded"
+    return "none"
 
 
 @router.post(
@@ -357,6 +417,7 @@ async def create_camera(
     payload: CameraCreate,
     request: Request,
     session: DbSession,
+    background: BackgroundTasks,
     user: Annotated[CurrentUser, Depends(require_permission(Permission.CAMERA_CREATE))],
 ) -> CameraOut:
     """Register a single camera.
@@ -365,6 +426,16 @@ async def create_camera(
     self-registers its estate with an API key. That role holds this permission
     and nothing else, so a leaked onboarding key cannot read the fleet, search,
     or view alerts.
+
+    A camera that needs a login takes it in ``stream_username`` and
+    ``stream_password`` — or inside a pasted ``rtsp://user:pass@host/…``, which
+    is split before anything is stored. The password is sealed into
+    ``credentials_ref`` and is never returned, logged or audited.
+
+    Once committed, the camera is put to work at once rather than at the next
+    periodic pass: the gateway is told to pull it, the AI workers are told the
+    fleet changed (they pick it up within about two seconds), and a camera
+    onboarded with a recorded clip is started on the simulator.
     """
     if await camera_service.get_camera_by_code(session, payload.camera_code):
         raise HTTPException(
@@ -374,6 +445,8 @@ async def create_camera(
 
     try:
         camera = await camera_service.create_camera(session, payload)
+    except camera_credentials.CredentialStoreUnavailable as exc:
+        raise _credentials_refused(exc) from exc
     except IntegrityError as exc:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -386,15 +459,38 @@ async def create_camera(
         request=request,
         resource_type="camera",
         resource_id=camera.id,
-        params={"camera_code": camera.camera_code, "district": camera.district},
+        # Whether a login was stored, never the login itself.
+        params={
+            "camera_code": camera.camera_code,
+            "district": camera.district,
+            "source": _source_kind(camera),
+            # Not named "credentials": the audit trail redacts that key
+            # wholesale, which would hide even this yes/no.
+            "login_stored": bool(camera.credentials_ref),
+        },
     )
-    log.info("camera.created", camera_code=camera.camera_code, by=user.username)
+    log.info(
+        "camera.created",
+        camera_code=camera.camera_code,
+        by=user.username,
+        credentials=bool(camera.credentials_ref),
+    )
+
+    # Committed before anything else reads it: the roster is built, and the
+    # simulator reads the camera, in sessions of their own.
+    await session.commit()
 
     # Tell the gateway to pull this camera's source. Without it the stream URL
     # the operator just typed is stored and never used: everything downstream
     # reads the camera from `rtsp://<gateway>/<code>`, and nothing would ever
     # have published it there.
     await gateway.register(camera)
+    await fleet_roster.notify_changed("camera.create", camera.camera_code)
+    if simulator_control.wants_replay(camera):
+        # After the response: a first start may transcode the clip.
+        background.add_task(simulator_control.start, camera.camera_code)
+    if settings.probe_on_onboard and camera.stream_url:
+        background.add_task(first_probe, camera.id)
 
     return camera_service.to_out(camera)
 
@@ -409,15 +505,28 @@ async def update_camera(
     payload: CameraUpdate,
     request: Request,
     session: DbSession,
+    background: BackgroundTasks,
     user: Annotated[CurrentUser, Depends(require_permission(Permission.CAMERA_UPDATE))],
 ) -> CameraOut:
     camera = await camera_service.get_camera(session, camera_id)
     if camera is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Camera not found")
 
-    changed = payload.model_dump(exclude_unset=True)
-    camera = await camera_service.update_camera(session, camera, payload)
+    changed = payload.model_dump(
+        exclude_unset=True,
+        exclude={"stream_username", "stream_password", "clear_credentials"},
+    )
+    was_replaying = simulator_control.wants_replay(camera)
+    previous_clip = camera.source_file
+    try:
+        camera = await camera_service.update_camera(session, camera, payload)
+    except camera_credentials.CredentialStoreUnavailable as exc:
+        raise _credentials_refused(exc) from exc
 
+    fields = sorted(changed)
+    if payload.login_changed:
+        # Named, never shown: a reviewer sees that the login changed.
+        fields = sorted({*fields, "login"})
     await audit.record(
         action="camera.update",
         user=user,
@@ -426,16 +535,30 @@ async def update_camera(
         resource_id=camera.id,
         # Record which fields changed — an audit row saying only "updated" does
         # not answer the question a reviewer is asking.
-        params={"camera_code": camera.camera_code, "fields": sorted(changed)},
+        params={"camera_code": camera.camera_code, "fields": fields},
     )
+    await session.commit()
+
+    replaying = simulator_control.wants_replay(camera)
+    if was_replaying and not replaying:
+        # Stopped before any pull is registered, so a publisher and a pull
+        # never contend for the same gateway path.
+        await simulator_control.stop(camera.camera_code)
 
     # Only when the source actually moved. Re-registering on every edit would
-    # tear down a live pull because somebody corrected a spelling.
-    if "stream_url" in changed:
+    # tear down a live pull because somebody corrected a spelling. A new login
+    # is a moved source: the old pull would go on failing with 401.
+    if "stream_url" in changed or payload.login_changed:
         if camera.stream_url:
             await gateway.register(camera)
         else:
             await gateway.unregister(camera.camera_code)
+
+    await fleet_roster.notify_changed("camera.update", camera.camera_code)
+
+    if replaying and (not was_replaying or camera.source_file != previous_clip):
+        task = simulator_control.restart if was_replaying else simulator_control.start
+        background.add_task(task, camera.camera_code)
 
     return camera_service.to_out(camera)
 
@@ -449,19 +572,22 @@ async def delete_camera(
     camera_id: uuid.UUID,
     request: Request,
     session: DbSession,
+    background: BackgroundTasks,
     user: Annotated[CurrentUser, Depends(require_permission(Permission.CAMERA_DELETE))],
 ) -> Response:
     """Delete a camera.
 
     Detections already recorded from it are retained — their ``camera_id``
     becomes NULL rather than cascading. Deleting a camera must not delete
-    evidence gathered while it was operating.
+    evidence gathered while it was operating. Its stored login goes with the
+    row.
     """
     camera = await camera_service.get_camera(session, camera_id)
     if camera is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Camera not found")
 
     code = camera.camera_code
+    was_replaying = bool(camera.source_file)
     await session.delete(camera)
 
     await audit.record(
@@ -473,10 +599,15 @@ async def delete_camera(
         params={"camera_code": code},
     )
     log.warning("camera.deleted", camera_code=code, by=user.username)
+    await session.commit()
 
     # Leave the gateway holding no path for a camera that no longer exists —
     # otherwise it keeps trying to reach a source nobody can now see or manage.
     await gateway.unregister(code)
+    await fleet_roster.notify_changed("camera.delete", code)
+    if was_replaying:
+        # A replay left running would keep publishing a camera nobody can see.
+        background.add_task(simulator_control.stop, code)
 
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
@@ -541,6 +672,8 @@ async def bulk_upload(
     # four-thousand-camera estate would otherwise make four thousand calls to
     # the gateway while the operator waits for the response.
     if not dry_run and (result.created or result.updated):
+        await session.commit()
         await gateway.reconcile()
+        await fleet_roster.notify_changed("camera.bulk_upload")
 
     return result

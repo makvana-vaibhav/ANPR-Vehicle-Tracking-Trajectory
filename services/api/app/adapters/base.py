@@ -33,12 +33,34 @@ INTEGRATION_ERRORS = frozenset(
         "vms_unreachable",
         "onvif_unreachable",
         "sandbox_unreachable",
+        "grid_refused",
         "gateway_unreachable",
         "unauthorized",
         "adapter_exception",
         "ffprobe_missing",
         "no_stream_url",
         "no_stream_configured",
+    }
+)
+
+#: Integration errors that mean the camera could not be *asked about* at all:
+#: the recorder or grid did not answer, or turned our session away. A probe
+#: like that says nothing about the camera, so the health monitor leaves its
+#: status as last known — shown as stale — instead of flipping it. When the
+#: organisers' grid refused our session every few minutes, flipping thirty
+#: cameras to "unknown" and back each time was noise that taught an operator
+#: to ignore the fleet screen. The configuration errors above
+#: (`no_stream_url`, `ffprobe_missing`, …) are not here: they are a standing
+#: fact about this camera's setup, not a moment in which nobody answered.
+STATUS_HOLD_ERRORS = frozenset(
+    {
+        "vms_unreachable",
+        "onvif_unreachable",
+        "sandbox_unreachable",
+        "grid_refused",
+        "gateway_unreachable",
+        "unauthorized",
+        "adapter_exception",
     }
 )
 

@@ -25,10 +25,15 @@ would pull a thousand streams into a building that asked for none of them.
 
 ## Where the credentials live
 
-The source URL carries them, because RTSP has nowhere else to put them. It goes
-from this service to MediaMTX over the internal network and is never returned
-to a browser: `CameraOut` has no `stream_url` field, and every log line here
-redacts. See `docs/SECURITY.md` §6.
+Not in `stream_url`: the registry stores that without any login. A camera that
+needs one has it sealed in `credentials_ref` (app/services/camera_credentials.py),
+and it is put back into the URL here, at the last moment, because RTSP has
+nowhere else to put it. That URL goes from this service to MediaMTX over the
+internal network and nowhere else: it is never returned to a browser
+(`CameraOut` has no `stream_url` field), and every log line here redacts.
+Browsers and AI workers read the camera from our gateway under their own
+identities, so neither ever holds the camera's password. See
+`docs/SECURITY.md` §6.
 """
 
 from __future__ import annotations
@@ -40,6 +45,7 @@ import httpx
 from app.core.config import settings
 from app.core.logging import get_logger
 from app.core.urls import redact
+from app.services.camera_credentials import camera_source_url, source_url
 
 log = get_logger("gateway")
 
@@ -70,7 +76,9 @@ async def register(camera: Any) -> bool:
 
     name = path_for(code)
     body = {
-        "source": stream_url,
+        # With the camera's login put back in, if it has one. Only MediaMTX
+        # ever sees this form of the URL.
+        "source": camera_source_url(camera),
         "sourceOnDemand": True,
         # Long enough that the ANPR worker's rotation, which revisits a camera
         # every few minutes, does not pay reconnection on every visit; short
@@ -143,7 +151,12 @@ async def reconcile() -> dict[str, int]:
     async with SessionLocal() as session:
         rows = (
             await session.execute(
-                select(Camera.camera_code, Camera.stream_url, VmsInstance.adapter_type)
+                select(
+                    Camera.camera_code,
+                    Camera.stream_url,
+                    Camera.credentials_ref,
+                    VmsInstance.adapter_type,
+                )
                 .outerjoin(VmsInstance, VmsInstance.id == Camera.vms_id)
                 .where(Camera.stream_url.is_not(None))
             )
@@ -154,8 +167,8 @@ async def reconcile() -> dict[str, int]:
     # a fact about how it is integrated — not something to infer by matching
     # substrings against a hostname that can change.
     wanted = {
-        path_for(code): url
-        for code, url, adapter_type in rows
+        path_for(code): source_url(url, credentials_ref)
+        for code, url, credentials_ref, adapter_type in rows
         if adapter_type not in FEDERATED_ADAPTERS
     }
 

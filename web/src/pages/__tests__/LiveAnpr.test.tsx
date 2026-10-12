@@ -117,7 +117,7 @@ const GRID_TWO = camera('SBX-cam02', {
   tags: ['sandbox', 'grid-id:cam02'],
 })
 const DEMO = camera('CAM-DEMO-01', {
-  vms_name: 'Ahmedabad City ANPR Grid (simulated)',
+  vms_name: 'Recorded demo feed (local simulator)',
   vms_vendor: 'simulated',
   tags: ['demo', 'recorded-footage'],
   status: 'unknown',
@@ -440,7 +440,7 @@ describe('the rail', () => {
 
 describe('helpers', () => {
   it('knows a grid camera by its adapter, not by its name', () => {
-    // The VMS name changed in the SIH26127 rename; the adapter did not.
+    // VMS names have been renamed before; the adapter was not.
     expect(isGridCamera(GRID)).toBe(true)
     expect(isGridCamera(camera('X', { vms_vendor: 'hosted_grid' }))).toBe(true)
     expect(isGridCamera(DEMO)).toBe(false)

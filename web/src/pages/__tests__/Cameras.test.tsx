@@ -31,6 +31,7 @@ const FLEET = [
   DEMO,
   camera('SBX-cam05', { name: 'Visat teen Rasta', department_code: 'POLICE', department_name: 'Gujarat Police' }),
   camera('SBX-cam06', { name: 'Timbavadi gate', city: 'Junagadh', district: 'Junagadh', lat: 21.52, lon: 70.45 }),
+  camera('NVR-CH01', { name: 'Gate NVR channel 1', has_stream: true, has_credentials: true }),
   unplaced('SBX-cam20', { name: 'Mohanpura' }),
   unplaced('SBX-cam22', { name: 'BK Mervada tran Rasta' }),
 ]
@@ -96,6 +97,7 @@ describe('Cameras', () => {
     vi.spyOn(api, 'probeCamera').mockRejectedValue(new Error('must not be called'))
     vi.spyOn(api, 'focusCamera').mockRejectedValue(new Error('must not be called'))
     vi.spyOn(api, 'updateCamera').mockImplementation(async (id) => FLEET.find((c) => c.id === id)!)
+    vi.spyOn(api, 'createCamera').mockImplementation(async (body) => camera(body.camera_code))
   })
 
   afterEach(() => {
@@ -188,6 +190,64 @@ describe('Cameras', () => {
         lon: 71.5,
         tags: ['sandbox'],
       }),
+    )
+  })
+
+  it('moves a login pasted inside the URL into the login fields, and says so', async () => {
+    renderAt('/cameras')
+    await screen.findByText('Visat teen Rasta')
+    fireEvent.click(screen.getByRole('button', { name: 'Onboard camera' }))
+    const form = await screen.findByRole('dialog', { name: 'Onboard a camera' })
+    fireEvent.change(within(form).getByPlaceholderText('CAM-00301'), { target: { value: 'JURY-03' } })
+    fireEvent.change(within(form).getByPlaceholderText('Kalawad Road Junction'), {
+      target: { value: 'Jury NVR' },
+    })
+    fireEvent.change(within(form).getByPlaceholderText('22.2863'), { target: { value: '23.03' } })
+    fireEvent.change(within(form).getByPlaceholderText('70.7728'), { target: { value: '72.58' } })
+
+    const url = within(form).getByPlaceholderText(
+      'rtsp://10.0.0.24:554/Streaming/Channels/101',
+    ) as HTMLInputElement
+    fireEvent.change(url, {
+      target: { value: 'rtsp://admin:Secret%401@192.168.1.64:554/Streaming/Channels/101' },
+    })
+
+    // The password is out of the URL field the moment it is pasted.
+    expect(url.value).toBe('rtsp://192.168.1.64:554/Streaming/Channels/101')
+    expect((within(form).getByPlaceholderText('admin') as HTMLInputElement).value).toBe('admin')
+    const password = form.querySelector<HTMLInputElement>('input[type="password"]')!
+    expect(password.value).toBe('Secret@1')
+    expect(password.getAttribute('autocomplete')).toBe('new-password')
+    expect(within(form).getByRole('status').textContent).toMatch(/taken out of the URL/)
+
+    fireEvent.click(within(form).getByRole('button', { name: 'Onboard camera' }))
+    await waitFor(() => expect(api.createCamera).toHaveBeenCalled())
+    const sent = vi.mocked(api.createCamera).mock.calls[0]![0]
+    expect(sent.stream_url).toBe('rtsp://192.168.1.64:554/Streaming/Channels/101')
+    expect(sent.stream_username).toBe('admin')
+    expect(sent.stream_password).toBe('Secret@1')
+  })
+
+  it('keeps a stored login on an edit unless it is replaced or removed', async () => {
+    renderAt('/cameras')
+    await screen.findByText('Gate NVR channel 1')
+    fireEvent.click(within(rowOf('NVR-CH01')).getByRole('button', { name: 'Edit' }))
+    let form = await screen.findByRole('dialog', { name: 'Amend NVR-CH01' })
+    expect(within(form).getByText('A login is stored. Leave blank to keep it.')).toBeTruthy()
+    fireEvent.change(within(form).getByDisplayValue('Gate NVR channel 1'), {
+      target: { value: 'Gate NVR ch1' },
+    })
+    fireEvent.click(within(form).getByRole('button', { name: 'Save changes' }))
+    await waitFor(() =>
+      expect(api.updateCamera).toHaveBeenCalledWith('id-NVR-CH01', { name: 'Gate NVR ch1' }),
+    )
+
+    fireEvent.click(within(rowOf('NVR-CH01')).getByRole('button', { name: 'Edit' }))
+    form = await screen.findByRole('dialog', { name: 'Amend NVR-CH01' })
+    fireEvent.click(within(form).getByLabelText(/Remove the stored login/))
+    fireEvent.click(within(form).getByRole('button', { name: 'Save changes' }))
+    await waitFor(() =>
+      expect(api.updateCamera).toHaveBeenLastCalledWith('id-NVR-CH01', { clear_credentials: true }),
     )
   })
 })

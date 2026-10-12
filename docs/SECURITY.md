@@ -27,12 +27,12 @@ document, because it stops anyone looking.
 | Rate limiting, per-deployment | ✅ | `app/core/ratelimit.py` |
 | Retention enforcement (actual deletion) | ✅ | `app/services/retention.py` |
 | Secrets kept out of git | ✅ | `.env.example` committed, `.env` ignored |
-| Security headers + CSP | ✅ | `web/nginx.conf` |
+| Security headers + CSP | ✅ | `web/nginx/contrail-app.conf` (both servers) |
 | Scrape endpoint carries no personal data | ✅ | `app/routers/health.py` |
-| **TLS** | ❌ **not implemented** | see §8 |
+| **TLS** | 🟡 the web tier serves HTTPS on :8443 (HSTS for real hostnames); :8080, the API's :8000 and container-to-container traffic are plain HTTP | §6.1, §8 |
 | **Encryption at rest — application level** | ✅ | AES-256-GCM, `app/core/crypto.py`; sealed `enc://` credentials, 44 tests |
 | **Encryption at rest — volumes / objects** | ❌ **not implemented** | see §8 |
-| **Backups / DR** | ❌ **not implemented** | see §8 |
+| **Backups / DR** | 🟡 manual backups, verified by restore; no schedule, no off-site copy, no DR | `scripts/backup.sh`, [INFRASTRUCTURE §8.4](INFRASTRUCTURE.md#84-backups) |
 
 ---
 
@@ -139,7 +139,7 @@ Configured in `Settings`, **enforced daily** by `app/services/retention.py`.
 |---|---|---|
 | Detections | 365 days | TimescaleDB `drop_chunks` |
 | Camera health | 90 days | TimescaleDB `drop_chunks` |
-| Media (crops, snapshots) | 90 days | *not yet wired — see §8* |
+| Plate and vehicle crops | 90 days (`RETENTION_MEDIA_DAYS`) | deleted from object storage by the daily sweep, a day partition at a time (`retention.expire_crops`); a crop an open alert still points at is kept until the alert is closed, so the policy never deletes the evidence an officer is acting on |
 | Audit log | 1825 days (5 years) | predicate delete |
 | Face embedding of a persons-watchlist entry | while the entry can match | nulled on rejection, retirement or expiry (`app/services/persons.py`) |
 | Reference photo of a retired or rejected entry; face crop on a person-match alarm | 90 days (`RETENTION_PERSON_MEDIA_DAYS`) | deleted from object storage by the persons sweeper, hourly |
@@ -197,21 +197,61 @@ worse failure.
 * One origin. The browser talks to nginx, which proxies `/api/` and `/ws/` to
   the API; no cross-origin requests, so no permissive CORS is needed.
 * Content-Security-Policy, `X-Frame-Options`, `X-Content-Type-Options`,
-  `Referrer-Policy` set in `web/nginx.conf` and asserted by
+  `Referrer-Policy` set in `web/nginx/contrail-app.conf` and asserted by
   `tests/e2e/test_web_headers.py`.
 * Tokens live in `sessionStorage`, not `localStorage`: an operator's
   credentials should not outlive the browser session on a shared control-room
   workstation.
-* `X-Forwarded-For` is trusted **only** because nginx sets it and nothing else
-  can reach the API. Exposed directly, that header is caller-controlled and the
-  rate limiter's client key would need revisiting.
+* `X-Forwarded-For` is believed **only from the web tier's nginx**, whose
+  address is pinned (`FORWARDED_ALLOW_IPS`); any other caller is identified by
+  its socket peer, so a forged header changes neither the rate limiter's key nor
+  the audit trail's client address (§8, S11; `tests/test_client_address.py`).
 * `GET /metrics` is **unauthenticated and exempt from rate limiting**, and
   deliberately so: a scraper that needs a token is a scraper that stops working
   when the token expires, and a throttled probe reports the service unhealthy.
   It carries aggregate counters only — no plate, no camera, no user. It does
   reveal *volume*, which is not nothing in a surveillance system, so a
   deployment exposing it beyond the internal network should restrict it at the
-  ingress rather than behind application auth.
+  ingress rather than behind application auth. `GET /metrics/prometheus`, the same
+  picture for Prometheus, follows the same rules; its labels are route *templates*,
+  camera codes and worker ids — never a plate, a person or a user. Prometheus and
+  Grafana (`make monitoring`) listen on 127.0.0.1 only.
+
+### 6.1 TLS
+
+The web container serves the same application twice: plain HTTP on :8080, which
+the demo uses, and **HTTPS on :8443** (`web/nginx.conf`).
+
+* **Certificate.** `cert.pem` and `key.pem` mounted in `infra/tls/` are used as-is —
+  for a browser that trusts it, make them with mkcert
+  (`mkcert -install && mkcert -cert-file infra/tls/cert.pem -key-file infra/tls/key.pem localhost 127.0.0.1 ::1`,
+  then `docker compose up -d --no-deps web`). With nothing mounted, the container
+  generates a self-signed RSA-2048 certificate at start
+  (`web/docker/30-contrail-tls.sh`), valid 397 days for `localhost`, `127.0.0.1`,
+  `::1` and `TLS_SERVER_NAMES` / `TLS_SERVER_IPS`, writes it to `infra/tls/` and reuses
+  it after; the browser warns once. The key is checked against the certificate
+  before nginx starts. `infra/tls/*` is gitignored. TLS 1.2 and 1.3 only.
+* **Nothing on the HTTPS page is fetched over HTTP.** The bundle's API base
+  (`http://localhost:8000` in the demo) gives way to the page's own origin on an
+  `https:` page (`web/src/lib/apiBase.ts`), so API calls and the live feed go through
+  nginx (`wss://…/ws/events`). For requests that arrive over TLS the API returns
+  plate crops and face media under `/media/` and our gateway's WHEP and HLS under
+  `/gateway/` on the same origin (`app/core/public_origin.py`); nginx proxies them.
+  Over HTTP every URL is exactly what it was. MEASURED in Chrome on :8443 with the
+  CSP enforced: WebRTC through the proxied WHEP, 12 of 12 crops loaded, no request
+  over plain HTTP, no console error.
+* **The proxies are read-only.** `/media/` passes GET only, path and query byte for
+  byte, to the host the URL was signed for; a PUT is refused (403). `/gateway/webrtc/`
+  passes only a POST to `<path>/whep`, and MediaMTX itself now asks the API about
+  every publish and read (§8, S3): only the simulator's identity may publish, so
+  WHIP through the proxy is refused twice over. Both are asserted by
+  `tests/e2e/test_web_tls.py` and `tests/test_gateway_auth.py`.
+* **HSTS** is sent on the HTTPS server only, and only for real hostnames. HSTS is per
+  host, not per port: sent for `localhost` it would upgrade the demo's own
+  `http://localhost:8080` to HTTPS and break it.
+* Not covered: the :8080 demo and traffic between containers are still plain
+  HTTP. Since 12 Oct the API, MinIO and MediaMTX ports listen on `127.0.0.1`
+  only, so that cleartext no longer crosses the venue network (§8, S2, S4).
 
 ### Federated sources
 
@@ -333,16 +373,47 @@ legal input, as for the plate watchlist.
 ## 8. What is not implemented
 
 Stated plainly, because a security document that omits its gaps is misleading.
+The S-numbers are the 12 Oct review's (`docs/review/SENTINEL_JUDGE_REVIEW.md`
+§5.2); [HLD §16.7](HLD.md#167-current-prototype-against-production) tracks the
+same list.
+
+### 8.1 Closed on 12 Oct — what is true of the running stack now
+
+Each verified against the live stack after the change, not only in tests.
+
+| # | Was | Now | Evidence |
+|---|---|---|---|
+| S1 | Plate-crop bucket world-readable | Private; presigned links only | `b4df4d1` |
+| S2 | Postgres, Redis (no password), MinIO, OpenSearch, MediaMTX API/RTSP/HLS/WHEP and the API on every interface | **Only web :8080 and :8443 listen beyond the laptop.** Every other port is published on `127.0.0.1` (`docker-compose.yml`). Redis requires a password (`requirepass`); every client — API, ingest, the three workers, the simulator, the scale consumers, the native worker — connects with it | From the LAN address, 6379, 5432, 9000, 9001, 9200, 9997, 8554, 8888, 8889, 8000 and 9100 refuse; 8080 and 8443 answer. `redis-cli PING` and `XADD` without the password → `NOAUTH` |
+| S3 | Our own cameras (CAM-DEMO-01/02) played without a token; anything on the bridge network could publish | MediaMTX runs `authMethod: http` and asks the API about **every** publish and read (`app/routers/gateway_auth.py`). Publish: the simulator's identity only. Read: the workers' identity, or a browser's camera-scoped, ~2-minute stream token — issued and audited as `camera.view` — on the WHEP/HLS URL, valid only for that camera's path and only over WebRTC/HLS. Nothing else; the API down means new sessions are refused, not let through | Anonymous RTSP, WHEP and HLS reads of CAM-DEMO-01 → 401, direct and via :8443; anonymous publish → refused; a forged token → 401; the grant's own URLs play. `tests/test_gateway_auth.py`, `services/ai-worker/tests/test_gateway_credentials.py` |
+| S5 | One shared password, committed in `scripts/seed.py`, for supervisor, operator, analyst and auditor — and the same value for admin and the API client | **Every seeded account has its own generated password** (`BOOTSTRAP_ADMIN_PASSWORD`, `DEMO_PASSWORD_<USERNAME>` in `.env`, written by `make env`), and is flagged `must_change_password`. The login page no longer prefills or prints a password. Seed output names the `.env` key, never the value | All six log in with their own password; `NagarNetra@2026` → 401 for every one |
+| S11 | The login limiter and the audit trail took the first `X-Forwarded-For` entry as sent, and uvicorn trusted every peer (`--forwarded-allow-ips "*"`) | Forwarded headers are believed **only from the web tier's nginx** (`FORWARDED_ALLOW_IPS`, pinned to its fixed address); anyone else is their socket peer. Through nginx the client is the right-most address nginx did not vouch for, so a value written in front of it changes nothing | `tests/test_client_address.py`: rotating `X-Forwarded-For` on every wrong password still hits 429, direct and through the proxy |
+| — | Development passwords as compose fallbacks; the running stack used the values published in `.env.example` (including the JWT signing key — anyone with the repository could mint an admin token) | **No password in the running stack appears in this repository.** Compose has no fallbacks: an unset secret stops it with `<KEY> is not set - run make env`. `make env` generates every secret per install (`scripts/gen_secrets.py`, prints names only, `.env` mode 0600). The JWT key, Postgres, MinIO root and Grafana admin passwords were rotated on the live stack | `docker compose --env-file .env.example config` fails on the first empty secret |
+
+**Rotating a secret on a running stack** (what `gen_secrets.py --rotate-published`
+reports as needing to be applied): Postgres — `ALTER ROLE … PASSWORD` inside the
+container *before* recreating its clients, since `POSTGRES_PASSWORD` only applies
+to an empty data directory; MinIO, Redis, MediaMTX identities and the JWT key —
+`docker compose up -d` (and the AI profiles) recreates every container that reads
+them; Grafana — `grafana cli admin reset-admin-password` inside its container; the
+seeded accounts — `python -m scripts.seed --only users --reset-demo-passwords`.
+Rotating the JWT key signs everyone out.
+
+### 8.2 Still open
 
 | Gap | Consequence | Notes |
 |---|---|---|
-| **No TLS** | All traffic — credentials, plate reads, video URLs — is cleartext | Disqualifying for deployment. Terminate at nginx or an ingress; the app is already single-origin, so this is configuration, not redesign |
-| **No volume/object encryption at rest** | The database volume and object storage are unencrypted, so anyone with the disk has the plate history | Postgres TDE or encrypted volumes; MinIO SSE. Application-level AES-256-GCM now exists (`app/core/crypto.py`) and covers sealed credential values only — it is not a substitute for either |
-| **No backups, no tested restore** | An RPO/RTO cannot be claimed | No `pg_dump` schedule, no restore drill |
-| **Media retention unwired** | The 90-day media rule deletes nothing | Evidence crops are not yet uploaded to MinIO at all |
-| **Plate detector weights are AGPL-3.0** | Licence obligation on the deployed artifact | Must be replaced or the obligation accepted before shipping |
-| **No penetration test** | Unknown unknowns | |
-| **mypy does not pass** | 33 errors, 11 files | `make lint` does not run it; CLAUDE.md §5's claim is currently false |
+| **TLS only at the web tier** (S4) | Over :8443 the browser's traffic is encrypted (§6.1). The :8080 demo and every hop between containers — API, Redis, Postgres, MinIO, MediaMTX — are cleartext. The data-tier ports no longer listen beyond the laptop (8.1), so that cleartext no longer crosses the venue network | Production: TLS to the bus, database and object store; only an ingress in front of :8443 published |
+| **The internal network is one trust zone** | Any container on the bridge reaches Postgres, Redis and MinIO with the shared service credentials, and the MediaMTX control API (excluded from the auth callback, so the API and the healthcheck do not depend on each other) without any | Per-service identities and network policies (HLD §16.2); MediaMTX API behind its own credential |
+| **OpenSearch security plugin off** | No authentication on the index; reachable only from the bridge network and this machine's loopback | Security plugin on, TLS, a service user |
+| **One service credential per store** (S7) | Every service uses the one Postgres role and the MinIO root user; presigned URLs carry the root access key id. The MinIO password is no longer public, so those links cannot be forged | A read-only MinIO service account for signing; INSERT-only and read-only Postgres roles per service |
+| **`ENVIRONMENT=development`** (S6) | Development behaviour (configuration logging at debug, `/docs` open). Logged configuration now redacts the passwords inside `DATABASE_URL` and `REDIS_URL` | A production profile |
+| **Audit log not tamper-evident** (S8) | Someone with database access can rewrite history | INSERT-only grant, hash chain, WORM export (HLD §16.5) |
+| **Stream tokens are bearer URLs for their two minutes** | The token rides in the WHEP/HLS query string, so it appears in MediaMTX and proxy request lines and in browser history. It is camera-scoped and dies in ~2 minutes; a session already open outlives it, by design | Short enough that a leaked URL is useless by the time it is read; a production gateway would bind the session to the operator's TLS client |
+| **No volume/object encryption at rest** | The database volume and object storage are unencrypted, so anyone with the disk has the plate history | Postgres TDE or encrypted volumes; MinIO SSE. Application-level AES-256-GCM (`app/core/crypto.py`) covers sealed credential values only |
+| **Backups are manual and unencrypted** | `make backup` is verified by restore, but nothing runs it on a schedule, nothing copies it off-site, and the directory holds plate histories and faces in clear | Encrypt and copy off-site by the procedure in [INFRASTRUCTURE §8.4](INFRASTRUCTURE.md#84-backups); time a live restore before claiming an RPO/RTO |
+| **Plate detector weights are AGPL-3.0** (S9) | Licence obligation on the deployed artifact | Must be replaced or the obligation accepted before shipping |
+| **No penetration test** | Unknown unknowns | The 12 Oct review was an internal, anonymous-request probe, not a pen test |
 
 **None of these is hidden anywhere else in this repository.** `docs/BUILD_STATE.md`
 carries the same list.

@@ -40,9 +40,14 @@ The **feed pill** at the right of the top bar says **Live** (pulsing) while
 reads and alarms are arriving. Anything else means every figure on screen is
 historical — see [PANIC §2](PANIC.md#2-no-plates-are-appearing).
 
-Sign in as `admin` with the password in `.env` (`BOOTSTRAP_ADMIN_PASSWORD`).
-The other roles (`supervisor`, `operator`, `analyst`, `auditor`) use the demo
-password `make seed` prints.
+Every account has its own password, generated for this install by `make env`
+and kept only in `.env` (gitignored): `admin` → `BOOTSTRAP_ADMIN_PASSWORD`;
+`supervisor`, `operator`, `analyst`, `auditor` → `DEMO_PASSWORD_SUPERVISOR`,
+`_OPERATOR`, `_ANALYST`, `_AUDITOR`. There is no shared demo password, and
+neither the login page nor `make seed` shows one — read it from `.env` off
+screen. To let a judge try a role, hand them that one account's password on
+paper; never put `.env` on the projector. The old `NagarNetra@2026` is refused
+for every account.
 
 ---
 
@@ -69,7 +74,7 @@ for w in contrail-ai-worker contrail-ai-worker-2 contrail-ai-worker-3; do
 In the browser at **http://localhost:8080**:
 
 - [ ] Feed pill says **Live**
-- [ ] **Command** — the "Reading now" strip is moving and Paldi (CAM-DEMO-01) ripples
+- [ ] **Command** — the "Reading now" strip is moving and the recorded clip (CAM-DEMO-01) ripples
 - [ ] **Alarms** — no test alarm left open (nothing with case `FIR/E2E/…` or a demo case from a rehearsal)
 - [ ] **Watchlist** — the ten `DEMO/…` entries are watched (§6); the plate you mean to add live is **not** already on it
 - [ ] **Network → Cameras** — 32 cameras: 30 from the organisers' grid, 2 recorded clips (CAM-DEMO-01 plates, CAM-DEMO-02 persons)
@@ -130,6 +135,24 @@ department, and the screen says so rather than guessing one.
    docker compose exec -T api python /app/scripts/sync_sandbox.py             # then write
    ```
    New cameras join the workers' rotation within a minute; no restart.
+6. **If the jury hands us a camera** (an RTSP URL, often with a username and password, from an
+   NVR or a phone app), see JURY_PREP.md §2.7. In short:
+   - **Onboard camera → Live stream URL.** Paste the URL exactly as given, password included.
+     The form moves the login into **Username / Password** and says so. The password is sealed
+     (AES-256-GCM) in the camera's `credentials_ref` and is never shown, logged or audited
+     again. A typed username and password work the same way.
+   - **Measured on a password-protected stand-in camera (12:49 IST):**
+     - 201 in 0.4 s;
+     - in the AI roster at +0.7 s;
+     - health **online** at +3.0 s (probed at onboarding, with its login);
+     - once Live is opened, a worker reads the stream after **1.2 s**;
+     - the first plate is on screen **7 s** after opening Live.
+   - Open Live straight away; there is no discovery pass to wait for.
+   - A wrong password shows as `unauthorized` on the camera's health within about 4 s.
+   - **A video file:** copy it into `data/videos/` and onboard it with **Recorded video**. It
+     starts playing by itself: path ready at +1.6 s, first plate 5.9 s after opening Live.
+   - **Clean-up:** delete the camera (admin) **before** stopping its source, so that no
+     `camera_down` alarm is raised.
 
 ### 2.3 Track the vehicle number given on the day (4 min) — the scored task
 
@@ -258,7 +281,7 @@ Quote only these, and say which kind each is.
 
 The **Live** screen shows the current capture-to-event latency for the camera on
 stage; read that rather than the table if it is better or worse. Details:
-[HLD §6](HLD.md#6-measured-performance) and [§7](HLD.md#7-scaling-to-80000-cameras).
+[HLD §15](HLD.md#15-scale-evidence) and [§21](HLD.md#21-scalability-strategy).
 
 ### 2.8 Who looked at what (optional, 1 min)
 

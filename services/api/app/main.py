@@ -15,13 +15,16 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request, Response
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
 
 from app.core import public_origin
 from app.core.config import settings
 from app.core.logging import configure_logging, get_logger, request_id_var
 from app.core.ratelimit import RateLimitMiddleware
+from app.core.validation_errors import validation_exception_handler
 from app.db.session import dispose_engine
 from app.middleware.audit import AuditMiddleware
 from app.middleware.metrics import MetricsMiddleware
@@ -35,6 +38,7 @@ from app.routers import (
     events,
     fleet,
     gap_report,
+    gateway_auth,
     grid_media,
     health,
     persons,
@@ -66,10 +70,12 @@ configure_logging(service="api")
 log = get_logger("api")
 
 DESCRIPTION = """
-**NagarNetra** — city-wide vehicle intelligence platform.
+**Contrail** — statewide federated CCTV and vehicle-intelligence platform, built for
+the Gujarat Police CCTV Hackathon *Sentinel*.
 
 Federates existing multi-vendor, multi-department CCTV rather than replacing it
-(reference Model 5 — Hybrid). Departmental VMS remain authoritative for their own
+(Model 5 — Hybrid: Model 1 registry + GIS, Model 3 federation middleware, selective
+Model 2 viewing). Departmental VMS remain authoritative for their own
 video; this platform ingests metadata centrally, pulls streams on demand, and runs
 AI at the edge so that **the central tier carries events, not video**.
 
@@ -150,11 +156,15 @@ app = FastAPI(
     redoc_url="/redoc",
     openapi_url="/openapi.json",
     contact={
-        "name": "NagarNetra",
+        "name": "Contrail",
         "url": "https://github.com/makvana-vaibhav/SIH-ANPR-Vehicle-Tracking",
     },
     license_info={"name": "Apache-2.0"},
 )
+
+# A 422 never echoes a password or a credentialed URL back in its `input`
+# (FastAPI's default puts the whole body there for a model-level error).
+app.add_exception_handler(RequestValidationError, validation_exception_handler)
 
 # Starlette runs middleware in reverse registration order, so what is added
 # last is outermost. The intended order, outermost first, is:
@@ -251,6 +261,17 @@ async def request_context(
     return response
 
 
+# Outermost of all, so every layer inside — the request log, metrics, the rate
+# limiter, the audit trail, the HTTPS media URLs — sees one answer to "who is
+# the client". X-Forwarded-For and X-Forwarded-Proto are believed only from
+# FORWARDED_ALLOW_IPS (the web tier's nginx); from anyone else they are ignored
+# and the socket peer is the client. Through the proxy the client is the
+# right-most address the proxy did not vouch for, so a value a caller writes
+# into the header themselves cannot be chosen either. uvicorn is started with
+# --no-proxy-headers so this is the only place the decision is made.
+app.add_middleware(ProxyHeadersMiddleware, trusted_hosts=settings.forwarded_allow_ips)
+
+
 # ── Routers ───────────────────────────────────────────────────────────
 # Later phases mount cameras, events, watchlist, alerts, search, vehicles, admin.
 app.include_router(health.router)
@@ -258,6 +279,7 @@ app.include_router(auth.router)
 app.include_router(cameras.router)
 app.include_router(fleet.router)
 app.include_router(streams.router)
+app.include_router(gateway_auth.router)
 app.include_router(grid_media.router)
 app.include_router(events.router)
 app.include_router(detections.router)
@@ -281,9 +303,15 @@ async def root() -> dict[str, object]:
     """Human-readable entrypoint pointing at the interactive docs."""
     return {
         "service": settings.app_name,
-        "description": "City-wide vehicle intelligence platform — SIH26127",
+        "description": (
+            "Statewide federated CCTV and vehicle-intelligence platform"
+            " — Gujarat Police CCTV Hackathon (Sentinel)"
+        ),
         "version": app.version,
-        "model": "Hybrid (Model 5): Registry+GIS + Federation middleware + selective unified viewing",
+        "model": (
+            "Hybrid (Model 5): Model 1 registry + GIS, Model 3 federation"
+            " middleware, selective Model 2 viewing"
+        ),
         "docs": "/docs",
         "health": "/health",
         "ready": "/ready",

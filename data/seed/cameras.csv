@@ -1,3 +1,3 @@
 camera_code,name,department_code,district,city,junction,corridor,lat,lon,heading_deg,camera_type,protocol,stream_url,resolution,fps,anpr_enabled,tags
-CAM-DEMO-01,Paldi — Ashram Road,MUNICIPAL,Sabarmati,Ahmedabad,Ashram Road @ Paldi,Ashram Road,23.009370,72.562120,28,anpr,rtsp,,1920x1080,15,True,demo|recorded-footage|not-a-real-camera|plate-region:GB|ash|arterial|sabarmati
+CAM-DEMO-01,Recorded demo clip (UK road) — not a Gujarat camera,MUNICIPAL,Sabarmati,Ahmedabad,Ashram Road @ Paldi,Ashram Road,23.009370,72.562120,28,anpr,rtsp,,1920x1080,15,True,demo|recorded-footage|not-a-real-camera|plate-region:GB|ash|arterial|sabarmati
 CAM-DEMO-02,Persons demo — recorded footage,MUNICIPAL,,,,,22.258700,71.192400,0,fixed,rtsp,,1920x1080,15,False,demo|recorded-footage|not-a-real-camera|analytics:faces|placement:unknown

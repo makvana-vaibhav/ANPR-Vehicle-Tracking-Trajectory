@@ -14,6 +14,11 @@ happen. Two kinds arrive, and the client should treat them differently:
 Authentication is by query-string token, not header: browsers give no way to
 set headers on a WebSocket handshake. The token is the same short-lived access
 token every other endpoint takes.
+
+What arrives depends on the role (app/services/feed_policy.py): plate text
+needs `search.execute` and crops need `stream.view` as well, exactly as on the
+REST endpoints. Operators, supervisors and admins hold both and receive every
+event unchanged; a role that may receive nothing is refused the socket.
 """
 
 from __future__ import annotations
@@ -29,6 +34,7 @@ from app.core.logging import get_logger
 from app.core.security import TokenError, TokenPayload, decode_token
 from app.services.event_bus import broadcaster
 from app.services.evidence import crop_url
+from app.services.feed_policy import FeedPolicy
 from app.services.token_store import is_revoked
 
 log = get_logger("events")
@@ -96,6 +102,12 @@ async def event_feed(websocket: WebSocket, token: str | None = Query(default=Non
         )
         return
 
+    policy = FeedPolicy.for_role(claims.role)
+    if not policy.receives_anything:
+        # `api_client`: an onboarding key has no business watching the fleet.
+        await websocket.close(code=status.WS_1008_POLICY_VIOLATION, reason="role has no live feed")
+        return
+
     await websocket.accept()
     # Crop URLs in this feed follow the scheme the socket came in on, as they
     # do for HTTP requests (app/core/public_origin.py). Bound for the life of
@@ -117,7 +129,12 @@ async def event_feed(websocket: WebSocket, token: str | None = Query(default=Non
                 # culled by something in the middle.
                 await websocket.send_json({"event": "keepalive"})
                 continue
-            await websocket.send_json(_with_crop_url(event))
+            outgoing = policy.apply(event)
+            if outgoing is None:
+                continue
+            # Signed only for a subscriber entitled to see crops; the policy
+            # has already dropped the key for anyone else.
+            await websocket.send_json(_with_crop_url(outgoing) if policy.imagery else outgoing)
     except WebSocketDisconnect:
         log.info("events.disconnected", user=subject)
     except (RuntimeError, ConnectionError) as exc:

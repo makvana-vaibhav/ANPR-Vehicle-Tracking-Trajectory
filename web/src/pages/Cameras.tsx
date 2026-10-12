@@ -52,8 +52,10 @@ import {
   positionKind,
   readCameraParam,
   readPositionFilter,
+  POSITION_WORDS,
   SOURCE_LABEL,
   sourceKind,
+  staleWords,
   STATUS_LABEL,
   STATUS_ORDER,
   tagsAfterPlacing,
@@ -95,6 +97,7 @@ import { useAuth } from '@/hooks/useAuth'
 import * as api from '@/lib/api'
 import { PERMISSIONS } from '@/lib/permissions'
 import { isUnplaced } from '@/lib/places'
+import { splitStreamCredentials } from '@/lib/streamUrl'
 import type { Camera, Department, VmsInstance } from '@/lib/types'
 
 /** Which slide-over is open, if any. */
@@ -138,6 +141,12 @@ const EMPTY = {
   camera_type: 'fixed',
   protocol: 'rtsp',
   stream_url: '',
+  /** The camera's own login. Write-only: sent once, sealed by the API, never
+   *  shown again. A login pasted inside the URL lands here too. */
+  stream_username: '',
+  stream_password: '',
+  /** Editing only: forget the stored login. */
+  clear_credentials: false,
   /** 'live' → pull an RTSP/ONVIF URL. 'recorded' → replay a clip from the
    *  video directory. One camera, two ways to give it pictures. */
   source_kind: 'live' as 'live' | 'recorded',
@@ -172,6 +181,8 @@ export default function Cameras() {
   const [busy, setBusy] = useState(false)
   const [form, setForm] = useState<Form>({ ...EMPTY })
   const [editing, setEditing] = useState<Camera | null>(null)
+  /** Set when a pasted URL had a login in it, which the form moved out. */
+  const [loginMoved, setLoginMoved] = useState(false)
   const [filter, setFilter] = useState<LocalFilter>(NO_FILTER)
   const [page, setPage] = useState(0)
 
@@ -264,8 +275,30 @@ export default function Cameras() {
   const set = (key: keyof Form, value: string | boolean) =>
     setForm((current) => ({ ...current, [key]: value }))
 
+  /**
+   * The stream URL as typed or pasted, with any `user:pass@` moved straight
+   * into the login fields. The password never sits in the URL field — or in
+   * a screenshot of it — for longer than the paste.
+   */
+  function setStreamUrl(value: string) {
+    const split = splitStreamCredentials(value)
+    if (split.username === null && split.password === null) {
+      set('stream_url', value)
+      return
+    }
+    setForm((current) => ({
+      ...current,
+      stream_url: split.url,
+      stream_username: split.username ?? current.stream_username,
+      stream_password: split.password ?? '',
+      clear_credentials: false,
+    }))
+    setLoginMoved(true)
+  }
+
   function startCreate() {
     setEditing(null)
+    setLoginMoved(false)
     setForm({ ...EMPTY })
     setDrawer('camera')
   }
@@ -273,6 +306,7 @@ export default function Cameras() {
   function startEdit(camera: Camera) {
     const unknown = isUnplaced(camera)
     setEditing(camera)
+    setLoginMoved(false)
     setForm({
       camera_code: camera.camera_code,
       name: camera.name,
@@ -291,6 +325,10 @@ export default function Cameras() {
       // so anything shown here would be an invention. Left empty it means
       // "keep whatever is configured".
       stream_url: '',
+      // Never returned, so never prefilled: blank means "keep what is stored".
+      stream_username: '',
+      stream_password: '',
+      clear_credentials: false,
       // `source_file` *is* returned, so unlike the URL this can be shown and
       // edited truthfully, and a camera already replaying a clip opens on the
       // recorded tab with that clip selected.
@@ -305,6 +343,7 @@ export default function Cameras() {
 
   const closeForm = useCallback(() => {
     setEditing(null)
+    setLoginMoved(false)
     setForm({ ...EMPTY })
     setDrawer('none')
   }, [])
@@ -354,6 +393,14 @@ export default function Cameras() {
       // live URL and a clip both claiming to be its pictures.
       stream_url: recorded ? null : form.stream_url.trim() || null,
       source_file: recorded ? form.source_file || null : null,
+      // Sent only when typed. On an edit, blank means "keep the stored login";
+      // the API never sends it back, so there is nothing to compare against.
+      ...(!recorded && form.stream_username.trim()
+        ? {
+            stream_username: form.stream_username.trim(),
+            ...(form.stream_password ? { stream_password: form.stream_password } : {}),
+          }
+        : {}),
       resolution: form.resolution.trim() || null,
       fps: form.fps === '' ? null : Number(form.fps),
       anpr_enabled: form.anpr_enabled,
@@ -368,6 +415,7 @@ export default function Cameras() {
         // mean delete without silently disconnecting cameras on every edit.
         if (!form.stream_url.trim()) delete body.stream_url
         const changes = amendment(editing, body)
+        if (form.clear_credentials && !form.stream_username.trim()) changes.clear_credentials = true
         if (changes.lat !== undefined) {
           // Typed-in coordinates answer what the grid's placement tag
           // recorded as unknown; a stale tag would keep the camera off the
@@ -396,7 +444,8 @@ export default function Cameras() {
         await api.createCamera(created)
         toast.success(
           created.anpr_enabled && (created.stream_url || created.source_file)
-            ? `${created.camera_code} onboarded — plate reading starts within a minute`
+            ? `${created.camera_code} onboarded — open it in Live and plate reading starts within seconds` +
+                (created.stream_username ? '. Its login is stored encrypted.' : '')
             : `${created.camera_code} onboarded as a registry record (no stream)`,
         )
       }
@@ -655,6 +704,14 @@ export default function Cameras() {
                         </Td>
                         <Td className="whitespace-nowrap">
                           <StatusBadge status={camera.status} label={STATUS_LABEL[camera.status]} />
+                          {staleWords(camera) && (
+                            <span
+                              className="ml-1.5 text-[10px] uppercase tracking-[0.06em] text-faint"
+                              title={staleWords(camera) ?? undefined}
+                            >
+                              last known
+                            </span>
+                          )}
                         </Td>
                         <Td className="whitespace-nowrap">
                           <Badge tone={SOURCE_TONE[sourceKind(camera)]}>
@@ -898,6 +955,7 @@ export default function Cameras() {
                   ]}
                 />
                 {form.source_kind === 'live' ? (
+                  <div className="space-y-3">
                   <Field
                     label="Stream URL"
                     hint={
@@ -910,18 +968,78 @@ export default function Cameras() {
                   >
                     <Input
                       value={form.stream_url}
-                      onChange={(e) => set('stream_url', e.target.value)}
+                      onChange={(e) => setStreamUrl(e.target.value)}
                       placeholder="rtsp://10.0.0.24:554/Streaming/Channels/101"
                       className="font-mono text-xs"
+                      autoComplete="off"
+                      spellCheck={false}
                     />
                   </Field>
+                  {loginMoved && (
+                    <p
+                      role="status"
+                      className="rounded-md border border-primary/30 bg-primary/5 px-2.5 py-1.5 text-xs leading-relaxed text-foreground"
+                    >
+                      The username and password were taken out of the URL. The password goes to the
+                      encrypted credential store, is used only when the stream is opened, and is
+                      never shown again.
+                    </p>
+                  )}
+                  <div className="grid gap-3 sm:grid-cols-2">
+                    <Field
+                      label="Username"
+                      hint={
+                        editing?.has_credentials
+                          ? 'A login is stored. Leave blank to keep it.'
+                          : 'If the camera or NVR asks for one'
+                      }
+                    >
+                      <Input
+                        name="camera-stream-username"
+                        value={form.stream_username}
+                        onChange={(e) => set('stream_username', e.target.value)}
+                        placeholder={editing?.has_credentials ? 'Stored' : 'admin'}
+                        autoComplete="off"
+                        spellCheck={false}
+                        className="font-mono text-xs"
+                      />
+                    </Field>
+                    <Field label="Password" hint="Encrypted at rest; never sent back to the browser">
+                      <Input
+                        name="camera-stream-password"
+                        type="password"
+                        value={form.stream_password}
+                        onChange={(e) => set('stream_password', e.target.value)}
+                        placeholder={editing?.has_credentials ? '••••••' : ''}
+                        // Not the operator's own sign-in: stop the browser
+                        // offering it, or saving this one as a site login.
+                        autoComplete="new-password"
+                        className="font-mono text-xs"
+                      />
+                    </Field>
+                  </div>
+                  {editing?.has_credentials && (
+                    <Checkbox
+                      checked={form.clear_credentials}
+                      onChange={(e) => set('clear_credentials', e.target.checked)}
+                      label={
+                        <>
+                          Remove the stored login{' '}
+                          <span className="text-xs text-muted-foreground">
+                            — for a camera that no longer asks for one
+                          </span>
+                        </>
+                      }
+                    />
+                  )}
+                  </div>
                 ) : (
                   <Field
                     label="Recorded clip"
                     hint={
                       sourceVideos.length === 0
                         ? 'No clips found in the video directory. Drop an .mp4 into data/videos/ and reopen this form.'
-                        : 'Replayed on a loop as this camera’s feed. Copy the file into data/videos/ and it appears here.'
+                        : 'Replayed on a loop as this camera’s feed, starting as soon as you onboard it. Copy the file into data/videos/ and it appears here.'
                     }
                   >
                     <Select
@@ -1007,7 +1125,7 @@ export default function Cameras() {
                 <>
                   Analyse this camera for number plates{' '}
                   <span className="text-xs text-muted-foreground">
-                    — the worker picks it up on its next discovery pass
+                    — the AI workers pick it up within seconds
                   </span>
                 </>
               }
@@ -1070,6 +1188,16 @@ function PositionCell({ camera }: { camera: Camera }) {
     return (
       <span className="text-xs text-muted-foreground" title="The grid gives the town, not the junction">
         Town centre
+      </span>
+    )
+  }
+  if (kind === 'approx') {
+    return (
+      <span className="whitespace-nowrap text-[11px]" title={POSITION_WORDS.approx}>
+        <span className="coord text-faint">
+          {camera.lat.toFixed(3)}, {camera.lon.toFixed(3)}
+        </span>{' '}
+        <span className="text-muted-foreground">approx. · from name</span>
       </span>
     )
   }

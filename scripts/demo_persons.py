@@ -39,7 +39,21 @@ import httpx  # noqa: E402
 API_URL = os.environ.get("NAGARNETRA_API_URL", "http://localhost:8000") + "/api/v1"
 #: Seeded demo accounts. Two of them, deliberately: the second pair of eyes.
 ENROLLER, APPROVER = "supervisor", "admin"
-DEMO_PASSWORD = os.environ.get("DEMO_PASSWORD", "NagarNetra@2026")
+#: Each seeded account has its own password (scripts/seed.py), from .env via
+#: the container's environment: BOOTSTRAP_ADMIN_PASSWORD, DEMO_PASSWORD_<USER>.
+PASSWORD_KEYS = {"admin": "BOOTSTRAP_ADMIN_PASSWORD"}
+
+
+def password_for(username: str) -> str:
+    key = PASSWORD_KEYS.get(
+        username, "DEMO_PASSWORD_" + username.upper().replace("-", "_")
+    )
+    value = os.environ.get(key, "")
+    if not value:
+        sys.exit(f"{key} is not set — run `make env` and recreate the api container")
+    return value
+
+
 CLIP = Path(os.environ.get("PERSONS_DEMO_CLIP", "/data/videos/persons_demo.mp4"))
 MODELS = Path(os.environ.get("FACE_MODELS_DIR", "/models"))
 CASE_REF = "DEMO/PERSONS/001 (fictional)"
@@ -82,7 +96,7 @@ def reference_photo(person: int) -> bytes:
 
 def login(client: httpx.Client, username: str) -> dict[str, str]:
     response = client.post(
-        "/auth/login", json={"username": username, "password": DEMO_PASSWORD}
+        "/auth/login", json={"username": username, "password": password_for(username)}
     )
     response.raise_for_status()
     return {"Authorization": f"Bearer {response.json()['access_token']}"}

@@ -8,7 +8,9 @@ through an ASGI transport with no network involved.
 
 from __future__ import annotations
 
-from collections.abc import AsyncGenerator, Iterator
+import ipaddress
+import os
+from collections.abc import AsyncGenerator, Callable, Iterator
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -67,6 +69,27 @@ def _relax_rate_limits() -> Iterator[None]:
         ) = original
 
 
+@pytest.fixture(autouse=True)
+def _no_simulator_control() -> Iterator[None]:
+    """Keep the suite from starting replays on the live simulator.
+
+    Creating a camera with a recorded clip makes the API ask the simulator to
+    publish it (app/services/simulator_control.py). Against the live stack
+    that would put test cameras' footage into the real gateway, so the calls
+    are off unless a test turns them on — and the tests that do point them at
+    a mock transport, never at the simulator.
+    """
+    original = (app_settings.simulator_control_url, app_settings.probe_on_onboard)
+    app_settings.simulator_control_url = ""
+    # Likewise the probe straight after onboarding: test cameras point at
+    # addresses that do not answer, and each would wait out the probe timeout.
+    app_settings.probe_on_onboard = False
+    try:
+        yield
+    finally:
+        app_settings.simulator_control_url, app_settings.probe_on_onboard = original
+
+
 @pytest.fixture
 async def client() -> AsyncGenerator[AsyncClient, None]:
     """An HTTP client bound directly to the ASGI app.
@@ -82,6 +105,35 @@ async def client() -> AsyncGenerator[AsyncClient, None]:
         yield async_client
 
 
+def trusted_proxy() -> str:
+    """An address the API believes X-Forwarded-For from (FORWARDED_ALLOW_IPS).
+
+    In compose that is the web tier's nginx, pinned in docker-compose.yml.
+    """
+    first = app_settings.forwarded_allow_ips.split(",")[0].strip()
+    if first == "*":
+        raise RuntimeError("FORWARDED_ALLOW_IPS=* trusts every caller; set the proxy's address")
+    network = ipaddress.ip_network(first, strict=False)
+    return str(network.network_address if network.num_addresses == 1 else next(network.hosts()))
+
+
+@pytest.fixture
+def client_from() -> Callable[[str], AsyncClient]:
+    """A client whose connection arrives from a given address.
+
+    What the trusted-proxy middleware decides depends on the socket peer, which
+    the default client fixes at 127.0.0.1.
+    """
+
+    def _make(peer: str) -> AsyncClient:
+        return AsyncClient(
+            transport=ASGITransport(app=app, client=(peer, 40000)),
+            base_url="http://nagarnetra.test",
+        )
+
+    return _make
+
+
 @pytest.fixture
 def settings() -> Settings:
     """The process-wide settings object."""
@@ -90,9 +142,26 @@ def settings() -> Settings:
 
 # ── Authentication helpers ────────────────────────────────────────────
 # The seeded demo accounts (scripts/seed.py) give one user per role, which is
-# exactly what the RBAC matrix tests need.
+# exactly what the RBAC matrix tests need. Each has its own password, generated
+# into .env by `make env` (scripts/gen_secrets.py) and reaching this container
+# through env_file: BOOTSTRAP_ADMIN_PASSWORD for the admin, and
+# DEMO_PASSWORD_<USERNAME> (upper-cased, `-` as `_`) for the rest. They used to
+# share one password committed in the seed script.
 
-DEMO_PASSWORD = "NagarNetra@2026"
+
+def demo_password(username: str) -> str:
+    """The password a seeded demo account was given."""
+    if username == app_settings.bootstrap_admin_username:
+        return app_settings.bootstrap_admin_password
+    key = "DEMO_PASSWORD_" + username.upper().replace("-", "_")
+    value = os.environ.get(key, "")
+    if not value:
+        raise RuntimeError(
+            f"{key} is not set. Run `make env` and recreate the api container, "
+            "then `make seed` (or `python -m scripts.seed --reset-demo-passwords`)."
+        )
+    return value
+
 
 DEMO_ACCOUNTS = {
     "admin": "admin",
@@ -112,7 +181,7 @@ async def login(client: AsyncClient):
         username = DEMO_ACCOUNTS[role]
         response = await client.post(
             "/api/v1/auth/login",
-            json={"username": username, "password": DEMO_PASSWORD},
+            json={"username": username, "password": demo_password(username)},
         )
         assert response.status_code == 200, (
             f"login as {username} failed: {response.status_code} {response.text}. "

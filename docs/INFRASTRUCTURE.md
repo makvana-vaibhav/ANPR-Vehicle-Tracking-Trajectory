@@ -233,7 +233,7 @@ would carry about 80, but the gateway always pulls `stream_url` today (§5.4).
 | **Viewing on the sub-stream** | ❌ **Not built.** `gateway.py` always registers `stream_url`. Planned: a "low bandwidth" toggle in the player that registers `sub_stream_url` instead |
 | **Overlay batches gated to on-screen cameras** | ❌ **Not built** (§5.2) |
 | **Crops kept regional** | ❌ **Not built.** One MinIO today |
-| **Store-and-forward at the edge** | ❌ **Not built** (§8.3). The worker writes straight to the central Redis stream |
+| **Store-and-forward at the edge** | ✅ Bounded spool in each worker, memory then disk, replayed in order (§8.3) |
 | Keyframe-only decode for 0.5 fps analysis | ❌ **Not built.** It would cut the decode floor in §2. Unmeasured |
 
 ---
@@ -282,7 +282,7 @@ the ones a human might need to check.
 | Tier | Design | What the code does today |
 |---|---|---|
 | Hot (7–15 d) | Detections, alerts, health on NVMe, in the Timescale hypertable | One Postgres. `detections` is a hypertable with 1-day chunks; `camera_health` has 7-day chunks |
-| Warm (90 d) | Detections plus crops on HDD and object storage, in a regional MinIO | Crops in one MinIO bucket. **The 90-day media retention is configured and not wired**: `retention.py` deletes no vehicle crops ([SECURITY §8](SECURITY.md#8-what-is-not-implemented)). Persons media *is* purged (`services/persons.py`) |
+| Warm (90 d) | Detections plus crops on HDD and object storage, in a regional MinIO | Crops in one MinIO bucket, deleted after `RETENTION_MEDIA_DAYS` (90) by the daily retention sweep, a day partition at a time (`retention.expire_crops`); a crop an open alert points at is kept until the alert is closed. Persons media is purged by `services/persons.py` |
 | Cold (1–5 y) | Detections and audit, compressed, on object storage | **None.** No Timescale compression or tiering policy exists in any migration. Detections are kept 365 days and then dropped (`drop_chunks`). Audit is kept 1,825 days |
 
 ---
@@ -355,12 +355,13 @@ belong to departments, which is the point of Model 3.
 | Stateless API and workers | No session state. Workers own a hash shard of the camera list (`ai_worker/discovery.py`, blake2b mod N) | `make ai-multi` runs 3 shards |
 | Redis persistence | AOF on, `noeviction` | `docker-compose.yml` |
 | Graceful degradation | WebRTC → HLS. Satellite → offline basemap. Rate limiter fails open if Redis is down. Grid login refused → whole-host back-off (`ai_worker/backoff.py`) | e2e and browser flows |
+| One alarm per car across consumer replicas | Watchlist, anomaly and person-match dedup windows are Redis keys (`nagarnetra:dedup:*`, `SET NX PX`), released if the alert's transaction rolls back; per-process fallback if Redis is down | `tests/test_alert_dedup_shared.py`: two consumers racing on one car raise one alert |
 
 ### 8.2 What a deployment needs and does not have (design targets, not claims)
 
 | Component | Design | State |
 |---|---|---|
-| PostgreSQL | Primary plus a synchronous standby in the centre, an async replica at DR, WAL archiving to object storage (pgBackRest or WAL-G), managed by Patroni | ❌ Single instance. **No backups, no restore drill** |
+| PostgreSQL | Primary plus a synchronous standby in the centre, an async replica at DR, WAL archiving to object storage (pgBackRest or WAL-G), managed by Patroni | ❌ Single instance. 🟡 **Manual logical backups, verified by restore** (§8.4); no WAL archiving, no schedule, no off-site copy |
 | Object storage | MinIO erasure-coded per site, and site replication of the alert-evidence bucket to the centre and DR | ❌ Single MinIO, no replication |
 | Event bus | Redpanda, 3 brokers, RF=3, behind the existing bus seam | ❌ Config seam only. `event_bus_backend="kafka"` is read nowhere except a startup log line. No Kafka client is a dependency |
 | API | N replicas behind HAProxy or nginx, health-checked on `/ready` | 🟡 Replication is correct (the tailer/consumer split), and nginx proxies one API container. No load balancer config ships |
@@ -368,18 +369,97 @@ belong to departments, which is the point of Model 3.
 
 ### 8.3 WAN outages at the edge
 
-**The previous version of this file overstated this.**
+Until 12 Oct a publish failure was counted and **the event was lost**. Now every
+event goes through a bounded spool in the worker (`ai_worker/publisher.py`):
 
-- `ai_worker/publisher.py` writes straight to the central Redis stream.
-- A publish failure is **counted** (`publish_failures`) and **the event is lost**.
-- Nothing buffers it in worker memory.
-- The durability that *was* measured is downstream: the stream holds a backlog
-  while consumers catch up (10,237 events, cleared after the load).
+- `emit` only enqueues — microseconds, never the network — and one thread per
+  worker publishes, oldest first, in pipelined batches of 200.
+- When Redis does not answer, the batch goes back to the front and the thread
+  retries with backoff (0.5 s doubling to 5 s). Sightings keep queueing behind it
+  and are **replayed in order** when it answers. Delivery is at least once.
+- Bounds: memory `AI_WORKER_SPOOL_MAX_EVENTS` (20,000) and `_MAX_BYTES` (48 MB),
+  then segment files on the `ai-worker-spool` volume up to
+  `AI_WORKER_SPOOL_DISK_MAX_BYTES` (1 GiB per worker). Past every bound the oldest
+  are dropped and counted. On SIGTERM what is still held is written to disk and the
+  next process replays it.
+- Only settled sightings and person matches are held. Live boxes and provisional
+  reads are discarded during an outage and counted as `ephemeral_dropped`.
+- Counters (`spooled`, `replayed`, `dropped`, `held`) are in the worker's status and
+  in Prometheus (`contrail_ai_worker_spool_*`), with alerts for spooling and dropping.
 
-The edge design is a **site-local bus** that forwards to the centre: a Redis Stream
-or a Redpanda broker with a bounded on-disk spool, sized for the longest outage the
-state will tolerate. At 80 events/s per site, a 24-hour outage is ~6.9 million
-events, about 14 GB at 2 KB (ARITHMETIC). **Not built.**
+**MEASURED** against a real Redis in a throwaway container: paused for 3 s (a hung
+link), then stopped. Worst `emit` 1.1 ms during the hang; 65 sightings held and
+replayed in order on unpause; 53 held at shutdown written to disk and replayed in
+order by a fresh process. The live workers have run this code since 12 Oct.
+
+**Sizing (ARITHMETIC):** 1 GiB holds ~500,000 sightings at ~2 KB. A site at 80
+settled events/s fills one worker's default disk tier in ~1.7 h, and a 24-hour
+outage is ~6.9 million events, ~14 GB: raise the budget to the outage the state
+will tolerate. The 1-hour WAN pull (rollout gate 1(d)) has not been run.
+
+### 8.4 Backups
+
+`make backup` (`scripts/backup.sh`) writes `./backups/<UTC timestamp>/`, gitignored:
+
+| Part | How | Notes |
+|---|---|---|
+| `postgres.dump` | `pg_dump -Fc` inside the postgres container | Whole database: registry, detections, alerts, watchlists, users, audit. sha256 in the manifest |
+| `minio/<bucket>/` | `mc mirror` in a throwaway `minio/minio` container | Both buckets: plate crops and the private persons bucket |
+| `manifest.json` | — | Time, commit, Alembic revision, TimescaleDB version, live row counts before and after the dump, object counts and bytes, what verify found |
+
+It then **verifies itself**: the dump is restored into a throwaway TimescaleDB
+container with no network, by TimescaleDB's procedure (`timescaledb_pre_restore` →
+`pg_restore` → `timescaledb_post_restore`), and the key tables are counted. Each
+restored count must lie between the live counts taken before and after the dump.
+`make backup-verify BACKUP=…` repeats that later and also mirrors the objects into
+a throwaway MinIO and counts them. `make restore BACKUP=…` restores into the running
+stack: it prints what will be destroyed, requires the database name typed (or
+`CONFIRM=<name>`), supports `DRY_RUN=1`, stops `api` and `ingest`, drops and
+recreates the database, restores it by the same function verify uses, copies the
+objects back (additively), and starts them again. The AI workers keep running; their
+events wait in the stream (and in their spools).
+
+Not included: the Redis stream (events in flight; re-reading them after a restore
+would duplicate history), the OpenSearch index (nothing is indexed into it), video
+(none is recorded).
+
+**MEASURED on 12 Oct**, demo data (68,022 detections, 815 alerts, 12,374 audit
+rows; 65,263 objects): dump 1 s / 10.8 MB; objects 61 s / 110 MB (265 MB on disk —
+small files); restore into the throwaway 3–5 s, every key-table count equal; objects
+mirrored back into a throwaway MinIO in 86 s, counts equal. `pg_restore` reported no
+errors. The live-stack `restore` itself has not been run against the demo — only
+its two halves (database restore, object mirror) through verify and the drill.
+
+**Retention of backups.** A backup is personal data: plate histories and faces.
+
+- Keep 7 daily, 4 weekly and 12 monthly at most, and **never longer than the data
+  in them may lawfully be held**: a backup older than `RETENTION_DETECTIONS_DAYS`
+  (365) still contains detections the live system has deleted, so it must go too.
+  Face media is held 90 days live; prefer short backup retention where faces are
+  enrolled.
+- Directories are created `0700`; nothing in them is encrypted. Encrypt before a
+  backup leaves the machine.
+
+**Off-site copy — a procedure, not automated:**
+
+```bash
+B=backups/20261012T055338Z
+# 1. Encrypt to a public key whose private half is NOT on this machine (age v1.2+).
+tar -C backups -cf - "$(basename "$B")" | age -r "age1…recipient…" > "$B.tar.age"
+# 2a. Off-site object store with object lock, so a compromised host cannot delete it.
+mc mirror --retention-mode COMPLIANCE --retention-duration 30d "$B.tar.age" offsite/contrail-backups/
+# 2b. Or a second site over SSH.
+rsync -av --chmod=F600 "$B.tar.age" backup@dr-site:/srv/contrail-backups/
+# 3. Record the copy, then delete local copies past their retention.
+```
+
+Restoring from off-site reverses it (`age -d -i key.txt … | tar -x -C backups`),
+then `make backup-verify BACKUP=…` before `make restore`.
+
+**Restore drill** (what turns this into an RTO): on a non-production stack, time
+`make restore BACKUP=… CONFIRM=…` from the command to the command centre answering,
+and record it here. Until a drill is timed, no RTO is claimed; until backups run
+on a schedule, the RPO is "since the last `make backup`".
 
 ---
 
@@ -388,7 +468,7 @@ events, about 14 GB at 2 KB (ARITHMETIC). **Not built.**
 | | |
 |---|---|
 | Host | MacBook Air M5, 16 GB. Docker Desktop VM: 10 vCPU, 11.7 GB |
-| Containers | postgres, redis, minio (+ one-shot init), opensearch, mediamtx, api, web, ingest, simulator; plus 1 ai-worker (`make ai`) or 3 (`make ai-multi`) |
+| Containers | postgres, redis, minio (+ one-shot init), opensearch, mediamtx, api, web (HTTP :8080 and HTTPS :8443), ingest, simulator; plus 1 ai-worker (`make ai`) or 3 (`make ai-multi`); optionally prometheus + grafana (`make monitoring`) |
 | Fleet | The organisers' grid (30 cameras, onboarded through `HostedGridAdapter`), plus a recorded ANPR clip (`CAM-DEMO-01`). A persons-demo camera (`CAM-DEMO-02`) is being added with the persons watchlist |
 | Memory | Docker with ≥ 8 GB (`make preflight`). OpenSearch heap capped at 512 MB, Redis at 512 MB. All 31 streams open: worker memory ~3 GB (**MEASURED**) |
 | CPU | 31 open and all analysed: ~10 cores, 0.3–1.2 fps per camera. 4 always-on plus the one on screen: **4.4–5.6 cores**, 2.1–2.8 grid plates/min at night (**MEASURED**, 11 Oct) |
@@ -406,23 +486,17 @@ workers starving the browser.
 | What | State |
 |---|---|
 | `GET /health` (liveness), `GET /ready` (Postgres and Redis critical; OpenSearch, MinIO and MediaMTX optional → `degraded`) | ✅ `app/routers/health.py` |
-| `GET /metrics` — ingest, worker fleet (p50/p95/p99, failures), tailer, alert fan-out, sockets | ✅ **as JSON.** Unauthenticated and aggregate-only (no plate, camera or user) |
-| Worker coverage line ("analysing N of M camera(s) …") and per-worker stats in Redis | ✅ |
-| **Prometheus exposition** | ❌ `prometheus-client` is pinned in `requirements.txt` and imported nowhere. `/metrics` is not in Prometheus text format |
-| **Prometheus and Grafana** | ❌ Not in any compose file. `make scale`'s help text says "Redpanda, replicas, Grafana" and prints a Grafana URL; **neither exists**. The scale profile adds only the consumer replicas |
-| MediaMTX metrics | 🟡 Enabled on :9998 inside the network, not published, not scraped |
+| `GET /metrics` — ingest, worker fleet (p50/p95/p99, failures), tailer, alert fan-out, sockets | ✅ **as JSON**, unchanged. Unauthenticated and aggregate-only |
+| **`GET /metrics/prometheus`** — requests by route template, ingest per consumer, consumer lag and pending, alerts by type and priority, WebSocket clients, per-camera seconds since the last plate read, edge-worker CPU/threads/RSS/slots/spool | ✅ `app/services/metrics.py`. Unauthenticated, unthrottled, aggregate-only: camera codes and worker ids are the only identifiers |
+| Edge worker stats in Redis (`nagarnetra:ai:workers`, every 5 s) | ✅ `ai_worker/worker.py` |
+| **Prometheus + Grafana** | ✅ `make monitoring` — `monitoring` compose profile, `prom/prometheus:v3.5.0`, `grafana/grafana-oss:12.1.1`, loopback-only ports, provisioned "Contrail — pipeline" dashboard (`infra/grafana/`) |
+| **Alert rules** | ✅ `infra/prometheus/rules/contrail.yml`: always-on camera with no plate read for 10 min, ingest failures, consumer lag, ingest p95 > 3 s, API down, edge spooling / dropping / silent, exporter errors. Unit-tested with `promtool test rules` |
+| MediaMTX metrics | ✅ scraped from :9998 inside the network |
+| Alertmanager | ❌ Rules are visible in Prometheus `/alerts` and Grafana; nobody is paged |
+| node / postgres / redis exporters | ❌ Host and database internals are not scraped |
 
-**Design for the scale profile:**
-
-- Prometheus scrapes the API (after a text-format exporter is added), MediaMTX
-  :9998, node_exporter, postgres_exporter and redis_exporter.
-- Grafana dashboards cover:
-  - ingest rate and consumer lag;
-  - capture→persisted p95;
-  - per-site worker coverage;
-  - camera availability by department;
-  - alert rate by type.
-- Alertmanager pages on consumer lag, a site going silent, and DB replication lag.
+`make scale` starts only the consumer replicas. There is no Redpanda: its help text
+used to claim one, and a Grafana, and was corrected on 12 Oct.
 
 ---
 
@@ -435,8 +509,9 @@ workers starving the browser.
 | 91–228 GPU nodes | **Extrapolated.** Also requires hardware decode, which isn't built |
 | One central stack absorbs 80,000 cameras | **Measured, with no headroom.** 2,774 events/s median, but the backlog grew during the 150 s run. Plan two |
 | p95 capture→persisted < 3 s at that rate | **Not met.** Measured 5.7 s |
-| RPO 15 min / RTO 1 h | **Aspiration.** No backup exists |
-| Hot/warm/cold tiering | **Design.** One Postgres, 365-day `drop_chunks`, no compression, crops never expire |
-| Regional crops, gated overlay, edge spool, sub-stream viewing | **Design.** §5.4 |
-| Prometheus and Grafana | **Design.** §10 |
+| RPO 15 min / RTO 1 h | **Aspiration.** Manual backups exist and restore cleanly into a throwaway (§8.4); none is scheduled and no live restore has been timed |
+| Hot/warm/cold tiering | **Design.** One Postgres, 365-day `drop_chunks`, no compression; crops expire at 90 days |
+| Regional crops, gated overlay, sub-stream viewing | **Design.** §5.4 |
+| Zero events lost over a 1-hour WAN outage | **Built, not yet measured at that length.** Edge spool, §8.3 |
+| Paging on alerts | **Not built.** Rules exist; no Alertmanager (§10) |
 | ₹ figures | **Assumed unit prices.** Indicative, not procurement quotes |

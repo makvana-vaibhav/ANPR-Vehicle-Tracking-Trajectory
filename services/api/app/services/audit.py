@@ -84,19 +84,15 @@ def scrub(params: Any) -> Any:
 
 
 def client_ip(request: Request) -> str | None:
-    """The caller's address, honouring the proxy chain.
+    """The caller's address, as the trusted-proxy middleware resolved it.
 
-    nginx sits in front of the API and sets X-Forwarded-For; without reading it
-    every action would be attributed to the reverse proxy, making the trail
-    useless for answering "who, from where".
+    nginx sits in front of the API and sets X-Forwarded-For; without it every
+    action would be attributed to the reverse proxy. But the header is only
+    evidence when nginx wrote it: read here unconditionally, as it was, any
+    caller of the API port could write whatever address they liked into the
+    trail. app/main.py believes it from FORWARDED_ALLOW_IPS only, and leaves
+    the result in `request.client`.
     """
-    forwarded = request.headers.get("x-forwarded-for")
-    if forwarded:
-        # Left-most entry is the original client.
-        return forwarded.split(",")[0].strip()
-    real_ip = request.headers.get("x-real-ip")
-    if real_ip:
-        return real_ip.strip()
     return request.client.host if request.client else None
 
 

@@ -48,7 +48,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.deps import DbSession
 from app.core.logging import get_logger
 from app.core.rbac import Permission, require_permission
-from app.routers.analytics import BASELINE_DAYS, _median, _segment_legs
+from app.routers.analytics import (
+    BASELINE_DAYS,
+    IncludeRecorded,
+    _median,
+    _recorded_scope,
+    _segment_legs,
+)
 from app.schemas.analytics import DataStatus, Window
 from app.schemas.predictions import (
     BacktestResult,
@@ -57,6 +63,8 @@ from app.schemas.predictions import (
     ContributingFactor,
     ForecastPoint,
 )
+from app.services import recorded_footage
+from app.services.recorded_footage import live_only_sql
 
 router = APIRouter(prefix="/api/v1/predictions", tags=["predictions"])
 log = get_logger(__name__)
@@ -118,12 +126,19 @@ MAX_ROWS = 200
 
 
 async def _bucketed_flow(
-    session: AsyncSession, group_by: str, start: datetime, end: datetime, corridor: str | None
+    session: AsyncSession,
+    group_by: str,
+    start: datetime,
+    end: datetime,
+    corridor: str | None,
+    *,
+    include_recorded: bool = False,
 ) -> list[Any]:
     """Vehicle count per fixed-width bucket, by camera or corridor.
 
     Same shape as `analytics.flow`'s query, fixed to `BUCKET_MINUTES` because
-    the trend fit and the backtest both assume a constant bucket width.
+    the trend fit and the backtest both assume a constant bucket width. Leaves
+    out recorded footage the same way, unless asked for.
     """
     grouping = "c.corridor" if group_by == "corridor" else "c.camera_code"
     sql = f"""
@@ -138,15 +153,30 @@ async def _bucketed_flow(
         WHERE d.ts >= :start AND d.ts < :end
           AND (CAST(:corridor AS text) IS NULL OR c.corridor = :corridor)
           AND {grouping} IS NOT NULL
+          AND {live_only_sql("c")}
         GROUP BY bucket, key
         ORDER BY key, bucket
     """
-    rows = await session.execute(text(sql), {"start": start, "end": end, "corridor": corridor})
+    rows = await session.execute(
+        text(sql),
+        {
+            "start": start,
+            "end": end,
+            "corridor": corridor,
+            **recorded_footage.sql_params(include_recorded=include_recorded),
+        },
+    )
     return list(rows.mappings())
 
 
 async def _hourly_baseline(
-    session: AsyncSession, group_by: str, start: datetime, end: datetime, corridor: str | None
+    session: AsyncSession,
+    group_by: str,
+    start: datetime,
+    end: datetime,
+    corridor: str | None,
+    *,
+    include_recorded: bool = False,
 ) -> dict[tuple[str, int], tuple[float, int]]:
     """Typical vehicles per bucket, by (key, hour-of-day), over `[start, end)`.
 
@@ -167,9 +197,18 @@ async def _hourly_baseline(
         WHERE d.ts >= :start AND d.ts < :end
           AND (CAST(:corridor AS text) IS NULL OR c.corridor = :corridor)
           AND {grouping} IS NOT NULL
+          AND {live_only_sql("c")}
         GROUP BY key, hour
     """
-    rows = await session.execute(text(sql), {"start": start, "end": end, "corridor": corridor})
+    rows = await session.execute(
+        text(sql),
+        {
+            "start": start,
+            "end": end,
+            "corridor": corridor,
+            **recorded_footage.sql_params(include_recorded=include_recorded),
+        },
+    )
     buckets_per_hour = 60 // BUCKET_MINUTES
     baseline: dict[tuple[str, int], tuple[float, int]] = {}
     for row in rows.mappings():
@@ -414,18 +453,30 @@ async def congestion(
     ] = None,
     group_by: Annotated[str, Query(pattern="^(camera|corridor)$")] = "camera",
     corridor: str | None = None,
+    include_recorded: IncludeRecorded = False,
 ) -> CongestionResponse:
     now = at or datetime.now(UTC)
     lookback_start = now - timedelta(minutes=LOOKBACK_MINUTES)
     baseline_start = lookback_start - timedelta(days=BASELINE_DAYS)
 
-    live_rows = await _bucketed_flow(session, group_by, lookback_start, now, corridor)
-    baseline = await _hourly_baseline(session, group_by, baseline_start, lookback_start, corridor)
+    live_rows = await _bucketed_flow(
+        session, group_by, lookback_start, now, corridor, include_recorded=include_recorded
+    )
+    baseline = await _hourly_baseline(
+        session,
+        group_by,
+        baseline_start,
+        lookback_start,
+        corridor,
+        include_recorded=include_recorded,
+    )
     baseline_keys = {k for k, _hour in baseline}
 
     leg_rows_by_to: dict[str, list[Any]] = {}
     if group_by == "camera":
-        for leg in await _segment_legs(session, lookback_start, now):
+        for leg in await _segment_legs(
+            session, lookback_start, now, include_recorded=include_recorded
+        ):
             if leg["to_camera"]:
                 leg_rows_by_to.setdefault(leg["to_camera"], []).append(leg)
 
@@ -453,4 +504,5 @@ async def congestion(
         baseline_window_days=BASELINE_DAYS,
         horizons_minutes=list(HORIZONS),
         series=sorted(series, key=lambda s: s.key)[:MAX_ROWS],
+        recorded_footage=await _recorded_scope(session, include_recorded),
     )

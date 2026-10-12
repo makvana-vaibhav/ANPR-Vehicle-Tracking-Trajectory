@@ -182,4 +182,78 @@ describe('FleetHealth', () => {
     const offline = screen.getByText('Offline', { selector: 'p' }).parentElement!
     expect(within(offline).getByText('0').className).not.toMatch(/text-priority/)
   })
+
+  it('names a refusing integration once, in the alarm’s words, and keeps states as last known', async () => {
+    vi.spyOn(api, 'getFleetHealth').mockResolvedValue({
+      ...HEALTH,
+      stale: 30,
+      integrations: [
+        {
+          vms_id: 'vms-grid',
+          name: 'Hosted Camera Grid',
+          vendor: 'hosted_grid',
+          state: 'refused',
+          error_code: 'grid_refused',
+          cameras_held: 30,
+          last_answered_at: '2026-10-12T05:12:00Z',
+          alarm_open_since: '2026-10-12T05:14:00Z',
+        },
+      ],
+    })
+    renderAt('/health')
+    const notice = (
+      await screen.findByText('Hosted Camera Grid is refusing our session — its cooldown')
+    ).closest('[role="status"]')!
+    expect(notice.textContent).toContain('30 cameras keep their last known status')
+    expect(notice.textContent).toContain('last answered 10:42 IST')
+    expect(notice.textContent).toContain('since 10:44 IST')
+    expect(screen.getByText(/30 shown as last known/)).toBeTruthy()
+  })
+
+  it('reports ageing equipment, and says plainly when install dates are unknown', async () => {
+    vi.spyOn(api, 'getGapReport').mockResolvedValue({
+      ...GAPS,
+      reliability_gaps: [],
+      coverage_gaps: [],
+      ageing_gaps: [
+        {
+          camera_code: 'SBX-cam05',
+          name: 'Visat teen Rasta',
+          district: 'Ahmedabad',
+          installed_on: '2014-03-01',
+          age_years: 12.6,
+          reason: 'Installed 12.6 years ago (review after 5).',
+        },
+      ],
+      install_date_unknown: {
+        cameras: 31,
+        camera_codes: ['SBX-cam01'],
+        reason: 'Install date not recorded, so the age of this equipment cannot be judged.',
+      },
+    })
+    renderAt('/health')
+    fireEvent.click(await screen.findByRole('tab', { name: /Ageing/ }))
+    expect(await screen.findByText('Install date unknown for 31 cameras')).toBeTruthy()
+    expect(screen.getByText('2014-03-01')).toBeTruthy()
+    expect(screen.getByText('12.6 y')).toBeTruthy()
+  })
+
+  it('counts districts over Gujarat, and names the cameras that cover none', async () => {
+    vi.spyOn(api, 'getGapReport').mockResolvedValue({
+      ...GAPS,
+      reliability_gaps: [],
+      coverage_gaps: [{ district: 'Dang', reason: 'No camera with a known position' }],
+      geography: {
+        basis: "Gujarat's 33 districts",
+        districts: 33,
+        position_unknown: ['SBX-cam22'],
+        recorded_footage: ['CAM-DEMO-01'],
+        outside_gujarat: [],
+      },
+    })
+    renderAt('/health')
+    expect(await screen.findByText(/Gujarat districts \(1 of 33\)/)).toBeTruthy()
+    expect(screen.getByText(/Not counted in any district/).textContent).toContain('SBX-cam22')
+    expect(screen.getByText(/Not counted in any district/).textContent).toContain('CAM-DEMO-01')
+  })
 })

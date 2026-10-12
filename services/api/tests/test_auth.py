@@ -14,11 +14,12 @@ from app.core.security import (
     hash_password,
     verify_password,
 )
+from tests.conftest import demo_password
 
 pytestmark = pytest.mark.integration
 
 VALID_USER = "admin"
-VALID_PASSWORD = "NagarNetra@2026"
+VALID_PASSWORD = demo_password(VALID_USER)
 
 
 class TestPasswordHashing:

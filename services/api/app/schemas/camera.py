@@ -12,7 +12,14 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    SecretStr,
+    field_validator,
+    model_validator,
+)
 
 from app.models.enums import (
     AdapterType,
@@ -66,6 +73,85 @@ def clean_source_file(v: str | None) -> str | None:
     return v
 
 
+#: Longest login the registry accepts. Generous for any NVR; the bound exists so
+#: a request cannot hand the key ring megabytes to seal.
+MAX_USERNAME_LENGTH = 128
+MAX_PASSWORD_LENGTH = 256
+
+
+def _check_username(v: str | None) -> str | None:
+    if v is None:
+        return None
+    v = v.strip()
+    if not v:
+        return None
+    if len(v) > MAX_USERNAME_LENGTH:
+        raise ValueError(f"stream_username is longer than {MAX_USERNAME_LENGTH} characters")
+    if ":" in v:
+        raise ValueError("stream_username may not contain ':'")
+    if any(ord(c) < 32 for c in v):
+        raise ValueError("stream_username may not contain control characters")
+    return v
+
+
+def _check_password(v: SecretStr | None) -> SecretStr | None:
+    if v is None:
+        return None
+    raw = v.get_secret_value()
+    if len(raw) > MAX_PASSWORD_LENGTH:
+        raise ValueError(f"stream_password is longer than {MAX_PASSWORD_LENGTH} characters")
+    if raw != raw.strip():
+        # Stored as `username:password` and trimmed on the way back out, so
+        # surrounding whitespace would silently change the password.
+        raise ValueError("stream_password may not start or end with whitespace")
+    if any(ord(c) < 32 for c in raw):
+        raise ValueError("stream_password may not contain control characters")
+    return v
+
+
+def lift_url_credentials(model: Any) -> None:
+    """Move `user:pass@` out of `stream_url`/`sub_stream_url` into the login fields.
+
+    A pasted `rtsp://admin:pw@10.0.0.5/Streaming/Channels/101` is how a camera
+    arrives from an NVR's web page or a phone app, and refusing it outright —
+    which this registry used to do — made a credentialed camera impossible to
+    onboard without a relay. So the URL is split here, at the edge, before
+    anything can store or log it: the URL keeps host, port and path, and the
+    login goes to `stream_username`/`stream_password`, which the service seals
+    into `credentials_ref`.
+
+    Two different logins for one camera — one typed in the fields and another
+    in the URL, or a different one on the sub-stream — are refused rather
+    than guessed between.
+    """
+    from app.core.urls import split_credentials
+
+    for field in ("stream_url", "sub_stream_url"):
+        url = getattr(model, field, None)
+        clean, username, password = split_credentials(url)
+        if username is None and password is None:
+            continue
+        setattr(model, field, clean)
+        if not username:
+            raise ValueError(f"{field} carries a password but no username")
+        given_user = model.stream_username
+        given_password = model.stream_password.get_secret_value() if model.stream_password else None
+        if given_user is None and given_password is None:
+            model.stream_username = _check_username(username)
+            model.stream_password = _check_password(
+                SecretStr(password) if password is not None else None
+            )
+            continue
+        if given_user != username or (given_password or "") != (password or ""):
+            raise ValueError(
+                f"{field} carries a different login from stream_username/stream_password; "
+                "give the login once"
+            )
+
+    if model.stream_password is not None and not model.stream_username:
+        raise ValueError("stream_password needs a stream_username")
+
+
 Latitude = Annotated[float, Field(ge=-90, le=90, examples=[22.3039])]
 Longitude = Annotated[float, Field(ge=-180, le=180, examples=[70.8022])]
 
@@ -99,6 +185,21 @@ class CameraBase(BaseModel):
         default=None,
         description="Lower-resolution stream, preferred for AI analysis to save bandwidth",
     )
+    #: The camera's own login. Write-only: sealed into `credentials_ref` and
+    #: never returned. A login pasted inside `stream_url` lands here too.
+    stream_username: str | None = Field(
+        default=None,
+        description=(
+            "Username the camera or NVR asks for. Stored encrypted with the password; "
+            "never returned. A URL pasted as rtsp://user:pass@host/… is split into "
+            "stream_url plus these two fields automatically."
+        ),
+        examples=["admin"],
+    )
+    stream_password: SecretStr | None = Field(
+        default=None,
+        description="Password for stream_username. Write-only: encrypted at rest, never returned.",
+    )
     resolution: str | None = Field(default=None, max_length=16, examples=["1920x1080"])
     fps: int | None = Field(default=None, ge=1, le=120)
     source_file: str | None = Field(
@@ -126,23 +227,20 @@ class CameraBase(BaseModel):
 
     _validate_source_file = field_validator("source_file")(clean_source_file)
 
-    @field_validator("stream_url", "sub_stream_url")
-    @classmethod
-    def _validate_stream_url(cls, v: str | None) -> str | None:
-        """Reject a credential embedded in a stream URL.
+    _validate_username = field_validator("stream_username")(_check_username)
+    _validate_password = field_validator("stream_password")(_check_password)
+
+    @model_validator(mode="after")
+    def _lift_credentials(self) -> CameraBase:
+        """Keep credentials out of `stream_url`. See `lift_url_credentials`.
 
         ``rtsp://admin:password@10.0.0.5/stream`` is how camera passwords leak
-        into databases, logs, and screenshots. Credentials belong in the VMS
-        record's ``credentials_ref``, which points at a secret store.
+        into databases, logs, and screenshots, so the URL that is stored never
+        carries one: the login is moved into the write-only fields here and
+        sealed by the service.
         """
-        if v is None:
-            return v
-        if "@" in v.split("//", 1)[-1].split("/", 1)[0]:
-            raise ValueError(
-                "stream_url must not embed credentials; "
-                "store them via the VMS instance's credentials_ref"
-            )
-        return v
+        lift_url_credentials(self)
+        return self
 
 
 class CameraCreate(CameraBase):
@@ -208,8 +306,16 @@ class CameraUpdate(BaseModel):
     installed_on: date | None = None
     tags: list[str] | None = None
     department_code: str | None = None
+    #: Replace the camera's login. Omitted means "keep what is stored" — the
+    #: form cannot show a password it was never given back, so blank cannot
+    #: mean delete. `clear_credentials` is how one is removed.
+    stream_username: str | None = None
+    stream_password: SecretStr | None = None
+    clear_credentials: bool = False
 
     _validate_source_file = field_validator("source_file")(clean_source_file)
+    _validate_username = field_validator("stream_username")(_check_username)
+    _validate_password = field_validator("stream_password")(_check_password)
 
     @model_validator(mode="after")
     def _coordinates_move_together(self) -> CameraUpdate:
@@ -217,6 +323,23 @@ class CameraUpdate(BaseModel):
         if (self.lat is None) != (self.lon is None):
             raise ValueError("lat and lon must be provided together")
         return self
+
+    @model_validator(mode="after")
+    def _lift_credentials(self) -> CameraUpdate:
+        """As on create: a login inside a new URL is split out, never stored.
+
+        Until this existed an edit could write `rtsp://user:pass@…` straight
+        into the registry — the create path refused it and this one did not.
+        """
+        lift_url_credentials(self)
+        if self.clear_credentials and self.stream_username:
+            raise ValueError("clear_credentials and a new login cannot be sent together")
+        return self
+
+    @property
+    def login_changed(self) -> bool:
+        """Whether this update sets or clears the stored login."""
+        return self.clear_credentials or self.stream_username is not None
 
 
 class CameraOut(BaseModel):
@@ -247,6 +370,13 @@ class CameraOut(BaseModel):
     fps: int | None = None
     anpr_enabled: bool
     status: str
+    #: Set when `status` is the last known one rather than a fresh finding:
+    #: the latest probe could not ask about this camera because its
+    #: integration refused our session or did not answer. The probe's error
+    #: code (`grid_refused`, `sandbox_unreachable`, …).
+    status_stale_reason: str | None = None
+    #: When a probe last got an answer about this camera, if it is stale.
+    status_confirmed_at: datetime | None = None
     installed_on: date | None = None
     tags: list[str] | None = None
 
@@ -260,6 +390,9 @@ class CameraOut(BaseModel):
     #: or analysed, and that distinction is the whole reason the registry no
     #: longer holds 250 cameras that could do neither.
     has_stream: bool = False
+    #: Whether a login is stored for the source — **not** the login. The
+    #: username and password are write-only; see `CameraBase.stream_username`.
+    has_credentials: bool = False
     #: The pinned clip, if this camera replays recorded footage.
     #:
     #: Returned in full, unlike `stream_url`: it is a filename inside our own

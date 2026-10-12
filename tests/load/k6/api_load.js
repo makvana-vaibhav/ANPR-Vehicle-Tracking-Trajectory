@@ -20,7 +20,9 @@ import { Trend, Rate } from 'k6/metrics'
 
 const BASE = __ENV.API_URL || 'http://api:8000'
 const USERNAME = __ENV.API_USER || 'admin'
-const PASSWORD = __ENV.API_PASSWORD || 'NagarNetra@2026'
+// From .env (BOOTSTRAP_ADMIN_PASSWORD), passed in by `make load-operators`.
+const PASSWORD = __ENV.API_PASSWORD
+if (!PASSWORD) throw new Error('API_PASSWORD is not set (make load-operators passes it from .env)')
 
 const searchLatency = new Trend('plate_search_ms')
 const mapLatency = new Trend('map_load_ms')

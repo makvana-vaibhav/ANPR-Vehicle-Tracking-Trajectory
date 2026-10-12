@@ -38,7 +38,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-from app.schemas.analytics import DataStatus, Window
+from app.schemas.analytics import DataStatus, RecordedFootage, Window
 
 HorizonMinutes = Literal[15, 30]
 
@@ -102,3 +102,6 @@ class CongestionResponse(BaseModel):
     baseline_window_days: int
     horizons_minutes: list[HorizonMinutes]
     series: list[CongestionSeries]
+    #: Applies to the live buckets, the hourly baseline and the upstream legs
+    #: alike — a recording in the baseline would skew every index built on it.
+    recorded_footage: RecordedFootage

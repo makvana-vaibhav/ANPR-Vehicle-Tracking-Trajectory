@@ -49,6 +49,10 @@ _EXCLUDED_PATHS = frozenset(
         "/",
         "/api/v1/auth/login",
         "/api/v1/auth/refresh",
+        # The media gateway asking whether to serve a stream. The viewing is
+        # audited when the token is issued (`camera.view`); a row per gateway
+        # question would add one per WebRTC or HLS session and say nothing new.
+        "/internal/mediamtx/auth",
     }
 )
 

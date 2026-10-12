@@ -79,8 +79,13 @@ env_value() {  # a single key from .env, never echoed
 [[ -f "${REPO}/.env" ]] || die ".env not found; the native worker needs the MinIO credentials from it"
 MINIO_USER="$(env_value MINIO_ROOT_USER)"
 MINIO_PASS="$(env_value MINIO_ROOT_PASSWORD)"
-redis-cli -h localhost -p 6379 ping >/dev/null 2>&1 \
-  || "${VENV}/bin/python" -c "import redis; redis.Redis(host='localhost', port=6379).ping()" \
+# Redis requires a password and MediaMTX an identity to read (docs/SECURITY.md);
+# both come from .env and are passed through the environment, never echoed.
+REDIS_PASS="$(env_value REDIS_PASSWORD)"
+MTX_READ_PASS="$(env_value MEDIAMTX_READ_PASSWORD)"
+[[ -n "${REDIS_PASS}" ]] || die "REDIS_PASSWORD is not set in .env — run make env"
+REDISCLI_AUTH="${REDIS_PASS}" redis-cli -h localhost -p 6379 ping >/dev/null 2>&1 \
+  || REDIS_PASSWORD="${REDIS_PASS}" "${VENV}/bin/python" -c "import os, redis; redis.Redis(host='localhost', port=6379, password=os.environ['REDIS_PASSWORD']).ping()" \
   || die "Redis is not reachable on localhost:6379 — is the stack up (make up)?"
 
 MINIO_ROOT_USER="${MINIO_USER}" MINIO_ROOT_PASSWORD="${MINIO_PASS}" BUCKET="${BUCKET}" \
@@ -99,7 +104,8 @@ printf '\033[1mnative AI worker\033[0m — CoreML · cameras %s · events → %s
 
 export PYTHONPATH="${REPO}/services/ai-worker"
 export OPENCV_FFMPEG_CAPTURE_OPTIONS="rtsp_transport;tcp"
-export REDIS_URL="redis://localhost:6379/0"
+export REDIS_URL="redis://:${REDIS_PASS}@localhost:6379/0"
+export MEDIAMTX_READ_PASSWORD="${MTX_READ_PASS}"
 export EVENT_STREAM_KEY="${EVENTS}"
 export MEDIAMTX_HOST="localhost"
 export MEDIAMTX_API_URL="http://localhost:9997"

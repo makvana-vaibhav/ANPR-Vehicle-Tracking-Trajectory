@@ -27,6 +27,7 @@ from sqlalchemy import text
 
 from app.db.session import SessionLocal
 from app.models.intelligence import Detection, VehicleTrack
+from app.services.recorded_footage import live_only_sql, sql_params
 
 pytestmark = pytest.mark.integration
 
@@ -118,9 +119,16 @@ async def _clean_synthetic_rows():
     await _cleanup()
 
 
+#: Binds `:tag` in `coalesce(:tag = ANY(tags), false)` — a camera replaying a
+#: recorded clip, the same test `app.services.recorded_footage` applies. Every
+#: endpoint here leaves such cameras out by default, so fixtures that expect
+#: their rows counted must borrow live cameras only.
+RECORDED = {"tag": "recorded-footage"}
+
+
 @pytest.fixture
 async def cameras() -> list[dict]:
-    """Three real cameras from the seeded fleet, corridor included.
+    """Three real live cameras from the seeded fleet, corridor included.
 
     Borrowing real rows sidesteps constructing a `Geography` location by
     hand; which three cameras they are does not matter to any test below.
@@ -130,8 +138,10 @@ async def cameras() -> list[dict]:
             await session.execute(
                 text(
                     "SELECT id, camera_code, corridor FROM cameras "
-                    "WHERE corridor IS NOT NULL ORDER BY camera_code LIMIT 3"
-                )
+                    "WHERE corridor IS NOT NULL AND NOT coalesce(:tag = ANY(tags), false) "
+                    "ORDER BY camera_code LIMIT 3"
+                ),
+                RECORDED,
             )
         ).mappings()
         result = [dict(r) for r in rows]
@@ -148,8 +158,10 @@ async def same_corridor_pair(cameras: list[dict]) -> tuple[dict, dict] | None:
             await session.execute(
                 text(
                     "SELECT id, camera_code, corridor FROM cameras "
-                    "WHERE corridor IS NOT NULL ORDER BY corridor, camera_code"
-                )
+                    "WHERE corridor IS NOT NULL AND NOT coalesce(:tag = ANY(tags), false) "
+                    "ORDER BY corridor, camera_code"
+                ),
+                RECORDED,
             )
         ).mappings()
         by_corridor: dict[str, list[dict]] = {}
@@ -662,3 +674,246 @@ class TestHeatmapEndpoint:
         assert len(feature["geometry"]["coordinates"]) == 2
         assert feature["properties"]["vehicles"] == 3
         assert body["max_vehicles"] >= 3
+
+
+# ── recorded footage ──────────────────────────────────────────────────
+#
+# CAM-DEMO-01 replays a 15-second clip on a loop and was ~93% of every vehicle
+# Insights reported. Every figure now leaves cameras tagged `recorded-footage`
+# out unless `include_recorded=true`, and says so in `recorded_footage`.
+
+
+@pytest.fixture
+async def live_and_recorded() -> tuple[dict, dict, dict]:
+    """Two live cameras and one tagged `recorded-footage`, borrowed from the
+    registry like every other camera in this file. No corridor is needed —
+    these tests group by camera."""
+    async with SessionLocal() as session:
+        live = [
+            dict(r)
+            for r in (
+                await session.execute(
+                    text(
+                        "SELECT id, camera_code FROM cameras "
+                        "WHERE NOT coalesce(:tag = ANY(tags), false) "
+                        "ORDER BY camera_code LIMIT 2"
+                    ),
+                    RECORDED,
+                )
+            ).mappings()
+        ]
+        recorded = (
+            (
+                await session.execute(
+                    text(
+                        "SELECT id, camera_code FROM cameras "
+                        "WHERE :tag = ANY(tags) ORDER BY camera_code LIMIT 1"
+                    ),
+                    RECORDED,
+                )
+            )
+            .mappings()
+            .first()
+        )
+    if len(live) < 2 or recorded is None:
+        pytest.skip("needs two live cameras and one tagged recorded-footage — run scripts/seed.py")
+    return live[0], live[1], dict(recorded)
+
+
+async def _recorded_codes() -> list[str]:
+    async with SessionLocal() as session:
+        rows = await session.execute(
+            text("SELECT camera_code FROM cameras WHERE :tag = ANY(tags)"), RECORDED
+        )
+        return sorted(code for (code,) in rows)
+
+
+def _in_window(**extra: str) -> dict[str, str]:
+    return {"since": WINDOW_START.isoformat(), "until": WINDOW_END.isoformat(), **extra}
+
+
+#: Every endpoint that reports a traffic figure, with parameters that keep it
+#: inside the synthetic window. The forecast takes an instant, not a window.
+TRAFFIC_ENDPOINTS: dict[str, dict[str, str]] = {
+    "/api/v1/analytics/flow": _in_window(),
+    "/api/v1/analytics/speed": _in_window(),
+    "/api/v1/analytics/routes": _in_window(),
+    "/api/v1/analytics/travel-time": _in_window(),
+    "/api/v1/analytics/hotspots": _in_window(),
+    "/api/v1/analytics/heatmap": _in_window(),
+    "/api/v1/analytics/traffic": _in_window(),
+    "/api/v1/analytics/traffic/history": _in_window(),
+    "/api/v1/predictions/congestion": {"at": WINDOW_END.isoformat()},
+}
+
+
+class TestRecordedFootage:
+    async def test_the_predicate_drops_only_recordings(self) -> None:
+        """`tags` is nullable, and `NOT (tag = ANY(NULL))` is NULL — which a
+        WHERE clause treats as false. Untagged cameras must survive it."""
+        cases = [
+            (None, False, True),
+            ([], False, True),
+            (["demo", "arterial"], False, True),
+            (["demo", "recorded-footage"], False, False),
+            (["demo", "recorded-footage"], True, True),
+        ]
+        # The product's own predicate, verbatim — interpolating it is the point.
+        query = text(
+            f"SELECT {live_only_sql('c')} FROM (SELECT CAST(:tags AS text[]) AS tags) c"  # noqa: S608
+        )
+        async with SessionLocal() as session:
+            for tags, include, expected in cases:
+                kept = (
+                    await session.execute(
+                        query, {"tags": tags, **sql_params(include_recorded=include)}
+                    )
+                ).scalar()
+                assert kept is expected, (tags, include)
+
+    @pytest.mark.parametrize("path", list(TRAFFIC_ENDPOINTS))
+    async def test_every_traffic_figure_says_whether_recordings_are_in_it(
+        self, client: AsyncClient, auth_headers, path: str
+    ) -> None:
+        codes = await _recorded_codes()
+        headers = await auth_headers("analyst")
+
+        default = await client.get(path, params=TRAFFIC_ENDPOINTS[path], headers=headers)
+        assert default.status_code == 200, default.text
+        assert default.json()["recorded_footage"] == {
+            "included": False,
+            "cameras": codes,
+            "excluded_cameras": codes,
+        }
+
+        included = await client.get(
+            path, params={**TRAFFIC_ENDPOINTS[path], "include_recorded": "true"}, headers=headers
+        )
+        assert included.status_code == 200, included.text
+        assert included.json()["recorded_footage"] == {
+            "included": True,
+            "cameras": codes,
+            "excluded_cameras": [],
+        }
+
+    async def test_flow_counts_live_cameras_only_unless_asked(
+        self, client: AsyncClient, auth_headers, live_and_recorded: tuple[dict, dict, dict]
+    ) -> None:
+        live, _, recorded = live_and_recorded
+        await _insert_detections(live["id"], [WINDOW_START + timedelta(minutes=m) for m in (1, 2)])
+        await _insert_detections(
+            recorded["id"], [WINDOW_START + timedelta(minutes=m) for m in (3, 4, 5)]
+        )
+        headers = await auth_headers("operator")
+
+        default = (
+            await client.get("/api/v1/analytics/flow", params=_in_window(), headers=headers)
+        ).json()
+        totals = {s["key"]: s["total"] for s in default["series"]}
+        assert totals.get(live["camera_code"]) == 2
+        assert recorded["camera_code"] not in totals
+        assert recorded["camera_code"] in default["recorded_footage"]["excluded_cameras"]
+
+        included = (
+            await client.get(
+                "/api/v1/analytics/flow",
+                params=_in_window(include_recorded="true"),
+                headers=headers,
+            )
+        ).json()
+        totals = {s["key"]: s["total"] for s in included["series"]}
+        assert totals.get(live["camera_code"]) == 2
+        assert totals.get(recorded["camera_code"]) == 3
+        assert included["total_vehicles"] == default["total_vehicles"] + 3
+
+    async def test_hotspots_heatmap_and_history_leave_the_recording_out(
+        self, client: AsyncClient, auth_headers, live_and_recorded: tuple[dict, dict, dict]
+    ) -> None:
+        live, _, recorded = live_and_recorded
+        await _insert_detections(live["id"], [WINDOW_START + timedelta(minutes=1)])
+        await _insert_detections(
+            recorded["id"], [WINDOW_START + timedelta(minutes=m) for m in (2, 3, 4, 5)]
+        )
+        headers = await auth_headers("operator")
+
+        async def codes_and_history(**extra: str) -> tuple[set[str], set[str], int]:
+            hotspots = (
+                await client.get(
+                    "/api/v1/analytics/hotspots", params=_in_window(**extra), headers=headers
+                )
+            ).json()
+            heatmap = (
+                await client.get(
+                    "/api/v1/analytics/heatmap", params=_in_window(**extra), headers=headers
+                )
+            ).json()
+            history = (
+                await client.get(
+                    "/api/v1/analytics/traffic/history",
+                    params=_in_window(group_by="camera", **extra),
+                    headers=headers,
+                )
+            ).json()
+            return (
+                {h["camera_code"] for h in hotspots["by_volume"]},
+                {f["properties"]["camera_code"] for f in heatmap["features"]},
+                sum(p["vehicles"] for p in history["points"]),
+            )
+
+        hot, heat, vehicles = await codes_and_history()
+        assert live["camera_code"] in hot and live["camera_code"] in heat
+        assert recorded["camera_code"] not in hot and recorded["camera_code"] not in heat
+
+        hot_all, heat_all, vehicles_all = await codes_and_history(include_recorded="true")
+        assert recorded["camera_code"] in hot_all and recorded["camera_code"] in heat_all
+        assert vehicles_all == vehicles + 4
+
+    async def test_legs_touching_a_recording_are_left_out(
+        self, client: AsyncClient, auth_headers, live_and_recorded: tuple[dict, dict, dict]
+    ) -> None:
+        """A leg into or out of a recording is the loop's timing, not a road's.
+        The live leg beside it is unaffected."""
+        a, b, recorded = (camera["camera_code"] for camera in live_and_recorded)
+        snapshot_at = WINDOW_START + timedelta(minutes=50)
+        await _insert_track(
+            _plate("RECLEG"),
+            snapshot_at,
+            [
+                _hop(a, WINDOW_START + timedelta(minutes=10)),
+                _hop(recorded, WINDOW_START + timedelta(minutes=20)),
+                _hop(b, WINDOW_START + timedelta(minutes=30)),
+            ],
+        )
+        await _insert_track(
+            _plate("LIVELEG"),
+            snapshot_at,
+            [
+                _hop(a, WINDOW_START + timedelta(minutes=10)),
+                _hop(b, WINDOW_START + timedelta(minutes=30)),
+            ],
+        )
+        headers = await auth_headers("analyst")
+
+        async def pairs_and_legs(**extra: str) -> tuple[set[tuple[str, str]], int]:
+            routes = (
+                await client.get(
+                    "/api/v1/analytics/routes", params=_in_window(**extra), headers=headers
+                )
+            ).json()
+            speed = (
+                await client.get(
+                    "/api/v1/analytics/speed", params=_in_window(**extra), headers=headers
+                )
+            ).json()
+            return (
+                {(p["from_camera"], p["to_camera"]) for p in routes["pairs"]},
+                speed["provenance"]["legs_considered"],
+            )
+
+        pairs, legs = await pairs_and_legs()
+        assert (a, b) in pairs
+        assert not any(recorded in pair for pair in pairs)
+
+        pairs_all, legs_all = await pairs_and_legs(include_recorded="true")
+        assert {(a, b), (a, recorded), (recorded, b)} <= pairs_all
+        assert legs_all == legs + 2

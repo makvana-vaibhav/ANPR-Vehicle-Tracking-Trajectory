@@ -18,8 +18,8 @@ import asyncio
 import hashlib
 import json
 import logging
-from dataclasses import dataclass
-from urllib.parse import urlparse, urlunparse
+from dataclasses import dataclass, replace
+from urllib.parse import quote, urlparse, urlunparse
 
 import httpx
 
@@ -275,6 +275,35 @@ def via_local_gateway(url: str, gateway: tuple[str, str] | None) -> str:
         return url
     netloc = local_host + (f":{parsed.port}" if parsed.port else "")
     return urlunparse(parsed._replace(netloc=netloc))
+
+
+def with_gateway_credentials(
+    stream: CameraStream, gateway_hosts: frozenset[str], user: str, password: str
+) -> CameraStream:
+    """`stream`, carrying this worker's reader identity when it is on our gateway.
+
+    MediaMTX asks the API about every read (infra/mediamtx/mediamtx.yml), and
+    the API lets the ANPR workers read with MEDIAMTX_READ_USER/_PASSWORD. The
+    identity is added here, from the worker's own environment, rather than
+    travelling in the roster: the roster sits in Redis and is read by anything
+    that can read the bus. Only RTSP URLs on our own gateway are touched — a
+    federated camera's URL names somebody else's host and keeps its own
+    credentials, or none. Every log line that prints a URL redacts it.
+    """
+    url = stream.rtsp_url
+    if not url or not password:
+        return stream
+    parsed = urlparse(url)
+    if (
+        parsed.scheme != "rtsp"
+        or parsed.hostname not in gateway_hosts
+        or parsed.username
+    ):
+        return stream
+    netloc = f"{quote(user, safe='')}:{quote(password, safe='')}@{parsed.hostname}"
+    if parsed.port:
+        netloc += f":{parsed.port}"
+    return replace(stream, rtsp_url=urlunparse(parsed._replace(netloc=netloc)))
 
 
 async def rtsp_reachable(host: str, port: int = 8554, timeout: float = 4.0) -> bool:

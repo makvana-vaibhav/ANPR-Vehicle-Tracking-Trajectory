@@ -1,0 +1,51 @@
+# Approximate positions for the organisers' grid cameras (SBX-cam01..30).
+#
+# The grid publishes only a camera name, never coordinates. Each position below
+# was geocoded from that name with OpenStreetMap Nominatim on 12 Oct 2026.
+# THESE POSITIONS ARE APPROXIMATE AND WERE NEVER SURVEYED. A point is the OSM
+# feature the name matched (a junction, landmark, locality, village or town),
+# not the pole the camera is mounted on. If the organisers publish real
+# coordinates, those must win.
+#
+# placement   geocoded = junction/landmark/locality/village match
+#             city     = the name gives only a town; point is the town node
+#             unknown  = not placed (no match, or ambiguous); lat/lon empty
+# confidence  high = named junction/landmark; medium = locality, village, town,
+#             or the only same-named feature in OSM; low = not placed
+# district    spelling of web/public/data/gujarat_districts.geojson; for
+#             unknown rows it is the district already believed, not geocoded
+# query       the Nominatim q string that produced the accepted result
+#             (for unknown rows, the most representative query tried)
+#
+# © OpenStreetMap contributors, ODbL 1.0 (https://www.openstreetmap.org/copyright)
+camera_code,grid_name,lat,lon,placement,confidence,district,source,query,osm_type,osm_id,osm_name,note
+SBX-cam01,Chiman bhai Bridge,23.069529,72.588016,geocoded,high,Ahmedabad,nominatim,"Chimanbhai, Ahmedabad",way,37722606,Chimanbhai patel Flyover,Matched the 'Chimanbhai patel Flyover' road way in Ranip; point is the way's centre and the camera may be anywhere along the flyover.
+SBX-cam02,Janpath,,,unknown,low,Ahmedabad,,"Janpath, Ahmedabad",,,,"No OSM feature named Janpath in Ahmedabad (only hotels on SH41 in Mahesana); not placed, district from the existing mapping."
+SBX-cam03,O.N.G.C. Office,23.103638,72.586766,geocoded,medium,Ahmedabad,nominatim,"ONGC, Ahmedabad",node,611572697,ONGC Bus Depo,"Matched the 'ONGC Bus Depo' bus stop on SH41 in Chandkheda, beside ONGC's Ahmedabad complex; no OSM feature for the office itself."
+SBX-cam04,Paldi Circle,23.014553,72.563543,geocoded,medium,Ahmedabad,nominatim,"Paldi, Ahmedabad",node,1559491365,Paldi,"Paldi suburb node, not the circle; no OSM feature named Paldi Circle or Paldi Cross Road."
+SBX-cam05,Visat teen Rasta,,,unknown,low,Ahmedabad,,"Visat, Ahmedabad",,,,"No OSM junction or locality named Visat; only an apartment block 'Jay Visat Eminence' in Tragad matched, which is not the junction."
+SBX-cam06,Timbavadi gate-Junagadh,21.503307,70.433500,geocoded,medium,Junagadh,nominatim,"Timbavadi, Junagadh",node,11528794659,Timbavadi,"Timbavadi neighbourhood node in Junagadh city, not the gate itself."
+SBX-cam07,hero-showroom-gir-somnath,,,unknown,low,Gir Somnath,,"Hero, Gir Somnath",,,,"Name gives only a district and a showroom brand; no matching OSM feature, not placed."
+SBX-cam08,majewadi-gate-junagadh,,,unknown,low,Junagadh,,"Majevadi, Junagadh",,,,"Only 'PHC, Majevadi' matched, a health centre in Majevadi village about 10 km north-west of the city centre; the gate is not in OSM, not placed."
+SBX-cam09,new-bypass-near-by-circle-junagadh-2,,,unknown,low,Junagadh,,"Bypass Circle, Junagadh",,,,"Name does not identify a specific circle on the Junagadh bypass; no matching OSM feature, not placed."
+SBX-cam10,char-chowk-road-2-junagadh,,,unknown,low,Junagadh,,"Char Chowk, Junagadh",,,,No OSM feature named Char Chowk in Junagadh (spellings Char/Chaar tried); not placed.
+SBX-cam11,dolatpara-junagadh,21.558757,70.465922,geocoded,medium,Junagadh,nominatim,"Dolatpara, Junagadh",node,11528540885,Dolatpara,"Dolatpara suburb node in Junagadh city; locality centroid, not a junction."
+SBX-cam12,Tri Mandir Adalaj Tollnaka,23.178482,72.572128,geocoded,high,Gandhinagar,nominatim,"Trimandir, Adalaj",node,3136114443,Dadabhagwan Trimandir - Adalaj,"Matched the Dada Bhagwan Trimandir at Adalaj; the toll naka beside it is not in OSM, so the point is the temple."
+SBX-cam13,CN Vidhyalaya,23.018995,72.548889,geocoded,high,Ahmedabad,nominatim,"C N Vidyalaya, Ahmedabad",way,336335115,Sheth Chimanlal Nagindas Vidyavihar,"Matched the Sheth C.N. Vidyavihar school campus in Ambawadi; point is the campus centre, not the road outside it."
+SBX-cam14,Delight RLVD,,,unknown,low,Ahmedabad,,"Delight, Ahmedabad",,,,"No OSM feature named Delight in Ahmedabad (only shops in Bhuj, Jamnagar, Dwarka); not placed."
+SBX-cam15,Suvidha park,23.014680,72.559172,geocoded,high,Ahmedabad,nominatim,"Suvidha, Ahmedabad",node,3267421509,Suvidha Crossroads,Matched the junction node 'Suvidha Crossroads' in Paldi; the word 'park' is not in any OSM name.
+SBX-cam16,Visat P2,,,unknown,low,Ahmedabad,,Visat,,,,No OSM junction or locality named Visat in Gujarat (only an apartment block and a hospital in Mansa); not placed.
+SBX-cam17,Rajkot Bus Port CCTV,22.291148,70.802141,geocoded,high,Rajkot,nominatim,Rajkot bus station,node,4314216397,Rajkot Bus station,"Matched the 'Rajkot Bus station' on Dhebar Road, the central ST bus station that is the Rajkot bus port; OSM does not name it 'Bus Port'."
+SBX-cam18,Rajkot CCTV,22.305326,70.802838,city,medium,Rajkot,nominatim,"Rajkot, Gujarat",node,1393852189,Rajkot,Town only: the name gives no junction; Rajkot city node.
+SBX-cam19,"KHAPARIA GRAM PANCHAYAT , TALUKA GANDEVI, DISTRICT NAVSARI",20.863404,73.048965,geocoded,medium,Navsari,nominatim,"Khapariya, Gandevi",node,11166515821,Khapariya,"Khapariya village node in Gandevi taluka; village centroid, not the gram panchayat office."
+SBX-cam20,Mohanpura,,,unknown,low,,,Mohanpura,,,,"No OSM match in Gujarat, and Mohanpura is a common village name with nothing in the camera name to choose a district; not placed."
+SBX-cam21,Patan Dethali Char Rasta,23.916615,72.361147,geocoded,high,Patan,nominatim,"Dethali, Patan",way,225384273,Dethali Circle,"Matched the road way 'Dethali Circle' at Siddhpur, Patan district."
+SBX-cam22,BK Mervada tran Rasta,,,unknown,low,,,"Mervada, Banaskantha",,,,No village or junction named Mervada/Merwada/Meravada (or મેરવાડા) in OSM for Gujarat; the only hit is a temple in Mahesana; not placed.
+SBX-cam23,kheram,,,unknown,low,,,Kheram,,,,No OSM feature named Kheram (or ખેરમ) in Gujarat; not placed.
+SBX-cam24,dehgam,23.168191,72.822328,city,medium,Gandhinagar,nominatim,Dahegam,node,2313692616,Dahegam,"Town only: the name gives no junction; OSM town node, spelled Dahegam."
+SBX-cam25,dhanori,20.838862,73.023955,geocoded,medium,Navsari,nominatim,Dhanori,node,7285514534,"Civil Hospital, Dhanori","Only Gujarat match is 'Civil Hospital, Dhanori' in Gandevi taluka, Navsari; no village node, so the point is the hospital, and uniqueness is only within OSM."
+SBX-cam26,TANKAL,20.860591,73.130617,geocoded,medium,Navsari,nominatim,Tankal,node,7285514560,"PHC, Tankal","Only Gujarat match is 'PHC, Tankal' in Chikhli taluka, Navsari; no village node, so the point is the health centre, and uniqueness is only within OSM."
+SBX-cam27,bilimora,20.767169,72.969345,city,medium,Navsari,nominatim,"Bilimora, Navsari",node,1997049602,Bilimora,Town only: the name gives no junction; Bilimora town node.
+SBX-cam28,bilimora,20.767169,72.969345,city,medium,Navsari,nominatim,"Bilimora, Navsari",node,1997049602,Bilimora,Town only: the name gives no junction; Bilimora town node.
+SBX-cam29,bilimora,20.767169,72.969345,city,medium,Navsari,nominatim,"Bilimora, Navsari",node,1997049602,Bilimora,Town only: the name gives no junction; Bilimora town node.
+SBX-cam30,Gandhidham Rambaugh p2,23.075403,70.090851,geocoded,medium,Kachchh,nominatim,Rambaug,node,11168803475,Rambaug,"Matched an OSM node 'Rambaug' in Adipur, Gandhidham taluka (tagged highway=services); area-level, not a surveyed junction."

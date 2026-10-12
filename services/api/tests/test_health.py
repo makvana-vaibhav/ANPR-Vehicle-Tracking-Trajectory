@@ -22,7 +22,7 @@ class TestLiveness:
         assert response.status_code == 200
         body = response.json()
         assert body["status"] == "alive"
-        assert body["service"] == "NagarNetra"
+        assert body["service"] == "Contrail"
 
     async def test_reports_uptime_and_utc_timestamps(self, client: AsyncClient) -> None:
         """Timestamps are timezone-aware UTC (CLAUDE.md §5)."""
@@ -141,6 +141,14 @@ class TestServiceBanner:
         assert "Model 5" in body["model"]
         assert body["docs"] == "/docs"
 
+    async def test_names_the_product_not_the_old_brief(self, client: AsyncClient) -> None:
+        """The banner says Contrail and Sentinel; nothing from the SIH26127 framing."""
+        body = (await client.get("/")).json()
+
+        assert body["service"] == "Contrail"
+        assert "Sentinel" in body["description"]
+        assert "SIH" not in body["description"]
+
 
 class TestOpenAPI:
     """The generated contract, which docs/API.md is built from."""
@@ -150,6 +158,6 @@ class TestOpenAPI:
 
         assert response.status_code == 200
         schema = response.json()
-        assert schema["info"]["title"] == "NagarNetra"
+        assert schema["info"]["title"] == "Contrail"
         assert "/health" in schema["paths"]
         assert "/ready" in schema["paths"]

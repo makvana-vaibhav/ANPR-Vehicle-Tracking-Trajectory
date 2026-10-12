@@ -2,12 +2,16 @@
   "name": "contrail-browser-tests",
   "private": true,
   "type": "module",
-  "description": "End-to-end flows and screenshots in a real browser against the running stack",
+  "description": "End-to-end flows, screenshots, the captioned demo video and the submission PDFs, in a real browser against the running stack",
   "scripts": {
     "flows": "node flows.mjs",
-    "shot": "node shot.mjs"
+    "shot": "node shot.mjs",
+    "record": "node record_demo.mjs",
+    "pdf": "node export_pdf.mjs"
   },
   "dependencies": {
+    "marked": "18.1.0",
+    "mermaid": "12.1.0",
     "playwright-core": "1.49.1"
   }
 }

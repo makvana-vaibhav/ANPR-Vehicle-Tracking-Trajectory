@@ -36,6 +36,9 @@ jobs:
       - name: Validate every compose profile
         run: |
           cp .env.example .env
+          # Secrets are generated per install; compose has no fallbacks and
+          # refuses to interpolate an empty one.
+          python3 scripts/gen_secrets.py --env .env
           docker compose config --quiet
           docker compose --profile ai --profile ai-multi config --quiet
           docker compose -f docker-compose.yml -f docker-compose.scale.yml config --quiet
@@ -109,8 +112,14 @@ jobs:
       # the same development samples .env.example ships; none is a secret.
       JWT_SECRET_KEY: dev_only_insecure_ci_secret_0123456789abcdef
       MINIO_ROOT_PASSWORD: nagarnetra_dev_pw
-      # The suite signs in as every seeded role with the documented demo password.
-      BOOTSTRAP_ADMIN_PASSWORD: NagarNetra@2026
+      # The suite signs in as every seeded role, each with its own password
+      # (scripts/seed.py). Throwaway values for a throwaway database.
+      BOOTSTRAP_ADMIN_PASSWORD: ci-admin-Throwaway-7q
+      DEMO_PASSWORD_SUPERVISOR: ci-supervisor-Throwaway-7q
+      DEMO_PASSWORD_OPERATOR: ci-operator-Throwaway-7q
+      DEMO_PASSWORD_ANALYST: ci-analyst-Throwaway-7q
+      DEMO_PASSWORD_AUDITOR: ci-auditor-Throwaway-7q
+      DEMO_PASSWORD_GSRTC_INTEGRATION: ci-gsrtc-Throwaway-7q
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0

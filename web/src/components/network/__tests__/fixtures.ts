@@ -37,13 +37,13 @@ export function camera(code: string, overrides: Partial<Camera> = {}): Camera {
 
 /** The recorded demonstration camera, placed at its junction. */
 export const DEMO = camera('CAM-DEMO-01', {
-  name: 'Paldi — Ashram Road',
+  name: 'Recorded demo clip (UK road) — not a Gujarat camera',
   junction: 'Ashram Road @ Paldi',
   district: 'Sabarmati',
   lat: 23.00937,
   lon: 72.56212,
   status: 'online',
-  vms_name: 'Ahmedabad City ANPR Grid (simulated)',
+  vms_name: 'Recorded demo feed (local simulator)',
   vms_vendor: 'simulated',
   department_code: 'MUNICIPAL',
   department_name: 'Urban Development & Urban Housing (Municipal)',

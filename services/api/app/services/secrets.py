@@ -58,11 +58,16 @@ class Credentials:
     __str__ = __repr__
 
 
-def resolve_credentials(reference: str | None) -> Credentials | None:
+def resolve_credentials(reference: str | None, *, context: str | None = None) -> Credentials | None:
     """Resolve a credentials pointer, or None when unavailable.
 
     Returns None rather than raising: a VMS with no configured credentials is a
     normal state during phased onboarding, and the adapter handles it.
+
+    ``context`` names the column an ``enc://`` value was sealed for. It
+    defaults to the VMS column; a camera's own credentials are sealed for
+    ``camera-credentials`` (app/services/camera_credentials.py), so a token
+    lifted from one column cannot be opened as the other.
     """
     if not reference:
         return None
@@ -74,7 +79,7 @@ def resolve_credentials(reference: str | None) -> Credentials | None:
     if scheme == "file":
         return _from_file(remainder)
     if scheme == "enc":
-        return _from_ciphertext(remainder)
+        return _from_ciphertext(remainder, context or CREDENTIALS_CONTEXT)
     if scheme == "vault":
         # Deliberately not implemented on the demo path: there is no Vault in
         # the compose stack, and pretending otherwise would be a stub. The
@@ -134,7 +139,7 @@ def _from_file(spec: str) -> Credentials | None:
 CREDENTIALS_CONTEXT = "vms-credentials"
 
 
-def _from_ciphertext(spec: str) -> Credentials | None:
+def _from_ciphertext(spec: str, context: str = CREDENTIALS_CONTEXT) -> Credentials | None:
     """``enc://<token>`` — an AES-256-GCM sealed ``username:password``.
 
     Returns None on any failure, consistent with the rest of this module: an
@@ -151,7 +156,7 @@ def _from_ciphertext(spec: str) -> Credentials | None:
         return None
 
     try:
-        content = decrypt_value(token, context=CREDENTIALS_CONTEXT)
+        content = decrypt_value(token, context=context)
     except EncryptionNotConfigured:
         log.warning(
             "secrets.enc_no_key_ring",

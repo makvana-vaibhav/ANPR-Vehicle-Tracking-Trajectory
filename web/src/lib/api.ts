@@ -423,6 +423,13 @@ export interface CameraInput {
   protocol?: string | null
   stream_url?: string | null
   sub_stream_url?: string | null
+  /** The camera's own login. Write-only: the API seals the password into its
+   *  encrypted store and never returns either. A login left inside
+   *  `stream_url` is split out the same way. */
+  stream_username?: string | null
+  stream_password?: string | null
+  /** On an edit: forget the stored login. */
+  clear_credentials?: boolean
   resolution?: string | null
   fps?: number | null
   /** Filename of a recorded clip to replay instead of pulling a live stream.
@@ -898,14 +905,21 @@ export const getAudit = (query: AuditQuery = {}) => {
 export type AnalyticsWindowQuery = {
   since?: string
   until?: string
+} & RecordedFootageQuery
+
+/** Every traffic figure leaves cameras replaying a recorded clip out unless
+ *  this is true — see `RecordedFootage` in types.ts. */
+export type RecordedFootageQuery = {
+  include_recorded?: boolean
 }
 
 function analyticsParams(
-  query: Record<string, string | number | undefined>,
+  query: Record<string, string | number | boolean | undefined>,
 ): URLSearchParams {
   const params = new URLSearchParams()
   for (const [key, value] of Object.entries(query)) {
-    if (value !== undefined && value !== '') params.set(key, String(value))
+    // `false` is every boolean's server default, so it is left off the URL.
+    if (value !== undefined && value !== '' && value !== false) params.set(key, String(value))
   }
   return params
 }
@@ -962,7 +976,11 @@ export const getTrafficHistory = (
 // ── Predictive traffic (P10) ─────────────────────────────────────────────
 
 export const getCongestionForecast = (
-  query: { at?: string; group_by?: 'camera' | 'corridor'; corridor?: string } = {},
+  query: {
+    at?: string
+    group_by?: 'camera' | 'corridor'
+    corridor?: string
+  } & RecordedFootageQuery = {},
 ) => request<CongestionResponse>(`/api/v1/predictions/congestion?${analyticsParams(query)}`)
 
 // ── Vehicle re-identification (P11) ──────────────────────────────────────

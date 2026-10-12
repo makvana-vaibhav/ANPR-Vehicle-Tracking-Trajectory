@@ -103,7 +103,9 @@ async def probe_now(
 
     probe = await health_monitor.probe_camera(session, camera)
     previous = camera.status
-    camera.status = probe.status.value
+    # A probe that could not ask (the integration refused or did not answer)
+    # leaves the last known status alone, as the monitor does.
+    camera.status = health_monitor.status_after_manual_probe(previous, probe)
     await session.commit()
 
     await audit.record(
@@ -114,7 +116,7 @@ async def probe_now(
         resource_id=camera_id,
         params={
             "camera_code": camera.camera_code,
-            "result": probe.status.value,
+            "result": camera.status,
             "error_code": probe.error_code,
         },
     )
@@ -122,7 +124,10 @@ async def probe_now(
     return {
         "camera_code": camera.camera_code,
         "previous_status": previous,
-        "status": probe.status.value,
+        "status": camera.status,
+        # True when the probe could not ask, so the status shown is the last
+        # known one rather than this probe's finding.
+        "status_held": camera.status == previous and probe.status.value != previous,
         "reachable": probe.reachable,
         "latency_ms": probe.latency_ms,
         "fps_actual": probe.fps_actual,

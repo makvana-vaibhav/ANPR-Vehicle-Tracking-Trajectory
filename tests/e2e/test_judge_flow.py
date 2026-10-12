@@ -36,7 +36,8 @@ PINNED_CAMERA = (
     .split(",")[0]
     .strip()
 )
-ADMIN_PW = os.environ.get("BOOTSTRAP_ADMIN_PASSWORD", "NagarNetra@2026")
+# From .env through the container's environment; no published default.
+ADMIN_PW = os.environ["BOOTSTRAP_ADMIN_PASSWORD"]
 
 pytestmark = pytest.mark.asyncio
 

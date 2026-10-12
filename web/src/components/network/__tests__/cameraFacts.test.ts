@@ -13,8 +13,10 @@ import {
   findCamera,
   matchesFilter,
   NO_FILTER,
+  POSITION_WORDS,
   positionKind,
   probeErrorWords,
+  staleWords,
   readCameraParam,
   readPositionFilter,
   sourceKind,
@@ -61,6 +63,44 @@ describe('positionKind', () => {
   it('tells a town-centre camera from a placed one', () => {
     expect(positionKind(camera('SBX-cam01'))).toBe('town')
     expect(positionKind(DEMO)).toBe('exact')
+  })
+
+  it('never presents a position geocoded from the name as surveyed', () => {
+    const geocoded = camera('SBX-cam15', {
+      lat: 23.01468,
+      lon: 72.55917,
+      tags: ['sandbox', 'grid-id:cam15', 'placement:geocoded'],
+    })
+    expect(positionKind(geocoded)).toBe('approx')
+    expect(POSITION_WORDS.approx).toMatch(/approximate/i)
+    expect(POSITION_WORDS.approx).toMatch(/geocoded from the name/)
+    expect(POSITION_WORDS.approx).toContain('© OpenStreetMap contributors')
+  })
+})
+
+describe('staleWords', () => {
+  it('is silent for a fresh status', () => {
+    expect(staleWords(camera('SBX-cam10', { status: 'online' }))).toBeNull()
+  })
+
+  it('says a held status is the last known one, when it was confirmed and why', () => {
+    const words = staleWords(
+      camera('SBX-cam10', {
+        status: 'online',
+        status_stale_reason: 'grid_refused',
+        // 10:42 IST
+        status_confirmed_at: '2026-10-12T05:12:00Z',
+      }),
+    )
+    expect(words).toContain('Last known')
+    expect(words).toContain('10:42 IST')
+    expect(words).toMatch(/refusing our session/)
+  })
+
+  it('admits when nothing confirmed it in a day', () => {
+    expect(
+      staleWords(camera('SBX-cam10', { status_stale_reason: 'sandbox_unreachable' })),
+    ).toMatch(/not confirmed in the last 24 h/)
   })
 })
 
@@ -189,6 +229,7 @@ describe('tagsAfterPlacing', () => {
       'grid-id:cam20',
     ])
     expect(tagsAfterPlacing(['sandbox', 'placement:city'])).toEqual(['sandbox'])
+    expect(tagsAfterPlacing(['sandbox', 'placement:geocoded'])).toEqual(['sandbox'])
     expect(tagsAfterPlacing(null)).toBeNull()
   })
 })

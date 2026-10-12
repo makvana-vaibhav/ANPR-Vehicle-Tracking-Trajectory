@@ -1,0 +1,33 @@
+window_from_utc,window_to_utc,source,camera_code,name,district,department,vms,vehicles_observed,plate_reads,grammar_valid_reads,distinct_valid_plates,indian_format_reads,first_read_ist,last_read_ist
+2026-10-11T18:30:00Z,2026-10-12T06:35:48Z,government,SBX-cam22,BK Mervada tran Rasta,,,Hosted Camera Grid,349,131,87,80,93,12 Oct 00:14:54,12 Oct 09:10:17
+2026-10-11T18:30:00Z,2026-10-12T06:35:48Z,government,SBX-cam10,char-chowk-road-2-junagadh,Junagadh,,Hosted Camera Grid,1030,66,8,8,7,12 Oct 00:00:05,12 Oct 07:30:20
+2026-10-11T18:30:00Z,2026-10-12T06:35:48Z,government,SBX-cam21,Patan Dethali Char Rasta,Patan,,Hosted Camera Grid,284,54,35,33,37,12 Oct 00:07:40,12 Oct 07:02:28
+2026-10-11T18:30:00Z,2026-10-12T06:35:48Z,government,SBX-cam01,Chiman bhai Bridge,Ahmedabad,,Hosted Camera Grid,61,0,0,0,0,,
+2026-10-11T18:30:00Z,2026-10-12T06:35:48Z,government,SBX-cam02,Janpath,Ahmedabad,,Hosted Camera Grid,20,0,0,0,0,,
+2026-10-11T18:30:00Z,2026-10-12T06:35:48Z,government,SBX-cam03,O.N.G.C. Office,Ahmedabad,,Hosted Camera Grid,,0,0,0,0,,
+2026-10-11T18:30:00Z,2026-10-12T06:35:48Z,government,SBX-cam04,Paldi Circle,Ahmedabad,,Hosted Camera Grid,,0,0,0,0,,
+2026-10-11T18:30:00Z,2026-10-12T06:35:48Z,government,SBX-cam05,Visat teen Rasta,Ahmedabad,,Hosted Camera Grid,,0,0,0,0,,
+2026-10-11T18:30:00Z,2026-10-12T06:35:48Z,government,SBX-cam06,Timbavadi gate-Junagadh,Junagadh,,Hosted Camera Grid,,0,0,0,0,,
+2026-10-11T18:30:00Z,2026-10-12T06:35:48Z,government,SBX-cam07,hero-showroom-gir-somnath,Gir Somnath,,Hosted Camera Grid,,0,0,0,0,,
+2026-10-11T18:30:00Z,2026-10-12T06:35:48Z,government,SBX-cam08,majewadi-gate-junagadh,Junagadh,,Hosted Camera Grid,,0,0,0,0,,
+2026-10-11T18:30:00Z,2026-10-12T06:35:48Z,government,SBX-cam09,new-bypass-near-by-circle-junagadh-2,Junagadh,,Hosted Camera Grid,,0,0,0,0,,
+2026-10-11T18:30:00Z,2026-10-12T06:35:48Z,government,SBX-cam11,dolatpara-junagadh,Junagadh,,Hosted Camera Grid,,0,0,0,0,,
+2026-10-11T18:30:00Z,2026-10-12T06:35:48Z,government,SBX-cam12,Tri Mandir Adalaj Tollnaka,Gandhinagar,,Hosted Camera Grid,,0,0,0,0,,
+2026-10-11T18:30:00Z,2026-10-12T06:35:48Z,government,SBX-cam13,CN Vidhyalaya,Ahmedabad,,Hosted Camera Grid,,0,0,0,0,,
+2026-10-11T18:30:00Z,2026-10-12T06:35:48Z,government,SBX-cam14,Delight RLVD,Ahmedabad,POLICE,Hosted Camera Grid,,0,0,0,0,,
+2026-10-11T18:30:00Z,2026-10-12T06:35:48Z,government,SBX-cam15,Suvidha park,Ahmedabad,,Hosted Camera Grid,,0,0,0,0,,
+2026-10-11T18:30:00Z,2026-10-12T06:35:48Z,government,SBX-cam16,Visat P2,Ahmedabad,,Hosted Camera Grid,,0,0,0,0,,
+2026-10-11T18:30:00Z,2026-10-12T06:35:48Z,government,SBX-cam17,Rajkot Bus Port CCTV,Rajkot,GSRTC,Hosted Camera Grid,,0,0,0,0,,
+2026-10-11T18:30:00Z,2026-10-12T06:35:48Z,government,SBX-cam18,Rajkot CCTV,Rajkot,,Hosted Camera Grid,,0,0,0,0,,
+2026-10-11T18:30:00Z,2026-10-12T06:35:48Z,government,SBX-cam19,"KHAPARIA GRAM PANCHAYAT , TALUKA GANDEVI, DISTRICT NAVSARI",Navsari,PANCHAYAT,Hosted Camera Grid,,0,0,0,0,,
+2026-10-11T18:30:00Z,2026-10-12T06:35:48Z,government,SBX-cam20,Mohanpura,,,Hosted Camera Grid,,0,0,0,0,,
+2026-10-11T18:30:00Z,2026-10-12T06:35:48Z,government,SBX-cam23,kheram,,,Hosted Camera Grid,,0,0,0,0,,
+2026-10-11T18:30:00Z,2026-10-12T06:35:48Z,government,SBX-cam24,dehgam,Gandhinagar,,Hosted Camera Grid,,0,0,0,0,,
+2026-10-11T18:30:00Z,2026-10-12T06:35:48Z,government,SBX-cam25,dhanori,Navsari,,Hosted Camera Grid,,0,0,0,0,,
+2026-10-11T18:30:00Z,2026-10-12T06:35:48Z,government,SBX-cam26,TANKAL,Navsari,,Hosted Camera Grid,,0,0,0,0,,
+2026-10-11T18:30:00Z,2026-10-12T06:35:48Z,government,SBX-cam27,bilimora,Navsari,,Hosted Camera Grid,,0,0,0,0,,
+2026-10-11T18:30:00Z,2026-10-12T06:35:48Z,government,SBX-cam28,bilimora,Navsari,,Hosted Camera Grid,,0,0,0,0,,
+2026-10-11T18:30:00Z,2026-10-12T06:35:48Z,government,SBX-cam29,bilimora,Navsari,,Hosted Camera Grid,,0,0,0,0,,
+2026-10-11T18:30:00Z,2026-10-12T06:35:48Z,government,SBX-cam30,Gandhidham Rambaugh p2,Kachchh,,Hosted Camera Grid,,0,0,0,0,,
+2026-10-11T18:30:00Z,2026-10-12T06:35:48Z,own,CAM-DEMO-01,Recorded demo clip (UK road) — not a Gujarat camera,Sabarmati,MUNICIPAL,Recorded demo feed (local simulator),32222,13193,11791,355,0,12 Oct 00:00:01,12 Oct 12:05:47
+2026-10-11T18:30:00Z,2026-10-12T06:35:48Z,own,CAM-DEMO-02,Persons demo — recorded footage,,MUNICIPAL,Recorded demo feed (local simulator),,0,0,0,0,,

@@ -17,6 +17,7 @@ import argparse
 import asyncio
 import csv
 import os
+import secrets
 import sys
 from datetime import date, datetime
 from pathlib import Path
@@ -27,7 +28,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "services" / "ap
 from sqlalchemy import delete, func, select, text  # noqa: E402
 
 from app.core.config import settings  # noqa: E402
-from app.core.security import hash_password  # noqa: E402
+from app.core.security import hash_password, verify_password  # noqa: E402
 from app.db.session import SessionLocal, dispose_engine  # noqa: E402
 from app.models.enums import AdapterType, CameraStatus, Role, VmsVendor  # noqa: E402
 from app.models.external_registry import (  # noqa: E402
@@ -177,10 +178,21 @@ DEPARTMENTS: list[dict[str, str | None]] = [
 # REST, sandbox — which are code, and unit-tested. What a *connected system*
 # list should show is what is connected.
 
-#: The city fleet's recorder and the CSV that populates it. Defined before
-#: VMS_INSTANCES because that list references FLEET_VMS at module level.
-FLEET_VMS = "Ahmedabad City ANPR Grid (simulated)"
+#: The recorded-footage recorder and the CSV that populates it. Defined before
+#: VMS_INSTANCES because that list references FLEET_VMS at module level. The
+#: name says what it is: footage replayed by the local simulator, not a
+#: department's live grid.
+FLEET_VMS = "Recorded demo feed (local simulator)"
 FLEET_CSV = SEED_DIR / "cameras.csv"
+
+#: Earlier names of a VMS still in VMS_INSTANCES, mapped to the current name.
+#: `seed_vms` renames such a row in place rather than creating a second VMS,
+#: so cameras filed under it stay attached and the seed stays idempotent.
+RENAMED_VMS: dict[str, str] = {
+    # Residue from the city-wide (SIH26127) framing: it read as a real
+    # Ahmedabad camera grid, and it is one recorded clip.
+    "Ahmedabad City ANPR Grid (simulated)": FLEET_VMS,
+}
 
 VMS_INSTANCES: list[dict[str, str]] = [
     {
@@ -210,10 +222,43 @@ VMS_INSTANCES: list[dict[str, str]] = [
 
 # ── Demo users ────────────────────────────────────────────────────────
 # One per role, so a judge can sign in as any role and see the RBAC matrix
-# take effect. The admin password comes from the environment; the rest share
-# a documented demo password. In production these accounts would not exist —
-# see docs/SECURITY.md on account provisioning.
-DEMO_PASSWORD = "NagarNetra@2026"  # noqa: S105 - documented demo credential
+# take effect. In production these accounts would not exist — see
+# docs/SECURITY.md on account provisioning.
+#
+# Every account has its own password, never one in this file. They used to
+# share `NagarNetra@2026`, committed here, so anyone who had read the
+# repository could sign in as the supervisor — who approves persons-watchlist
+# enrolments — and "four eyes" meant one person with two browser tabs. Now:
+#
+# * admin       BOOTSTRAP_ADMIN_PASSWORD
+# * the others  DEMO_PASSWORD_<USERNAME>, upper-cased with `-` as `_`
+#
+# both generated into .env by `make env` (scripts/gen_secrets.py) and handed to
+# this container through env_file. Unset, a random password is generated and
+# printed once, here, and stored nowhere. Every one of these accounts is marked
+# `must_change_password`: someone other than its holder chose it.
+
+#: Published in this repository's history and docs. An account still holding
+#: it is reset by `--reset-demo-passwords`.
+PUBLISHED_DEMO_PASSWORD = "NagarNetra@2026"  # noqa: S105 - the retired shared value
+
+
+def demo_password_key(username: str) -> str:
+    """The .env key holding a demo account's password."""
+    if username == settings.bootstrap_admin_username:
+        return "BOOTSTRAP_ADMIN_PASSWORD"
+    return "DEMO_PASSWORD_" + username.upper().replace("-", "_")
+
+
+def demo_password(username: str) -> tuple[str, bool]:
+    """The password for a demo account, and whether it was generated just now."""
+    if username == settings.bootstrap_admin_username:
+        return settings.bootstrap_admin_password, False
+    configured = os.environ.get(demo_password_key(username), "").strip()
+    if configured:
+        return configured, False
+    return secrets.token_urlsafe(15), True
+
 
 DEMO_USERS: list[dict[str, str | None]] = [
     {
@@ -286,9 +331,17 @@ async def seed_departments() -> dict[str, object]:
     return ids
 
 
-async def seed_users(department_ids: dict[str, object]) -> None:
-    """Insert one user per role."""
-    created = 0
+async def seed_users(department_ids: dict[str, object], *, reset: bool = False) -> None:
+    """Insert one user per role, each with its own password.
+
+    `reset` re-applies the configured passwords to accounts that already
+    exist — how a running deployment leaves the published shared password
+    behind. Without it, an existing account is left exactly as it is, and
+    only one still holding the published password is reported.
+    """
+    created = reset_count = 0
+    shown_once: list[tuple[str, str]] = []
+    still_published: list[str] = []
 
     async with SessionLocal() as session:
         for spec in DEMO_USERS:
@@ -297,16 +350,20 @@ async def seed_users(department_ids: dict[str, object]) -> None:
                 select(User).where(User.username == username)
             )
             if existing is not None:
+                if reset:
+                    password, generated = demo_password(username)
+                    existing.password_hash = hash_password(password)
+                    existing.must_change_password = True
+                    reset_count += 1
+                    if generated:
+                        shown_once.append((username, password))
+                elif verify_password(PUBLISHED_DEMO_PASSWORD, existing.password_hash):
+                    still_published.append(username)
                 continue
 
-            # The admin password is configurable so a deployment can set a real
-            # one; demo accounts use the documented shared password.
-            password = (
-                settings.bootstrap_admin_password
-                if username == settings.bootstrap_admin_username
-                else DEMO_PASSWORD
-            )
-
+            password, generated = demo_password(username)
+            if generated:
+                shown_once.append((username, password))
             session.add(
                 User(
                     username=username,
@@ -315,18 +372,50 @@ async def seed_users(department_ids: dict[str, object]) -> None:
                     role=str(spec["role"]),
                     department_id=department_ids.get(str(spec["department"])),
                     is_active=True,
+                    # Chosen by the seed, not by the holder (models/security.py).
+                    must_change_password=True,
                 )
             )
             created += 1
         await session.commit()
 
-    print(f"  users: {created} created, {len(DEMO_USERS) - created} already present")
+    print(
+        f"  users: {created} created, {reset_count} passwords reset, "
+        f"{len(DEMO_USERS) - created - reset_count} left as they were"
+    )
+    for username in still_published:
+        print(
+            f"  ! {username} still has the published demo password — run "
+            "`python -m scripts.seed --only users --reset-demo-passwords`"
+        )
+    if shown_once:
+        print(
+            "  Generated passwords (shown once, stored nowhere — set them in .env to keep):"
+        )
+        for username, password in shown_once:
+            print(f"    {username} ({demo_password_key(username)}): {password}")
 
 
 async def seed_vms(department_ids: dict[str, object]) -> None:
     """Register the federated VMS instances."""
     created = 0
     async with SessionLocal() as session:
+        for old_name, new_name in RENAMED_VMS.items():
+            current = await session.scalar(
+                select(VmsInstance).where(VmsInstance.name == new_name)
+            )
+            if current is not None:
+                continue
+            legacy = (
+                await session.scalars(
+                    select(VmsInstance).where(VmsInstance.name == old_name).limit(1)
+                )
+            ).first()
+            if legacy is not None:
+                legacy.name = new_name
+                print(f"  vms instances: renamed {old_name!r} -> {new_name!r}")
+        await session.flush()
+
         for spec in VMS_INSTANCES:
             existing = await session.scalar(
                 select(VmsInstance).where(VmsInstance.name == spec["name"])
@@ -820,6 +909,25 @@ async def seed_registry_reference() -> None:
     )
 
 
+async def seed_camera_positions() -> None:
+    """Approximate positions for the grid cameras, geocoded from their names.
+
+    `data/seed/camera_positions.csv`; see `app/services/camera_positions.py`
+    for the rules. A no-op until `scripts/sync_sandbox.py` has registered the
+    grid's cameras, and touches the registry only, never the grid.
+    """
+    from app.services import camera_positions
+
+    async with SessionLocal() as session:
+        changes = await camera_positions.apply_to_registry(session)
+        await session.commit()
+    moved = sum(1 for change in changes if change.get("moved"))
+    print(
+        f"  camera positions: {moved} grid cameras placed from data/seed/camera_positions.csv "
+        f"(approximate, © OpenStreetMap contributors); {len(changes) - moved} districts normalised"
+    )
+
+
 async def main() -> int:
     parser = argparse.ArgumentParser(description="Seed NagarNetra demo data")
     parser.add_argument(
@@ -832,10 +940,19 @@ async def main() -> int:
             "fleet",
             "watchlist",
             "registries",
+            "positions",
             "all",
         ],
         default="all",
         help="Seed a single dataset instead of everything",
+    )
+    parser.add_argument(
+        "--reset-demo-passwords",
+        action="store_true",
+        help=(
+            "Set existing demo accounts to the passwords configured in .env "
+            "(BOOTSTRAP_ADMIN_PASSWORD, DEMO_PASSWORD_<USERNAME>)"
+        ),
     )
     args = parser.parse_args()
 
@@ -843,7 +960,7 @@ async def main() -> int:
     try:
         department_ids = await seed_departments()
         if args.only in ("users", "all"):
-            await seed_users(department_ids)
+            await seed_users(department_ids, reset=args.reset_demo_passwords)
         if args.only in ("vms", "all"):
             await seed_vms(department_ids)
         if args.only in ("demo-camera", "all"):
@@ -871,12 +988,16 @@ async def main() -> int:
             await seed_registry_reference()
         elif args.only == "all":
             print("  registries: skipped — SEED_REGISTRIES is off")
+        if args.only in ("positions", "all"):
+            await seed_camera_positions()
     finally:
         await dispose_engine()
 
-    print("\nDemo credentials:")
-    print(f"  admin / {settings.bootstrap_admin_password}")
-    print(f"  supervisor · operator · analyst · auditor / {DEMO_PASSWORD}")
+    # Where the passwords are, never what they are: this output ends up in
+    # terminals, CI logs and screen recordings.
+    print("\nDemo accounts (passwords in .env, never printed here):")
+    for spec in DEMO_USERS:
+        print(f"  {spec['username']:<18} {demo_password_key(str(spec['username']))}")
     print("\nSeed complete.")
     return 0
 

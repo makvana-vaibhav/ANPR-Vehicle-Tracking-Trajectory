@@ -79,6 +79,11 @@ from app.core.logging import get_logger
 from app.models.registry import Camera
 from app.services.correlator import DWELL_WINDOW, Hop, Route, score_legs
 
+# Re-exported: `route_history` calls `anomaly.recorded_cameras`. The test now
+# lives in `recorded_footage` so traffic analytics applies exactly the same one.
+from app.services.recorded_footage import RECORDED_TAG as RECORDED_TAG
+from app.services.recorded_footage import recorded_cameras as recorded_cameras
+
 log = get_logger("api.anomaly")
 
 #: How far back a transition's frequency and typical duration are learned
@@ -100,11 +105,10 @@ RARE_TRANSITION_SAMPLES = 3
 #: answer is "not enough history", which raises nothing.
 MIN_FLEET_HISTORY_PLATES = 30
 
-#: Cameras whose footage is a recording on a loop. Every revisit there is the
-#: clip starting over, and every timing is the edit's, not the traffic's, so
-#: their sightings are not part of any journey this module scores, nor of the
-#: history it scores against. See "Recorded footage" above.
-RECORDED_TAG = "recorded-footage"
+#: Cameras tagged `RECORDED_TAG` (see `app.services.recorded_footage`) replay a
+#: recording on a loop, so their sightings are not part of any journey this
+#: module scores, nor of the history it scores against. See "Recorded footage"
+#: above.
 
 #: A transition needs at least this many prior *timed* samples before "how
 #: long does this normally take" is a distribution rather than a guess.
@@ -175,14 +179,6 @@ SELECT from_camera, to_camera, plate_normalised, elapsed_s, plausible
 FROM legs
 WHERE from_camera IS NOT NULL
 """
-
-
-async def recorded_cameras(session: AsyncSession) -> frozenset[str]:
-    """Codes of cameras replaying recorded footage. See `RECORDED_TAG`."""
-    rows = await session.execute(
-        text("SELECT camera_code FROM cameras WHERE :tag = ANY(tags)"), {"tag": RECORDED_TAG}
-    )
-    return frozenset(code for (code,) in rows)
 
 
 @dataclass(slots=True)

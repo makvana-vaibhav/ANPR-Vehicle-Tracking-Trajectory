@@ -132,7 +132,16 @@ export default function Dashboard() {
   const loadActivity = useCallback(async () => {
     const since = new Date(Date.now() - 3_600_000).toISOString()
     try {
-      setFlow(await api.getAnalyticsFlow({ since, bucket: '5m', group_by: 'camera' }))
+      // Command shows the pipeline at work, so the recorded clip is counted —
+      // and named in the tile — unlike Insights, which is about traffic.
+      setFlow(
+        await api.getAnalyticsFlow({
+          since,
+          bucket: '5m',
+          group_by: 'camera',
+          include_recorded: true,
+        }),
+      )
     } catch {
       // A role without analytics still gets the headline count, from the
       // detections table directly.
@@ -269,14 +278,17 @@ export default function Dashboard() {
     const n = Math.max(1, Math.ceil((end - start) / width))
     const buckets = new Array<number>(n).fill(0)
     let plates = 0
+    let recordedPlates = 0
+    const recorded = new Set(flow.recorded_footage?.cameras ?? [])
     for (const series of flow.series) {
       for (const point of series.points) {
         plates += point.with_plate
+        if (recorded.has(series.key)) recordedPlates += point.with_plate
         const index = Math.floor((new Date(point.ts).getTime() - start) / width)
         if (index >= 0 && index < n) buckets[index] = (buckets[index] ?? 0) + point.with_plate
       }
     }
-    return { plates, vehicles: flow.total_vehicles, buckets }
+    return { plates, recordedPlates, vehicles: flow.total_vehicles, buckets }
   }, [flow])
 
   const watched = useMemo(() => {
@@ -369,11 +381,15 @@ export default function Dashboard() {
                     </>
                   }
                   detail={
-                    health.unknown > 0
-                      ? `${health.unknown} state unknown`
-                      : `${grid} grid · ${recorded} recorded`
+                    health.integrations?.some((i) => i.state === 'refused')
+                      ? `grid refusing us · ${health.stale ?? 0} last known`
+                      : health.stale
+                        ? `${health.stale} shown as last known`
+                        : health.unknown > 0
+                          ? `${health.unknown} state unknown`
+                          : `${grid} grid · ${recorded} recorded`
                   }
-                  info="Cameras whose last health probe answered, of every camera registered. A camera not probed yet, or behind a grid that is refusing us, is counted as not known rather than as down."
+                  info="Cameras whose status says they deliver video, of every camera registered. A status changes only after several probes agree. While the organisers' grid refuses our session (its cooldown), its cameras keep their last known status rather than flipping, and Fleet health says so; video an AI worker is receiving counts as an answer."
                   tone={
                     health.total === 0 || health.online / health.total < 0.5
                       ? 'bad'
@@ -413,7 +429,9 @@ export default function Dashboard() {
                   aside={activity && <Sparkline values={activity.buckets} />}
                   detail={
                     activity
-                      ? `of ${activity.vehicles.toLocaleString('en-IN')} vehicles seen`
+                      ? activity.recordedPlates > 0
+                        ? `${activity.recordedPlates.toLocaleString('en-IN')} from the recorded clip · ${activity.vehicles.toLocaleString('en-IN')} vehicles seen`
+                        : `of ${activity.vehicles.toLocaleString('en-IN')} vehicles seen`
                       : undefined
                   }
                   info="Readable plates settled by the pipeline in the last hour, in five-minute steps — the line is plates per five minutes, the newest step still filling. Most come from the recorded demo camera, which replays a busy road continuously."

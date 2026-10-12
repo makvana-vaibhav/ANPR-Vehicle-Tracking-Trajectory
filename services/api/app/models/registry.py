@@ -145,6 +145,12 @@ class Camera(Base):
     source_file: Mapped[str | None] = mapped_column(Text)
     resolution: Mapped[str | None] = mapped_column(String(16))
     fps: Mapped[int | None] = mapped_column(SmallInteger)
+    #: The camera's own login, as a *pointer* — normally `enc://`, sealed for
+    #: the context `camera-credentials` (app/services/camera_credentials.py).
+    #: Never a plaintext password and never returned by the API: `stream_url`
+    #: holds no credentials, and they are put back together only where a
+    #: stream is opened (the gateway's pull, the health probe, ONVIF calls).
+    credentials_ref: Mapped[str | None] = mapped_column(Text)
 
     anpr_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     status: Mapped[str] = mapped_column(

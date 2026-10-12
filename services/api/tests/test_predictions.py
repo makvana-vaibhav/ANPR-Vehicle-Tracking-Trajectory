@@ -72,6 +72,12 @@ async def _clean_synthetic_rows():
     await _cleanup()
 
 
+#: Binds `:tag` — a camera replaying a recorded clip is left out of the
+#: forecast by default, so fixtures expecting their rows counted borrow live
+#: cameras only.
+RECORDED = {"tag": "recorded-footage"}
+
+
 @pytest.fixture
 async def cameras() -> list[dict]:
     async with SessionLocal() as session:
@@ -79,8 +85,10 @@ async def cameras() -> list[dict]:
             await session.execute(
                 text(
                     "SELECT id, camera_code, corridor FROM cameras "
-                    "WHERE corridor IS NOT NULL ORDER BY camera_code LIMIT 2"
-                )
+                    "WHERE corridor IS NOT NULL AND NOT coalesce(:tag = ANY(tags), false) "
+                    "ORDER BY camera_code LIMIT 2"
+                ),
+                RECORDED,
             )
         ).mappings()
         result = [dict(r) for r in rows]
@@ -244,6 +252,62 @@ class TestCongestionInsufficientHistory:
         assert entry["current_index_pct"] is None
         assert entry["baseline_days"] == 0
         assert all(f["index_pct"] is None for f in entry["forecasts"])
+
+
+class TestRecordedFootage:
+    async def test_a_recording_is_not_forecast_unless_asked(
+        self, client: AsyncClient, auth_headers
+    ) -> None:
+        """A looping clip's volume is the edit's, not a road's: no series of
+        its own, and no part of anyone's baseline, by default."""
+        async with SessionLocal() as session:
+            live = (
+                await session.execute(
+                    text(
+                        "SELECT id, camera_code FROM cameras "
+                        "WHERE NOT coalesce(:tag = ANY(tags), false) "
+                        "ORDER BY camera_code LIMIT 1"
+                    ),
+                    RECORDED,
+                )
+            ).first()
+            recorded = (
+                await session.execute(
+                    text(
+                        "SELECT id, camera_code FROM cameras "
+                        "WHERE :tag = ANY(tags) ORDER BY camera_code LIMIT 1"
+                    ),
+                    RECORDED,
+                )
+            ).first()
+        if live is None or recorded is None:
+            pytest.skip("needs a live camera and one tagged recorded-footage")
+
+        recent = [AT - timedelta(minutes=m) for m in (4, 9, 14)]
+        await _insert_many(live.id, recent)
+        await _insert_many(recorded.id, recent)
+        headers = await auth_headers("analyst")
+
+        default = await client.get(
+            "/api/v1/predictions/congestion",
+            params={"at": AT.isoformat(), "group_by": "camera"},
+            headers=headers,
+        )
+        assert default.status_code == 200, default.text
+        keys = {s["key"] for s in default.json()["series"]}
+        assert live.camera_code in keys
+        assert recorded.camera_code not in keys
+        assert recorded.camera_code in default.json()["recorded_footage"]["excluded_cameras"]
+
+        included = await client.get(
+            "/api/v1/predictions/congestion",
+            params={"at": AT.isoformat(), "group_by": "camera", "include_recorded": "true"},
+            headers=headers,
+        )
+        assert included.status_code == 200, included.text
+        keys = {s["key"] for s in included.json()["series"]}
+        assert {live.camera_code, recorded.camera_code} <= keys
+        assert included.json()["recorded_footage"]["included"] is True
 
 
 class TestAccessControl:

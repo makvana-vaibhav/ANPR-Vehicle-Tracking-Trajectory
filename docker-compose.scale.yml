@@ -37,8 +37,9 @@ services:
     restart: unless-stopped
     env_file: [.env]
     environment:
-      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-nagarnetra}:${POSTGRES_PASSWORD:-nagarnetra_dev_pw}@postgres:5432/${POSTGRES_DB:-nagarnetra}
-      REDIS_URL: redis://redis:6379/0
+      # Same secrets as the base file, which has no fallbacks either.
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-nagarnetra}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is not set - run make env}@postgres:5432/${POSTGRES_DB:-nagarnetra}
+      REDIS_URL: redis://:${REDIS_PASSWORD:?REDIS_PASSWORD is not set - run make env}@redis:6379/0
     volumes:
       - ./services/api:/app/services/api
     working_dir: /app/services/api

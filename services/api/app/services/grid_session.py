@@ -389,6 +389,7 @@ class CatalogueCache:
         self._failure: str | None = None
         self._failed_at: datetime | None = None
         self._failure_ttl = ttl
+        self._refused = False
         self._lock = asyncio.Lock()
 
     def get(self) -> object | None:
@@ -403,6 +404,7 @@ class CatalogueCache:
         self._fetched_at = datetime.now(UTC)
         self._failure = None
         self._failed_at = None
+        self._refused = False
 
     def failure(self) -> str | None:
         """The last failure, while it still stands; None once it is time to ask again."""
@@ -418,6 +420,15 @@ class CatalogueCache:
         self._failure = error
         self._failed_at = datetime.now(UTC)
         self._failure_ttl = self.REFUSED_TTL if refused else self._ttl
+        self._refused = refused
+
+    @property
+    def refused(self) -> bool:
+        """Whether the standing failure is the grid turning our session away
+        (its cooldown, one session per IP, or no session accepted) rather than
+        a network fault. The two read differently to an operator: one is the
+        grid asking us to wait, the other is something to go and fix."""
+        return self._refused and self.failure() is not None
 
     def clear(self) -> None:
         self._payload = None

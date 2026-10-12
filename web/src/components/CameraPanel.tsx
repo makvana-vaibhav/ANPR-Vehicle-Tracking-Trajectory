@@ -21,12 +21,15 @@ import { Link } from 'react-router-dom'
 
 import StreamPlayer from '@/components/StreamPlayer'
 import {
+  NOT_ASKED_ERRORS,
+  OSM_ATTRIBUTION,
   placeLine,
   positionKind,
   probeErrorWords,
   SOURCE_DETAIL,
   SOURCE_LABEL,
   sourceKind,
+  staleWords,
   STATUS_EXPLANATION,
   STATUS_LABEL,
   vendorWords,
@@ -105,7 +108,7 @@ export default function CameraPanel({
       const code = result.error_code ? String(result.error_code) : null
       setMessage(
         [
-          `Probe: ${String(result.status)}`,
+          `Probe: ${String(result.status)}${result.status_held ? ' (kept as last known)' : ''}`,
           code ? probeErrorWords(code) : null,
           result.latency_ms ? `${String(result.latency_ms)} ms` : null,
         ]
@@ -177,6 +180,11 @@ export default function CameraPanel({
         <p className="mt-2 text-xs leading-relaxed text-muted-foreground">
           {STATUS_EXPLANATION[camera.status]}
         </p>
+        {staleWords(camera) && (
+          <p className="mt-1 text-xs leading-relaxed text-faint" data-testid="status-stale">
+            {staleWords(camera)}
+          </p>
+        )}
       </header>
 
       <div className="min-h-0 flex-1 space-y-5 overflow-y-auto px-4 py-4">
@@ -312,8 +320,13 @@ export default function CameraPanel({
                 <p>
                   {position === 'town'
                     ? `Town centre only. The grid publishes ${camera.city || camera.district || 'a town'}, not the junction, so the camera is drawn at the town’s centre with any others placed there.`
-                    : 'Placed at its junction.'}
+                    : position === 'approx'
+                      ? `Approximate — geocoded from the name “${camera.name}” with OpenStreetMap: near the junction, landmark or locality the name matched, never surveyed. Distances and speeds through it are approximate too.`
+                      : 'Placed at its junction.'}
                 </p>
+                {position === 'approx' && (
+                  <p className="mt-1 text-[11px] text-faint">{OSM_ATTRIBUTION} (ODbL)</p>
+                )}
                 <p className="coord mt-1 text-[11px] text-faint">
                   {camera.lat.toFixed(5)}, {camera.lon.toFixed(5)}
                   {camera.heading_deg !== null && ` · facing ${camera.heading_deg}°`}
@@ -393,13 +406,16 @@ function HealthSummary({ health }: { health: CameraHealthHistory }) {
   const { uptime } = health
   // Newest on the right, as a timeline reads.
   const strip = health.history.slice(0, STRIP_PROBES).reverse()
-  const failed = strip.filter((h) => h.reachable !== true).length
+  const notAsked = (h: (typeof strip)[number]) =>
+    h.reachable !== true && h.error_code !== null && NOT_ASKED_ERRORS.has(h.error_code)
+  const failed = strip.filter((h) => h.reachable !== true && !notAsked(h)).length
+  const refusedInStrip = strip.filter(notAsked).length
 
   return (
     <>
       <dl className="mt-2 grid grid-cols-3 gap-2">
         <Figure label="Uptime" value={uptime.uptime_pct !== null ? `${uptime.uptime_pct}%` : '—'} />
-        <Figure label="Probes" value={uptime.probes.toLocaleString('en-IN')} />
+        <Figure label="Answered probes" value={uptime.probes.toLocaleString('en-IN')} />
         <Figure
           label="Latency"
           value={uptime.avg_latency_ms !== null ? `${Math.round(uptime.avg_latency_ms)} ms` : '—'}
@@ -410,7 +426,7 @@ function HealthSummary({ health }: { health: CameraHealthHistory }) {
           <div
             className="flex h-5 gap-px overflow-hidden rounded"
             role="img"
-            aria-label={`Last ${strip.length} probes: ${strip.length - failed} answered, ${failed} not`}
+            aria-label={`Last ${strip.length} probes: ${strip.length - failed - refusedInStrip} answered, ${failed} not, ${refusedInStrip} not asked`}
           >
             {strip.map((h, i) => (
               <span
@@ -418,13 +434,26 @@ function HealthSummary({ health }: { health: CameraHealthHistory }) {
                 title={`${api.formatIST(h.ts)} — ${
                   h.reachable ? 'answered' : h.error_code ? probeErrorWords(h.error_code) : 'no answer'
                 }`}
-                className={`flex-1 ${h.reachable ? 'bg-muted-foreground/35' : 'bg-status-offline/80'}`}
+                className={`flex-1 ${
+                  h.reachable
+                    ? 'bg-muted-foreground/35'
+                    : notAsked(h)
+                      ? 'bg-priority-medium/35'
+                      : 'bg-status-offline/80'
+                }`}
               />
             ))}
           </div>
           <p className="mt-1 text-[11px] text-faint">
             One bar per probe, newest on the right · red did not answer
+            {refusedInStrip > 0 && ' · blue: its integration refused us, so the camera was not asked'}
           </p>
+          {(uptime.not_asked ?? 0) > 0 && (
+            <p className="mt-0.5 text-[11px] text-faint">
+              {(uptime.not_asked ?? 0).toLocaleString('en-IN')} probes in 24 h could not ask (its
+              integration refused or did not answer) and are not counted in uptime.
+            </p>
+          )}
         </div>
       ) : (
         <p className="mt-2 text-xs text-faint">Not probed in the last 24 hours.</p>

@@ -26,6 +26,8 @@ from app.adapters.base import (
     StreamEndpoints,
 )
 from app.core.config import settings
+from app.core.urls import redact_text, with_credentials
+from app.services.camera_credentials import camera_source_url
 
 #: RTSP over TCP. UDP loses packets on congested municipal links and ffprobe
 #: then reports corrupt streams for cameras that are actually fine.
@@ -48,9 +50,15 @@ class RtspAdapter(CameraAdapter):
         return shutil.which("ffprobe") is not None
 
     async def probe_health(self, camera: Any) -> HealthProbe:
-        """Negotiate an RTSP session and read the stream's real parameters."""
+        """Negotiate an RTSP session and read the stream's real parameters.
+
+        A camera with a stored login is probed with it (the probe is a stream
+        open like any other); without it, an NVR answers 401 and the camera
+        looks broken when it is merely asking who we are.
+        """
         url = getattr(camera, "sub_stream_url", None) or getattr(camera, "stream_url", None)
-        if not url:
+        replay = not url and bool(getattr(camera, "source_file", None))
+        if not url and not replay:
             return HealthProbe(
                 reachable=False,
                 error_code="no_stream_url",
@@ -64,7 +72,13 @@ class RtspAdapter(CameraAdapter):
                 detail="ffprobe is not installed in this image",
             )
 
-        return await self._ffprobe(url)
+        if replay:
+            # A camera onboarded with "Recorded video" has no source URL of its
+            # own: the simulator publishes its clip into our gateway, so that
+            # path is what to check — read as the workers read it. Before this
+            # it reported `no_stream_url` and sat at "unknown" while playing.
+            return await self._ffprobe(_gateway_read_url(camera))
+        return await self._ffprobe(camera_source_url(camera, url) or str(url))
 
     async def _ffprobe(self, url: str) -> HealthProbe:
         """Run ffprobe and translate its output into a HealthProbe."""
@@ -113,11 +127,15 @@ class RtspAdapter(CameraAdapter):
 
         if process.returncode != 0:
             message = stderr.decode(errors="replace").strip().splitlines()
+            # ffprobe ends with the URL it was given — login included — and
+            # this line is stored as the probe's detail, logged and shown on
+            # the fleet screen. Masked before it goes anywhere.
+            last = redact_text(message[-1]) if message else None
             return HealthProbe(
                 reachable=False,
                 latency_ms=latency_ms,
-                error_code=_classify_ffprobe_error(message[-1] if message else ""),
-                detail=message[-1] if message else "ffprobe failed",
+                error_code=_classify_ffprobe_error(last or ""),
+                detail=last or "ffprobe failed",
             )
 
         try:
@@ -171,6 +189,15 @@ class RtspAdapter(CameraAdapter):
     async def get_recording(self, camera: Any, start: datetime, end: datetime) -> str | None:
         """Plain RTSP exposes no playback API — the NVR owns recordings."""
         return None
+
+
+def _gateway_read_url(camera: Any) -> str:
+    """The camera's path on our own gateway, with the internal reader identity."""
+    url = (
+        f"rtsp://{settings.mediamtx_host}:{settings.mediamtx_rtsp_port}/"
+        f"{str(getattr(camera, 'camera_code', '')).lower()}"
+    )
+    return with_credentials(url, settings.mediamtx_read_user, settings.mediamtx_read_password)
 
 
 def _parse_frame_rate(value: str | None) -> float | None:

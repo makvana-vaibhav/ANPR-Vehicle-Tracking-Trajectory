@@ -14,6 +14,14 @@ again and it reconciles.
 
     python scripts/sync_sandbox.py              # host from SANDBOX_BASE_URL
     python scripts/sync_sandbox.py --dry-run    # read and report, write nothing
+    python scripts/sync_sandbox.py --positions-only   # geocoded positions only;
+                                                      # the grid is not contacted
+
+Positions: the catalogue gives a name, never coordinates. Where
+``data/seed/camera_positions.csv`` holds a confident OpenStreetMap match for
+that name, the camera is placed there and tagged ``placement:geocoded`` —
+approximate, from the name, never surveyed; otherwise at its town's centre
+(``placement:city``) or nowhere (``placement:unknown``).
 """
 
 from __future__ import annotations
@@ -37,7 +45,8 @@ from app.core.config import settings  # noqa: E402
 from app.db.session import SessionLocal  # noqa: E402
 from app.models.enums import CameraStatus, CameraType, Protocol, VmsVendor  # noqa: E402
 from app.models.registry import Camera, Department, VmsInstance  # noqa: E402
-from app.services import grid_session  # noqa: E402
+from app.services import audit, camera_positions, grid_session  # noqa: E402
+from app.services.fleet import district_at  # noqa: E402
 
 VMS_NAME = "Hosted Camera Grid"
 CODE_PREFIX = "SBX"
@@ -232,15 +241,25 @@ async def sync(base_url: str, dry_run: bool = False) -> int:
     print(f"  codecs: {codecs or 'not reported'}")
     print(f"  resolutions: {resolutions or 'not reported'}")
 
+    # Approximate positions geocoded from the cameras' names, applied on every
+    # sync so that a re-sync never puts a camera back at its town centre.
+    positions = camera_positions.load_positions()
+
     if dry_run:
         print("\n(dry run — nothing written)")
         for camera in discovered:
+            code = f"{CODE_PREFIX}-{camera.external_id.zfill(5)}"
             hit = place(location_text(camera), gazetteer)
             where = f"{hit['place']} ({hit['precision']})" if hit else "UNPLACED"
+            precision = hit["precision"] if hit else "unknown"
+            if camera_positions.override_for(
+                code, camera.name, f"placement:{precision}", positions
+            ):
+                where = "geocoded from the name (approximate)"
             print(f"  {camera.external_id:>5}  {camera.name[:38]:38}  {where:26}")
         return 0
 
-    created = updated = skipped = from_gazetteer = 0
+    created = updated = skipped = from_gazetteer = geocoded = 0
     async with SessionLocal() as session:
         vms = (
             await session.execute(
@@ -293,6 +312,21 @@ async def sync(base_url: str, dry_run: bool = False) -> int:
                     precision = "unknown"
                     skipped += 1
 
+            # Closer than a town centre, though still approximate: what
+            # OpenStreetMap matched the camera's name to. Never over the
+            # grid's own coordinates (see app/services/camera_positions.py).
+            match = camera_positions.override_for(
+                code, item.name, f"placement:{precision}", positions
+            )
+            if match is not None:
+                if precision == "unknown":
+                    skipped -= 1
+                elif hit_place is not None:
+                    from_gazetteer -= 1
+                lat, lon = match.lat, match.lon
+                precision = "geocoded"
+                geocoded += 1
+
             # Register the URL this network can actually open, not the one the
             # catalogue lists first.
             hls = item.raw.get("_hls") or ""
@@ -338,6 +372,11 @@ async def sync(base_url: str, dry_run: bool = False) -> int:
             if hit_place is not None:
                 fields["city"] = hit_place["place"]
                 fields["district"] = hit_place["district"]
+            if precision != "unknown":
+                # One spelling for every district: the boundary file's, by the
+                # point itself. The gazetteer says "Ahmadabad", the boundaries
+                # "Ahmedabad", and the gap report counts by boundary.
+                fields["district"] = district_at(lat, lon) or fields.get("district")
 
             # How the coordinate was arrived at travels with the camera, so a
             # city-level placement can never be mistaken for a surveyed one.
@@ -372,6 +411,7 @@ async def sync(base_url: str, dry_run: bool = False) -> int:
 
     print(f"\n  created {created}, updated {updated}")
     print(f"  placed from the gazetteer (city precision): {from_gazetteer}")
+    print(f"  geocoded from the name (approximate, OpenStreetMap): {geocoded}")
     print(f"  location not identifiable, tagged placement:unknown: {skipped}")
     if skipped:
         print("    (these sit at the state centroid so they can be watched; the tag")
@@ -392,6 +432,48 @@ def _placement_note(item, precision: str | None, transport: str) -> str:
     return f"hosted grid. {where}. Watched over {transport.upper()}."
 
 
+async def apply_positions(dry_run: bool = False) -> int:
+    """Apply data/seed/camera_positions.csv to the registered grid cameras.
+
+    Reads and writes the registry only — the grid is not contacted, so this
+    is safe while it is refusing our session or rationing watch time.
+    """
+    async with SessionLocal() as session:
+        changes = await camera_positions.apply_to_registry(session, dry_run=dry_run)
+        if not dry_run:
+            await session.commit()
+    if changes and not dry_run:
+        # Registry changes leave a trace, whoever makes them.
+        await audit.record(
+            action="camera.positions_applied",
+            username="system:sync_sandbox",
+            role="system",
+            resource_type="camera",
+            params={
+                "source": "data/seed/camera_positions.csv (OpenStreetMap Nominatim)",
+                "moved": [c["camera_code"] for c in changes if c.get("moved")],
+                "districts_normalised": len(changes),
+            },
+        )
+    for change in changes:
+        where = (
+            f"{change['lat']:.5f}, {change['lon']:.5f} ({change['confidence']}, "
+            f"OSM {change['osm']} '{change['osm_name']}')"
+            if change.get("moved")
+            else "position unchanged"
+        )
+        print(
+            f"  {change['camera_code']:<10} {where}; district "
+            f"{change['previous_district']!r} -> {change['district']!r}"
+        )
+    verb = "would change" if dry_run else "changed"
+    print(
+        f"\n  {len(changes)} grid cameras {verb}. Positions are approximate, geocoded"
+    )
+    print("  from the camera's name: © OpenStreetMap contributors (ODbL 1.0).")
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
@@ -409,7 +491,17 @@ def main() -> int:
         action="store_true",
         help="show what the catalogue returns without writing",
     )
+    parser.add_argument(
+        "--positions-only",
+        action="store_true",
+        help=(
+            "apply data/seed/camera_positions.csv to the registered grid cameras "
+            "without reading the catalogue (no contact with the grid)"
+        ),
+    )
     args = parser.parse_args()
+    if args.positions_only:
+        return asyncio.run(apply_positions(args.dry_run))
     return asyncio.run(sync(args.base_url, args.dry_run))
 
 

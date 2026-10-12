@@ -19,6 +19,7 @@ Uses Playwright via npx, so nothing is added to the repository's dependencies.
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -28,7 +29,22 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 OUT = ROOT / "docs" / "submission" / "screenshots"
 WEB = "http://localhost:8080"
-ADMIN_PASSWORD = "NagarNetra@2026"
+
+
+def _env_value(key: str) -> str:
+    """One value from the environment or the repository's .env, never printed."""
+    if os.environ.get(key):
+        return os.environ[key]
+    env = ROOT / ".env"
+    if env.exists():
+        for line in env.read_text().splitlines():
+            if line.startswith(f"{key}="):
+                return line.split("=", 1)[1].split(" #", 1)[0].strip()
+    raise SystemExit(f"{key} is not set — run `make env`")
+
+
+#: Generated per install by `make env`; there is no published default.
+ADMIN_PASSWORD = _env_value("BOOTSTRAP_ADMIN_PASSWORD")
 
 # Each shot: file name, the path to visit, and the selector that proves the
 # screen actually has content in it.

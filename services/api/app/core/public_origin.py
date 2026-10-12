@@ -12,7 +12,7 @@ From an `https://` page every one of those is mixed content, and a browser
 blocks it (or, for `localhost` only, lets it through by special exemption —
 nothing to build on, and useless the moment the page is opened by any other
 name). So the HTTPS server proxies all three under its own origin
-(`/media/`, `/gateway/webrtc/`, `/gateway/hls/`, in `web/nginx.conf`), and a
+(`/media/`, `/gateway/webrtc/`, `/gateway/hls/`, in `web/nginx/contrail-app.conf`), and a
 request that arrived through it gets URLs pointing there.
 
 How the API knows: nginx's HTTPS server sends `X-Forwarded-Proto: https` and
@@ -36,7 +36,7 @@ from urllib.parse import urlsplit
 
 from app.core.config import settings
 
-#: Where the HTTPS server proxies each backing service (web/nginx.conf).
+#: Where the HTTPS server proxies each backing service (web/nginx/contrail-app.conf).
 MEDIA_PATH = "/media"
 WEBRTC_PATH = "/gateway/webrtc"
 HLS_PATH = "/gateway/hls"

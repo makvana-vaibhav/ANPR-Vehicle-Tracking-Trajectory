@@ -170,7 +170,7 @@ export function isDemoFeed(camera: Camera): boolean {
  * its cameras start on HLS — through our own authenticated proxy — rather than
  * paying a visible WebRTC failure first. Read from the adapter the registry
  * records (`vms_vendor`), with the `sandbox` tag as a fallback. It used to be
- * read from the VMS *name*, which the SIH26127 rename changed from "Sentinel
+ * read from the VMS *name*, which an earlier rename changed from "Sentinel
  * Sandbox Grid" to "Hosted Camera Grid" — after which no grid camera matched,
  * and every one tried WebRTC against the grid first.
  */

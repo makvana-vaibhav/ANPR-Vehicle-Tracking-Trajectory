@@ -18,6 +18,13 @@ import type { Camera, CameraStatus } from '@/lib/types'
 /** Tag on a grid camera the organisers publish with a town but no junction. */
 export const TOWN_LEVEL_TAG = 'placement:city'
 
+/** Tag on a camera placed by geocoding its name (data/seed/camera_positions.csv):
+ *  approximate, from the name, never surveyed. */
+export const GEOCODED_TAG = 'placement:geocoded'
+
+/** Credit for positions geocoded with OpenStreetMap (ODbL 1.0). */
+export const OSM_ATTRIBUTION = '© OpenStreetMap contributors'
+
 export type SourceKind = 'grid' | 'recorded' | 'stream' | 'none'
 
 /**
@@ -59,16 +66,27 @@ export const SOURCE_DETAIL: Record<SourceKind, string> = {
  * How much the registry knows about where a camera stands.
  *
  *   exact    placed at its junction.
+ *   approx   geocoded from the camera's name with OpenStreetMap: near the
+ *            junction or locality the name matched, never surveyed.
  *   town     the grid gave a town only; drawn at the town's centre, with every
  *            other camera the grid placed there.
  *   unknown  no town either. Never drawn on a map — see lib/places.
  */
-export type PositionKind = 'exact' | 'town' | 'unknown'
+export type PositionKind = 'exact' | 'approx' | 'town' | 'unknown'
 
 export function positionKind(camera: Pick<Camera, 'lat' | 'lon' | 'tags'>): PositionKind {
   if (isUnplaced(camera)) return 'unknown'
   if (camera.tags?.includes(TOWN_LEVEL_TAG)) return 'town'
+  if (camera.tags?.includes(GEOCODED_TAG)) return 'approx'
   return 'exact'
+}
+
+/** One line on how a camera's position was arrived at. */
+export const POSITION_WORDS: Record<PositionKind, string> = {
+  exact: 'Placed at its junction.',
+  approx: `Approximate — geocoded from the name with OpenStreetMap, not surveyed. ${OSM_ATTRIBUTION}.`,
+  town: 'Town centre only: the grid gives the town, not the junction.',
+  unknown: 'Not known.',
 }
 
 /** The town a camera belongs to, for grouping and labels. */
@@ -110,6 +128,36 @@ export const STATUS_EXPLANATION: Record<CameraStatus, string> = {
     'Its state cannot be told: the integration it sits behind is not answering, or it has not been probed yet. Unknown is not the same as offline.',
 }
 
+const IST_CLOCK = new Intl.DateTimeFormat('en-IN', {
+  timeZone: 'Asia/Kolkata',
+  hour: '2-digit',
+  minute: '2-digit',
+  hourCycle: 'h23',
+})
+
+/**
+ * Why a camera's status is its last known one, or null when it is fresh.
+ *
+ * When an integration refuses our session or does not answer, the health
+ * monitor cannot ask about its cameras, so it leaves each status as it was
+ * rather than flipping it — and the screen has to say so, or a stale "online"
+ * reads as a fresh one.
+ */
+export function staleWords(
+  camera: Pick<Camera, 'status_stale_reason' | 'status_confirmed_at'>,
+): string | null {
+  const reason = camera.status_stale_reason
+  if (!reason) return null
+  const cause =
+    reason === 'grid_refused'
+      ? "the organisers' grid is refusing our session (its cooldown)"
+      : probeErrorWords(reason).toLowerCase()
+  const when = camera.status_confirmed_at
+    ? `last confirmed ${IST_CLOCK.format(new Date(camera.status_confirmed_at))} IST`
+    : 'not confirmed in the last 24 h'
+  return `Last known — ${when}; ${cause}.`
+}
+
 export function countByStatus(cameras: Pick<Camera, 'status'>[]): Record<CameraStatus, number> {
   const counts: Record<CameraStatus, number> = { online: 0, offline: 0, degraded: 0, unknown: 0 }
   for (const camera of cameras) counts[camera.status] += 1
@@ -125,6 +173,7 @@ export function countByStatus(cameras: Pick<Camera, 'status'>[]): Record<CameraS
  */
 const PROBE_ERRORS: Record<string, string> = {
   sandbox_unreachable: "The organisers' grid did not answer",
+  grid_refused: "The organisers' grid refused our session (cooldown) — camera state kept as last known",
   reported_offline: 'The grid reports this camera as not live',
   unknown_to_vms: 'The camera is no longer in its recorder’s list',
   vms_unreachable: 'The recorder (VMS) did not answer',
@@ -144,6 +193,22 @@ const PROBE_ERRORS: Record<string, string> = {
   no_video_stream: 'The stream answers, but carries no video',
   adapter_exception: 'The integration failed unexpectedly',
 }
+
+/**
+ * Probe failures that mean the camera could not be asked at all — its
+ * integration refused our session or did not answer. They say nothing about
+ * the camera: its status stays as last known and they are left out of uptime.
+ * Mirrors `STATUS_HOLD_ERRORS` in services/api/app/adapters/base.py.
+ */
+export const NOT_ASKED_ERRORS: ReadonlySet<string> = new Set([
+  'vms_unreachable',
+  'onvif_unreachable',
+  'sandbox_unreachable',
+  'grid_refused',
+  'gateway_unreachable',
+  'unauthorized',
+  'adapter_exception',
+])
 
 export function probeErrorWords(code: string): string {
   const known = PROBE_ERRORS[code]
@@ -319,7 +384,9 @@ export function amendment(
  */
 export function tagsAfterPlacing(tags: string[] | null): string[] | null {
   if (!tags) return tags
-  return tags.filter((tag) => tag !== UNPLACED_TAG && tag !== TOWN_LEVEL_TAG)
+  return tags.filter(
+    (tag) => tag !== UNPLACED_TAG && tag !== TOWN_LEVEL_TAG && tag !== GEOCODED_TAG,
+  )
 }
 
 // ── URL ──────────────────────────────────────────────────────────────

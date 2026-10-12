@@ -97,6 +97,27 @@ def gaps(monkeypatch: pytest.MonkeyPatch, a_camera: tuple[str, str]):
                     "reason": "Only 20% of cameras in this district read plates (target 40%).",
                 }
             ],
+            "ageing_gaps": [
+                {
+                    "camera_code": code,
+                    "name": "Old camera",
+                    "district": "Dang",
+                    "installed_on": "2014-03-01",
+                    "age_years": 12.6,
+                    "reason": "Installed 12.6 years ago (review after 5): due for inspection.",
+                }
+            ],
+            "install_date_unknown": {
+                "cameras": 1,
+                "camera_codes": [code],
+                "reason": "Install date not recorded; nothing is assumed.",
+            },
+            "geography": {
+                "districts": 33,
+                "position_unknown": [code],
+                "recorded_footage": [],
+                "outside_gujarat": [],
+            },
             "district_coverage": [],
         }
 
@@ -119,12 +140,21 @@ async def test_one_row_per_gap_each_kind_named(client: AsyncClient, auth_headers
         "unreliable",
         "no_cameras",
         "below_anpr_target",
+        "ageing",
+        "install_date_unknown",
+        "position_unknown",
     ]
-    unavailable, unreliable, uncovered, thin = rows
+    unavailable, unreliable, uncovered, thin, ageing, undated, unplaced = rows
     assert "no video" in unavailable["reason"]
     assert unreliable["uptime_pct"] == "57.5" and unreliable["probes"] == "40"
     assert uncovered["district"] == "Vatva" and uncovered["cameras"] == "0"
     assert thin["anpr_share_pct"] == "20.0" and thin["anpr_cameras"] == "1"
+    assert ageing["installed_on"] == "2014-03-01" and ageing["age_years"] == "12.6"
+    assert ageing["district"] == "Dang"
+    assert undated["installed_on"] == "" and "nothing is assumed" in undated["reason"]
+    assert undated["camera_name"], "a camera row without its name"
+    assert "counted in no district" in unplaced["reason"]
+    assert all(len(r) == len(gap_report.GAP_COLUMNS) for r in rows)
 
 
 async def test_the_window_is_given_in_ist_and_utc(client: AsyncClient, auth_headers, gaps) -> None:
@@ -163,7 +193,7 @@ async def test_every_download_is_audited(client: AsyncClient, auth_headers, gaps
         )
     assert row is not None
     assert row.username == "analyst"
-    assert row.params["window_hours"] == 6 and row.params["rows"] == 4
+    assert row.params["window_hours"] == 6 and row.params["rows"] == 7
 
 
 async def test_the_live_analysis_exports(client: AsyncClient, auth_headers) -> None:
@@ -171,7 +201,15 @@ async def test_the_live_analysis_exports(client: AsyncClient, auth_headers) -> N
     response = await client.get("/api/v1/reports/gaps.csv", headers=await auth_headers("auditor"))
     assert response.status_code == 200
     for row in _rows(response.text):
-        assert row["gap_type"] in {"unavailable", "unreliable", "no_cameras", "below_anpr_target"}
+        assert row["gap_type"] in {
+            "unavailable",
+            "unreliable",
+            "no_cameras",
+            "below_anpr_target",
+            "ageing",
+            "install_date_unknown",
+            "position_unknown",
+        }
         assert row["reason"]
 
 

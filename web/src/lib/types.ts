@@ -26,11 +26,20 @@ export interface Camera {
   fps: number | null
   anpr_enabled: boolean
   status: CameraStatus
+  /** Set when `status` is the last known one, not a fresh finding: the latest
+   *  probe could not ask, because the camera's integration refused our session
+   *  or did not answer. The probe's error code (`grid_refused`, …). */
+  status_stale_reason?: string | null
+  /** When a probe last got an answer about this camera, if it is stale. */
+  status_confirmed_at?: string | null
   installed_on: string | null
   tags: string[] | null
   /** Whether a video source is configured. The URL itself is never sent to the
    *  browser — a federated camera's carries the grid credentials. */
   has_stream: boolean
+  /** Whether a login is stored for the source. The username and password are
+   *  write-only: sealed by the API, never sent back. */
+  has_credentials?: boolean
   /** Recorded clip this camera replays, or null when it pulls a live stream.
    *  Unlike `stream_url` this is safe to send: a filename in our own video
    *  directory, carrying no credentials. */
@@ -83,6 +92,11 @@ export interface FleetHealth {
   unknown: number
   integrated: number
   awaiting_integration: number
+  /** Cameras shown at their last known status because their integration
+   *  could not be asked this time — a count across the states above. */
+  stale?: number
+  /** One line per integration that could not be asked about its cameras. */
+  integrations?: IntegrationState[]
   availability_pct: number
   integrated_availability_pct: number | null
   by_department: Array<{
@@ -101,6 +115,21 @@ export interface FleetHealth {
   }>
   top_errors: Array<{ error_code: string; count: number }>
   generated_at: string
+}
+
+export interface IntegrationState {
+  vms_id: string
+  name: string
+  vendor: string | null
+  /** `refused`: the integration turned our session away (the grid's
+   *  watch-time cooldown); `unreachable`: it did not answer. */
+  state: 'refused' | 'unreachable'
+  error_code: string
+  cameras_held: number
+  /** The last moment any of its cameras got an answer. */
+  last_answered_at: string | null
+  /** When its one integration alarm opened, if it is open. */
+  alarm_open_since: string | null
 }
 
 export interface FleetSummary {
@@ -131,6 +160,8 @@ export interface CameraHealthHistory {
   uptime: {
     window_hours: number
     probes: number
+    /** Probes its integration refused or did not answer: not counted in uptime. */
+    not_asked?: number
     uptime_pct: number | null
     avg_latency_ms: number | null
     avg_fps: number | null
@@ -153,7 +184,26 @@ export interface GapReport {
     districts_below_anpr_target: number
     districts_with_no_cameras: number
     unreliable_cameras: number
+    ageing_cameras?: number
+    install_date_unknown?: number
   }
+  /** How cameras were placed in districts, and which were counted nowhere. */
+  geography?: {
+    basis: string
+    districts: number
+    position_unknown: string[]
+    recorded_footage: string[]
+    outside_gujarat: string[]
+  }
+  ageing_gaps?: Array<{
+    camera_code: string
+    name: string
+    district: string | null
+    installed_on: string
+    age_years: number
+    reason: string
+  }>
+  install_date_unknown?: { cameras: number; camera_codes: string[]; reason: string }
   availability_gaps: Array<{
     camera_code: string
     name: string
@@ -751,6 +801,22 @@ export interface AnalyticsWindow {
   bucket_seconds: number
 }
 
+/**
+ * Whether cameras replaying a recorded clip are in a response's figures.
+ *
+ * A camera tagged `recorded-footage` loops a clip — the same few vehicles,
+ * again every loop — so every traffic endpoint leaves such cameras out unless
+ * asked (`include_recorded=true`), and says which ones it left out.
+ */
+export interface RecordedFootage {
+  /** True only when the request asked for recordings. */
+  included: boolean
+  /** Every camera tagged `recorded-footage`, by code. */
+  cameras: string[]
+  /** The cameras left out of this response: `cameras`, or empty when included. */
+  excluded_cameras: string[]
+}
+
 export interface FlowPoint {
   ts: string
   vehicles: number
@@ -771,6 +837,7 @@ export interface FlowResponse {
   group_by: 'camera' | 'corridor'
   series: FlowSeries[]
   total_vehicles: number
+  recorded_footage: RecordedFootage
 }
 
 export interface SpeedProvenance {
@@ -804,6 +871,7 @@ export interface SpeedResponse {
   window: AnalyticsWindow
   provenance: SpeedProvenance
   corridors: CorridorSpeed[]
+  recorded_footage: RecordedFootage
 }
 
 export interface RoutePair {
@@ -821,6 +889,7 @@ export interface RouteDensityResponse {
   window: AnalyticsWindow
   pairs: RoutePair[]
   total_journeys: number
+  recorded_footage: RecordedFootage
 }
 
 export interface TravelTime {
@@ -841,6 +910,7 @@ export interface TravelTimeResponse {
   window: AnalyticsWindow
   segments: TravelTime[]
   baseline_window_days: number
+  recorded_footage: RecordedFootage
 }
 
 export interface Hotspot {
@@ -860,6 +930,7 @@ export interface HotspotResponse {
   by_slowdown: TravelTime[]
   slowdown_status: DataStatus
   note: string
+  recorded_footage: RecordedFootage
 }
 
 export interface HeatmapFeatureProperties {
@@ -879,6 +950,7 @@ export interface HeatmapResponse {
   }>
   window: AnalyticsWindow
   max_vehicles: number
+  recorded_footage: RecordedFootage
 }
 
 // ── Predictive traffic (P10) ─────────────────────────────────────────────
@@ -927,6 +999,7 @@ export interface CongestionResponse {
   baseline_window_days: number
   horizons_minutes: Array<15 | 30>
   series: CongestionSeries[]
+  recorded_footage: RecordedFootage
 }
 
 // ── Traffic intelligence ─────────────────────────────────────────────────
@@ -1047,6 +1120,9 @@ export interface TrafficResponse {
   /** Worst-first, for the "top congested roads" panel. */
   most_congested: string[]
   note: string
+  /** Applied before the bound: every count above is of live cameras unless
+   *  recordings were asked for. */
+  recorded_footage: RecordedFootage
 }
 
 export interface TrafficHistoryPoint {
@@ -1061,6 +1137,7 @@ export interface TrafficHistoryResponse {
   key: string | null
   group_by: 'camera' | 'corridor'
   points: TrafficHistoryPoint[]
+  recorded_footage: RecordedFootage
 }
 
 // ── Vehicle re-identification (P11) ──────────────────────────────────────

@@ -64,6 +64,7 @@ import type {
   Department,
   FleetHealth as FleetHealthData,
   GapReport,
+  IntegrationState,
 } from '@/lib/types'
 
 const REFRESH_MS = 30_000
@@ -71,7 +72,7 @@ const REFRESH_MS = 30_000
 /** The API returns at most this many probes of history per request. */
 const HISTORY_CAP = 500
 
-type GapTab = 'unavailable' | 'unreliable' | 'coverage' | 'capability'
+type GapTab = 'unavailable' | 'unreliable' | 'coverage' | 'capability' | 'ageing'
 type HistoryWindow = '1' | '6' | '24'
 type HistoryView = 'chart' | 'table'
 
@@ -175,6 +176,10 @@ export default function FleetHealthPage() {
 
         {error && <ErrorBanner>{error}</ErrorBanner>}
 
+        {health?.integrations?.map((integration) => (
+          <IntegrationNotice key={integration.vms_id} integration={integration} />
+        ))}
+
         {/* Availability. "State unknown" appears only when it is non-zero: a
             card permanently reading 0, explaining a state that no longer
             normally occurs, is how a screen stops being read at all. */}
@@ -186,8 +191,14 @@ export default function FleetHealthPage() {
           <StatTile
             label="Answering"
             value={health ? `${health.online} / ${health.total}` : '—'}
-            detail={health ? `${health.availability_pct}% of the registry` : undefined}
-            info="Cameras whose latest probe found them delivering video. Cameras in an unknown state count as not answering here — the cautious reading — but they are a different fact from offline, and are counted apart."
+            detail={
+              health
+                ? health.stale
+                  ? `${health.availability_pct}% · ${health.stale} shown as last known`
+                  : `${health.availability_pct}% of the registry`
+                : undefined
+            }
+            info="Cameras whose status says they deliver video. Debounced: a status changes only after several probes in a row agree. When an integration refuses or does not answer, its cameras keep their last known status — marked “last known” — instead of flipping; video an AI worker is receiving counts as an answer."
           />
           <StatTile
             label="Offline"
@@ -205,9 +216,9 @@ export default function FleetHealthPage() {
             <StatTile
               label="State unknown"
               value={health.unknown}
-              detail="integration not answering, or not probed yet"
+              detail="never confirmed, or not probed yet"
               tone="warn"
-              info="Probed, but behind an integration that did not answer — so their own state cannot be told — or onboarded too recently to have been probed. When the organisers' grid refuses our login, every grid camera lands here at once."
+              info="Cameras no probe has yet been able to confirm either way — onboarded recently, or behind an integration that has not answered since. A refusal by the organisers' grid no longer moves cameras here: they keep their last known status, marked as such."
             />
           )}
         </section>
@@ -347,9 +358,10 @@ function GapPanel({
     unreliable: gaps?.reliability_gaps.length ?? 0,
     coverage: gaps?.coverage_gaps.length ?? 0,
     capability: gaps?.capability_gaps.length ?? 0,
+    ageing: (gaps?.ageing_gaps?.length ?? 0) + (gaps?.install_date_unknown?.cameras ?? 0),
   }
   // Open on the most urgent kind that has anything in it.
-  const order: GapTab[] = ['unavailable', 'unreliable', 'coverage', 'capability']
+  const order: GapTab[] = ['unavailable', 'unreliable', 'coverage', 'capability', 'ageing']
   const [chosen, setChosen] = useState<GapTab | null>(null)
   const tab = chosen ?? order.find((t) => counts[t] > 0) ?? 'unavailable'
 
@@ -371,7 +383,7 @@ function GapPanel({
         <PanelHeader
           title="Where the network is blind"
           caption={gaps ? `last ${gaps.window_hours} hours` : undefined}
-          info="Four failure modes, kept apart because each needs a different response: fix the camera, steady a flapping one, install a camera where there is none, or add plate reading where there is too little. Unreliable means below 90% uptime over the window; the ANPR target is a share of a district's cameras."
+          info="Five failure modes, kept apart because each needs a different response: fix the camera, steady a flapping one, install a camera where there is none, add plate reading where there is too little, or replace ageing equipment. Districts are Gujarat's 33, by each camera's position; a recorded clip or a camera with no known position covers no district. Unreliable means below 90% uptime over the probes that got an answer; the ANPR target is a share of a district's cameras."
           action={<GapReportDownload hours={gaps?.window_hours ?? 24} />}
         />
       </div>
@@ -384,6 +396,7 @@ function GapPanel({
             { value: 'unreliable', label: 'Unreliable', badge: badge(counts.unreliable) },
             { value: 'coverage', label: 'No cameras', badge: badge(counts.coverage) },
             { value: 'capability', label: 'Below ANPR target', badge: badge(counts.capability) },
+            { value: 'ageing', label: 'Ageing', badge: badge(counts.ageing) },
           ]}
         />
       </div>
@@ -441,12 +454,16 @@ function GapPanel({
               ))}
             </tbody>
           </Table>
+        ) : tab === 'ageing' ? (
+          <AgeingGaps gaps={gaps} onOpenCamera={onOpenCamera} />
         ) : tab === 'coverage' ? (
           <div className="px-4 py-3">
             <p className="text-xs text-faint">
-              Registered districts with no camera at all. A vehicle can cross these entirely
+              Gujarat districts ({gaps.coverage_gaps.length} of {gaps.geography?.districts ?? 33})
+              with no camera whose position is known. A vehicle can cross these entirely
               unobserved.
             </p>
+            <NotCounted gaps={gaps} />
             <ul className="mt-2.5 flex flex-wrap gap-1.5">
               {gaps.coverage_gaps.map((g) => (
                 <li
@@ -535,8 +552,111 @@ function GapReportDownload({ hours }: { hours: number }) {
 const GAP_EMPTY: Record<GapTab, string> = {
   unavailable: 'Every registered camera is delivering video.',
   unreliable: 'No camera dropped below the uptime target in this window.',
-  coverage: 'Every registered district has at least one camera.',
+  coverage: 'Every Gujarat district has at least one camera.',
   capability: 'Every district meets the plate-reading target.',
+  ageing: 'Every camera has an install date, and none is due for review.',
+}
+
+/** Cameras the district counts leave out, by name: a looping clip covers no
+ *  road, and a camera nobody can place covers no district. */
+function NotCounted({ gaps }: { gaps: GapReport }) {
+  const geo = gaps.geography
+  if (!geo) return null
+  const parts = [
+    geo.position_unknown.length > 0 &&
+      `${geo.position_unknown.length} with no known position (${geo.position_unknown.join(', ')})`,
+    geo.recorded_footage.length > 0 &&
+      `${geo.recorded_footage.length} recorded clip${geo.recorded_footage.length === 1 ? '' : 's'} (${geo.recorded_footage.join(', ')})`,
+    geo.outside_gujarat.length > 0 && `${geo.outside_gujarat.length} outside Gujarat`,
+  ].filter(Boolean)
+  if (parts.length === 0) return null
+  return <p className="mt-1.5 text-[11px] text-faint">Not counted in any district: {parts.join('; ')}.</p>
+}
+
+/** Equipment due for review by age — and, said plainly, cameras whose install
+ *  date the registry does not hold. No date is ever assumed. */
+function AgeingGaps({
+  gaps,
+  onOpenCamera,
+}: {
+  gaps: GapReport
+  onOpenCamera: (code: string) => void
+}) {
+  const ageing = gaps.ageing_gaps ?? []
+  const undated = gaps.install_date_unknown
+  return (
+    <div>
+      {undated && undated.cameras > 0 && (
+        <div className="border-b border-border px-4 py-3">
+          <p className="text-[13px]">
+            Install date unknown for {undated.cameras} camera{undated.cameras === 1 ? '' : 's'}
+          </p>
+          <p className="mt-0.5 text-[11px] text-faint">
+            {undated.reason} The CSV lists each one.
+          </p>
+        </div>
+      )}
+      {ageing.length > 0 && (
+        <Table bare>
+          <Thead>
+            <tr>
+              <Th>Camera</Th>
+              <Th>District</Th>
+              <Th className="text-right">Installed</Th>
+              <Th className="text-right">Age</Th>
+            </tr>
+          </Thead>
+          <tbody>
+            {ageing.map((g) => (
+              <CameraRow key={g.camera_code} code={g.camera_code} name={g.name} onOpen={onOpenCamera}>
+                <Td className="text-muted-foreground">{g.district ?? '—'}</Td>
+                <Td className="text-right font-mono text-xs">{g.installed_on}</Td>
+                <Td className="text-right font-mono text-xs">{g.age_years} y</Td>
+              </CameraRow>
+            ))}
+          </tbody>
+        </Table>
+      )}
+    </div>
+  )
+}
+
+const IST_TIME = new Intl.DateTimeFormat('en-IN', {
+  timeZone: 'Asia/Kolkata',
+  hour: '2-digit',
+  minute: '2-digit',
+  hourCycle: 'h23',
+})
+
+/**
+ * One line for an integration that could not be asked about its cameras —
+ * the same incident the one integration alarm describes, in the same words.
+ */
+function IntegrationNotice({ integration }: { integration: IntegrationState }) {
+  const refused = integration.state === 'refused'
+  const last = integration.last_answered_at
+    ? `last answered ${IST_TIME.format(new Date(integration.last_answered_at))} IST`
+    : 'no answer in the last 24 h'
+  return (
+    <div
+      role="status"
+      className="rounded-lg border border-priority-medium/40 bg-priority-medium/[0.06] px-4 py-3"
+    >
+      <p className="text-[13px] font-medium">
+        {refused
+          ? `${integration.name} is refusing our session — its cooldown`
+          : `${integration.name} is not answering`}
+      </p>
+      <p className="mt-0.5 text-xs leading-relaxed text-muted-foreground">
+        {integration.cameras_held} cameras keep their last known status, marked “last known”, until
+        it answers again ({last}). Where an AI worker is still receiving a camera’s video, that
+        camera counts as answering.{' '}
+        {integration.alarm_open_since
+          ? `One alarm is open for this, since ${IST_TIME.format(new Date(integration.alarm_open_since))} IST.`
+          : 'An alarm opens only if this lasts a minute or more.'}
+      </p>
+    </div>
+  )
 }
 
 function CameraRow({
@@ -711,7 +831,7 @@ function HistoryPanel({
         <PanelHeader
           title="Probe history"
           caption={camera ? `${camera.camera_code} · ${camera.name}` : 'one camera at a time'}
-          info="Every camera is probed every few seconds; each probe either finds it answering or records why not. The history is the monitor's own record — reading it never contacts the camera. The grid's adapter answers most probes from a cached copy of the grid's catalogue; those report 0 ms and are left out of the round-trip line."
+          info="Every camera is probed every few seconds; each probe either finds it answering or records why not. The history is the monitor's own record — reading it never contacts the camera. Grid cameras are probed through the grid's catalogue, whose round trip is the grid's rather than the camera's, so none is recorded for them. Probes the integration refused are shown as unanswered here but are not counted in uptime."
         />
         <div className="flex flex-wrap items-center gap-2">
           {/* A fixed box: the kit's controls fill their container. */}

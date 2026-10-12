@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Size and cost a NagarNetra deployment for an arbitrary camera fleet.
+"""Size and cost a Contrail deployment for an arbitrary camera fleet.
 
     python3 scripts/capacity_model.py --cameras 100000
 
@@ -72,8 +72,9 @@ C: dict[str, Constant] = {
         4,
         "cores per worker",
         "measured",
-        "AILAB_ORT_THREADS=4 in docker-compose.yml; 126 ms/call at 4 threads "
-        "vs 452 ms at the library default, so 4 is the measured optimum",
+        "the 4-thread worker of the original measurement (ai-lab/PERFORMANCE.md: "
+        "126 ms/call at 4 threads vs 452 ms at the library default); threads are "
+        "now divided by ailab.runtime rather than set in compose",
     ),
     "ingest_ceiling_eps": Constant(
         2774,
@@ -297,7 +298,7 @@ def report(r: dict[str, Any]) -> None:
     )
 
     print(f"\n{'=' * 68}")
-    print(f"  NagarNetra capacity model — {n:,} cameras")
+    print(f"  Contrail capacity model — {n:,} cameras")
     print(f"  Inference: {mode}")
     print(f"{'=' * 68}")
 
@@ -382,23 +383,19 @@ def provenance() -> None:
             print(f"      {const.source}")
     print(f"\n{'=' * 78}")
     print("""
-  KNOWN ERROR IN THE COMMITTED DOCS
+  WHERE THESE NUMBERS ARE USED
 
-  docs/INFRASTRUCTURE.md §2 says "one core sustains roughly 8 cameras" and
-  sizes 80,000 cameras at ~10,000 cores / ~250 nodes. That took the measured
-  8.78 cameras-per-worker figure and treated the worker as a single core. The
-  worker used 4 threads, so the honest figure is ~2.2 cameras per core, and
-  80,000 cameras needs roughly 36,000 cores — about 4x the published number.
-
-  This script computes from cameras-per-worker x worker-cores, so its output
-  supersedes those tables. Fix the documents before quoting either.
+  docs/INFRASTRUCTURE.md and docs/HLD.md (sections 15, 19, 21) quote this
+  script's output. An older sizing that treated a 4-thread worker as one core
+  (~10,000 cores for 80,000 cameras) understated the need about 4x and has been
+  replaced; if a document disagrees with this output, the output wins.
 """)
     print(f"{'=' * 78}\n")
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Size and cost a NagarNetra deployment for a given camera fleet."
+        description="Size and cost a Contrail deployment for a given camera fleet."
     )
     parser.add_argument(
         "--cameras", type=int, default=100_000, help="fleet size (default 100000)"

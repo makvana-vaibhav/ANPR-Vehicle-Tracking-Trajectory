@@ -51,7 +51,10 @@ DEMO_CAMERA = "CAM-DEMO-01"
 #: Inside the compose network this is the api service; from the host it is
 #: the published port. Overridable so the demo can be driven either way.
 API_URL = os.environ.get("NAGARNETRA_API_URL", "http://localhost:8000") + "/api/v1"
-DEMO_USER, DEMO_PASSWORD = "supervisor", "NagarNetra@2026"  # noqa: S105 — seeded demo credential
+#: The supervisor's own password, from .env via the container's environment
+#: (scripts/seed.py). There is no shared, published demo password any more.
+DEMO_USER = "supervisor"
+DEMO_PASSWORD = os.environ.get("DEMO_PASSWORD_SUPERVISOR", "")
 #: How long to let the pipeline run before giving up on seeing the vehicle.
 PASS_TIMEOUT_S = 180.0
 

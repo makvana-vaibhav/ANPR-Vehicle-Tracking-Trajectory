@@ -154,7 +154,7 @@ cmd_backup() {
     local dumped
     dumped="$(date +%s)"
 
-    dim "  mirroring buckets: $BUCKETS…"
+    dim "  mirroring buckets: ${BUCKETS}…"
     docker run --rm --network "$NETWORK" -e MINIO_ROOT_USER -e MINIO_ROOT_PASSWORD \
         -e BUCKETS="$BUCKETS" -v "$REPO/$dir/minio:/backup" \
         --entrypoint sh "$MINIO_IMAGE" -c '
@@ -318,7 +318,7 @@ cmd_restore() {
 
     local live backed verified
     live="$(psql_live -c "$COUNT_SQL" | tr '\n' ' ')"
-    backed="$(manifest_get "$dir" "' '.join(f'{k} {v}' for k, v in sorted(m['rows_live_after_dump'].items()))")"
+    backed="$(manifest_get "$dir" "' '.join(f'{k} {v}' for k, v in sorted(((m.get('verified') or {}).get('rows_restored') or m['rows_live_after_dump']).items()))")"
     verified="$(manifest_get "$dir" "(m.get('verified') or {}).get('ok')")"
 
     printf '\n\033[1;41;97m  DESTRUCTIVE: RESTORE INTO THE RUNNING STACK  \033[0m\n\n'
@@ -367,10 +367,49 @@ cmd_restore() {
     green "✓ restore complete — check \`make status\` and the command centre"
 }
 
+# ══════════════════════════════════════════════════════════════════════
+# The object half of a restore drill, without touching the live store: mirror
+# the backup into a throwaway MinIO, by the same function `restore` uses, and
+# compare object counts with the manifest.
+cmd_drill_objects() {
+    local dir="${1:?usage: backup.sh drill-objects backups/<timestamp>}" name i
+    dir="${dir%/}"
+    name="contrail-backuptest-minio-$$-$RANDOM"
+    docker run -d --rm --name "$name" --network "$NETWORK" \
+        -e MINIO_ROOT_USER -e MINIO_ROOT_PASSWORD "$MINIO_IMAGE" server /data >/dev/null
+    # shellcheck disable=SC2064
+    trap "docker rm -f -v '$name' >/dev/null 2>&1 || true" EXIT INT TERM
+    for i in $(seq 1 30); do
+        docker exec "$name" mc ready local >/dev/null 2>&1 && break
+        sleep 1
+    done
+    local started counts
+    started="$(date +%s)"
+    counts="$(mirror_into "$dir" "http://$name:9000")"
+    echo "  mirrored in $(( $(date +%s) - started )) s into $name"
+    python3 - "$dir" "$counts" <<'PY'
+import json, os, sys
+m = json.load(open(os.path.join(sys.argv[1], "manifest.json")))
+got = dict(line.split() for line in sys.argv[2].strip().split("\n") if line.strip())
+ok = True
+for bucket, info in m["minio"]["buckets"].items():
+    n = int(got.get(bucket, 0))
+    verdict = "ok" if n == info["objects"] else "MISMATCH"
+    ok &= verdict == "ok"
+    print(f"  {bucket:<22} backup {info['objects']:>7}  restored {n:>7}  {verdict}")
+sys.exit(0 if ok else 1)
+PY
+    local verdict=$?
+    docker rm -f -v "$name" >/dev/null 2>&1 || true
+    trap - EXIT INT TERM
+    [ "$verdict" -eq 0 ] || die "object drill FAILED"
+    green "✓ objects restore cleanly from $dir"
+}
+
 case "${1:-}" in
     backup) cmd_backup ;;
     verify) shift; cmd_verify "$@" ;;
     restore) shift; cmd_restore "$@" ;;
-    _mirror-into) shift; mirror_into "$@" ;;  # restore drills against a throwaway MinIO
-    *) echo "usage: scripts/backup.sh backup | verify <dir> | restore <dir>" >&2; exit 2 ;;
+    drill-objects) shift; cmd_drill_objects "$@" ;;
+    *) echo "usage: scripts/backup.sh backup | verify <dir> | restore <dir> | drill-objects <dir>" >&2; exit 2 ;;
 esac

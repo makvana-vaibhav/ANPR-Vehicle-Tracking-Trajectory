@@ -20,42 +20,39 @@ writeQueueSize: 512
 udpMaxPayloadSize: 1472
 
 ###############################################################################
-# Authentication
+# Authentication — every publish and every read is decided by the API
 #
-# MediaMTX grants the `api`, `metrics` and `pprof` actions to 127.0.0.1 only by
-# default. The API tier runs in a different container, so it must be granted
-# explicitly — by CIDR, not to the world. The subnet is pinned in
-# docker-compose.yml so this stays deterministic across restarts.
+# `authMethod: http`: before MediaMTX lets a client publish into a path or read
+# one out (RTSP, WebRTC or HLS), it POSTs the request to the API and obeys the
+# answer (services/api/app/routers/gateway_auth.py). The API allows exactly:
 #
-# Stream *viewing* is authorised at the application layer instead: the backend
-# issues short-lived signed tokens per camera and writes an audit row for every
-# stream open (Phase 4). See docs/SECURITY.md for the production posture, where
-# this tier sits behind mTLS on an isolated video VLAN.
+#   publish  the simulator, as MEDIAMTX_PUBLISH_USER / _PASSWORD
+#   read     the ANPR workers, as MEDIAMTX_READ_USER / _PASSWORD
+#   read     a browser over WebRTC or HLS presenting `?token=<stream token>`,
+#            the camera-scoped, ~2-minute token whose issuance is audited
+#            (`camera.view`), for the path it was issued for
+#
+# and nothing else. This replaced `authMethod: internal` with `read` granted
+# to any address — which let anyone who could reach :8888 play CAM-DEMO-01
+# without a token — and `publish` granted by source address, which proved
+# nothing: the host's own connections and the web tier's proxy both arrive
+# from inside the bridge network.
+#
+# Each read is checked once, when its session starts (an RTSP connection, a
+# WHEP offer, an HLS session); a session outlives the token's two minutes.
+# If the API is down, new sessions are refused rather than let through.
+#
+# The control API, metrics and pprof are not sent to the API (the API itself
+# calls the control API, and the healthcheck must not depend on it). They are
+# reachable only from the internal network: their ports are not published
+# beyond the host's loopback (docker-compose.yml).
 ###############################################################################
-authMethod: internal
-authInternalUsers:
-  # Publish and playback within the platform's own network.
-  - user: any
-    pass:
-    ips: ['172.31.0.0/16', '127.0.0.1', '::1']
-    permissions:
-      - action: publish
-      - action: playback
-
-  # Browser viewing arrives from the host, not the bridge network.
-  - user: any
-    pass:
-    ips: []
-    permissions:
-      - action: read
-
-  # Control API and metrics: internal tier only.
-  - user: any
-    pass:
-    ips: ['172.31.0.0/16', '127.0.0.1', '::1']
-    permissions:
-      - action: api
-      - action: metrics
+authMethod: http
+authHTTPAddress: http://api:8000/internal/mediamtx/auth
+authHTTPExclude:
+  - action: api
+  - action: metrics
+  - action: pprof
 
 ###############################################################################
 # Control API — the backend uses this to enumerate paths and check liveness
@@ -74,9 +71,10 @@ rtspAddress: :8554
 rtspTransports: [tcp, udp]
 rtspAuthMethods: [basic]
 
-# RTMP and SRT are not part of the camera estate; keep the surface small.
+# RTMP, SRT and MoQ are not part of the camera estate; keep the surface small.
 rtmp: no
 srt: no
+moq: no
 
 ###############################################################################
 # Egress: WebRTC (WHEP) — primary browser path, sub-second latency

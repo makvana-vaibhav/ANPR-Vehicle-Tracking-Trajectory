@@ -8,6 +8,7 @@ route is drawn across).
 from __future__ import annotations
 
 import io
+import uuid
 
 import pytest
 from httpx import AsyncClient
@@ -491,23 +492,40 @@ class TestCameraLifecycle:
         assert response.status_code == 422
         assert "outside Gujarat" in response.text
 
-    async def test_stream_url_with_credentials_rejected(
-        self, client: AsyncClient, auth_headers
+    async def test_stream_url_with_credentials_refused_without_a_key(
+        self, client: AsyncClient, auth_headers, monkeypatch
     ) -> None:
-        """Embedded credentials are how camera passwords leak into databases."""
-        response = await client.post(
-            "/api/v1/cameras",
-            json={
-                "camera_code": "CAM-CRED-01",
-                "name": "Credential leak",
-                "lat": 22.3,
-                "lon": 70.8,
-                "stream_url": "rtsp://admin:hunter2@10.0.0.5:554/stream1",
-            },
-            headers=await auth_headers("admin"),
-        )
+        """Embedded credentials are how camera passwords leak into databases.
+
+        A pasted login is split out of the URL and sealed (test_camera_login.py
+        covers that); with no key ring to seal it, the camera is refused
+        rather than stored with the password in clear.
+        """
+        from app.core import crypto
+
+        monkeypatch.setattr(crypto.settings, "encryption_keys", "")
+        monkeypatch.setattr(crypto.settings, "encryption_active_key_id", "")
+        crypto.reset_cache()
+        try:
+            response = await client.post(
+                "/api/v1/cameras",
+                json={
+                    # Unique per run: a leftover row from an older run of this
+                    # test (which expected a different refusal) must not turn
+                    # it into a 409.
+                    "camera_code": f"CAM-CRED-{uuid.uuid4().hex[:6].upper()}",
+                    "name": "Credential leak",
+                    "lat": 22.3,
+                    "lon": 70.8,
+                    "stream_url": "rtsp://admin:hunter2@10.0.0.5:554/stream1",
+                },
+                headers=await auth_headers("admin"),
+            )
+        finally:
+            crypto.reset_cache()
         assert response.status_code == 422
-        assert "credentials" in response.text
+        assert "credentials cannot be stored" in response.text
+        assert "hunter2" not in response.text
 
     async def test_list_response_never_exposes_stream_urls(
         self, client: AsyncClient, auth_headers

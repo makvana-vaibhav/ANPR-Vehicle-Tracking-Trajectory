@@ -54,6 +54,26 @@ class Window(BaseModel):
     )
 
 
+class RecordedFootage(BaseModel):
+    """Whether cameras replaying a recorded clip are in this response's figures.
+
+    A camera tagged `recorded-footage` replays a clip on a loop: the same few
+    vehicles, again every loop. Counted as traffic, the demo clip alone was
+    ~93% of every vehicle observed. So every traffic figure leaves such cameras
+    out unless the caller passes `include_recorded=true`, and says which ones
+    it left out so a screen can label the figures with it.
+    """
+
+    included: bool = Field(description="True only when the caller passed include_recorded=true.")
+    cameras: list[str] = Field(description="Every camera tagged recorded-footage, by code, sorted.")
+    excluded_cameras: list[str] = Field(
+        description=(
+            "Cameras whose rows were left out of every figure in this response: "
+            "`cameras` when not included, otherwise empty."
+        )
+    )
+
+
 # ── flow: how many vehicles, where, when ──────────────────────────────
 class FlowPoint(BaseModel):
     """One time bucket at one place."""
@@ -85,6 +105,7 @@ class FlowResponse(BaseModel):
     group_by: Literal["camera", "corridor"]
     series: list[FlowSeries]
     total_vehicles: int
+    recorded_footage: RecordedFootage
 
 
 # ── speed: how fast the road is moving ────────────────────────────────
@@ -133,6 +154,7 @@ class SpeedResponse(BaseModel):
     window: Window
     provenance: SpeedProvenance
     corridors: list[CorridorSpeed]
+    recorded_footage: RecordedFootage
 
 
 # ── route density: which way traffic actually goes ────────────────────
@@ -156,6 +178,7 @@ class RouteDensityResponse(BaseModel):
     window: Window
     pairs: list[RoutePair]
     total_journeys: int
+    recorded_footage: RecordedFootage
 
 
 # ── travel time against a baseline ────────────────────────────────────
@@ -189,6 +212,7 @@ class TravelTimeResponse(BaseModel):
     segments: list[TravelTime]
     #: How many days of history the baseline was allowed to draw on.
     baseline_window_days: int
+    recorded_footage: RecordedFootage
 
 
 # ── hotspots ──────────────────────────────────────────────────────────
@@ -212,6 +236,7 @@ class HotspotResponse(BaseModel):
     by_slowdown: list[TravelTime]
     slowdown_status: DataStatus
     note: str
+    recorded_footage: RecordedFootage
 
 
 # ── heatmap ───────────────────────────────────────────────────────────
@@ -245,6 +270,7 @@ class HeatmapResponse(BaseModel):
     features: list[HeatmapFeature]
     window: Window
     max_vehicles: int
+    recorded_footage: RecordedFootage
 
 
 # ── traffic intelligence ──────────────────────────────────────────────
@@ -410,6 +436,10 @@ class TrafficResponse(BaseModel):
     #: Worst-first, for the "top congested roads" panel.
     most_congested: list[str]
     note: str
+    #: Applied in SQL, before the bound: `rows_read`, `rows_total`,
+    #: `active_cameras` and `fleet_cameras` all count live cameras only unless
+    #: recordings were asked for.
+    recorded_footage: RecordedFootage
 
 
 class TrafficHistoryPoint(BaseModel):
@@ -430,3 +460,4 @@ class TrafficHistoryResponse(BaseModel):
     key: str | None
     group_by: Literal["camera", "corridor"]
     points: list[TrafficHistoryPoint]
+    recorded_footage: RecordedFootage

@@ -1,0 +1,394 @@
+<title>Contrail Jury Round</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@600;700&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<style>
+/* Layout: a console-style rehearsal tool — header, sticky workspace tabs, one
+   reading column per tab; the question bank is a filterable card list. */
+:root {
+  --bg: #0A0E13;
+  --panel: #0F151C;
+  --raised: #141B24;
+  --line: #1E2833;
+  --line-2: #2A3644;
+  --fg: #E6EDF3;
+  --fg-2: #9AA9B8;
+  --faint: #7A8897;
+  --trail: #5CC8FF;
+  --trail-ink: #04131C;
+  --crit: #FF5C55;
+  --high: #F5A33C;
+  --med: #7EA6FF;
+  --ok: #5CC8FF;
+  --code-bg: #0C1218;
+  --font-ui: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  --font-display: "Barlow Condensed", "Arial Narrow", sans-serif;
+  color-scheme: dark;
+}
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme="dark"]) {
+    --bg: #F3F5F7; --panel: #FFFFFF; --raised: #EAEFF3; --line: #D7DEE5; --line-2: #C1CBD5;
+    --fg: #0F1720; --fg-2: #46576A; --faint: #66768A; --trail: #0A78AC; --trail-ink: #FFFFFF;
+    --crit: #C42F29; --high: #9A5B00; --med: #3156C4; --ok: #0A78AC; --code-bg: #EDF1F5;
+    color-scheme: light;
+  }
+}
+:root[data-theme="light"] {
+  --bg: #F3F5F7; --panel: #FFFFFF; --raised: #EAEFF3; --line: #D7DEE5; --line-2: #C1CBD5;
+  --fg: #0F1720; --fg-2: #46576A; --faint: #66768A; --trail: #0A78AC; --trail-ink: #FFFFFF;
+  --crit: #C42F29; --high: #9A5B00; --med: #3156C4; --ok: #0A78AC; --code-bg: #EDF1F5;
+  color-scheme: light;
+}
+
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--fg); font: 400 15px/1.6 var(--font-ui); -webkit-font-smoothing: antialiased; }
+a { color: var(--trail); text-underline-offset: 2px; }
+:focus-visible { outline: 2px solid var(--trail); outline-offset: 2px; border-radius: 3px; }
+.wrap { max-width: 1120px; margin-inline: auto; padding-inline: 20px; }
+
+/* ── Header ─────────────────────────────────────────────── */
+header.top { border-bottom: 1px solid var(--line); background: var(--panel); }
+header.top .wrap { padding-block: 22px 18px; display: grid; gap: 10px; }
+.brand { display: flex; align-items: center; gap: 10px; color: var(--fg-2); font: 600 13px/1 var(--font-ui); letter-spacing: .04em; text-transform: uppercase; }
+.brand svg { flex: none; }
+h1 { font: 700 clamp(2.1rem, 5vw, 3.1rem)/1 var(--font-display); letter-spacing: .01em; margin: 2px 0 0; text-wrap: balance; }
+.sub { color: var(--fg-2); margin: 0; max-width: 70ch; }
+.chips { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 4px; }
+.chip { display: inline-flex; align-items: center; gap: 7px; height: 28px; padding: 0 11px; border: 1px solid var(--line-2); border-radius: 14px; font: 500 12.5px/1 var(--font-ui); color: var(--fg-2); white-space: nowrap; }
+.chip b { color: var(--fg); font-weight: 600; font-family: var(--font-mono); }
+.chip .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--trail); }
+
+/* ── Tabs ───────────────────────────────────────────────── */
+nav.tabs { position: sticky; top: env(safe-area-inset-top, 0px); z-index: 10; background: color-mix(in srgb, var(--bg) 92%, transparent); backdrop-filter: blur(8px); border-bottom: 1px solid var(--line); }
+nav.tabs .wrap { display: flex; gap: 2px; overflow-x: auto; scrollbar-width: none; }
+nav.tabs a { flex: none; padding: 13px 12px 11px; border-bottom: 2px solid transparent; color: var(--fg-2); text-decoration: none; font: 500 14px/1 var(--font-ui); white-space: nowrap; }
+nav.tabs a:hover { color: var(--fg); }
+nav.tabs a[aria-current="page"] { color: var(--fg); border-bottom-color: var(--trail); }
+nav.tabs .count { font: 500 11px/1 var(--font-mono); color: var(--faint); margin-left: 5px; }
+
+main .wrap { padding-block: 28px 80px; }
+.tab { min-width: 0; }
+.tab:not(.active) { position: absolute; left: -12000px; top: 0; width: 1080px; visibility: hidden; }
+.tab-head { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 8px 20px; margin-bottom: 18px; }
+h2.tab-title { font: 700 clamp(1.6rem, 3.4vw, 2.15rem)/1.05 var(--font-display); letter-spacing: .01em; margin: 0; text-wrap: balance; }
+.tab-note { color: var(--faint); font-size: 13px; margin: 0; }
+
+/* ── Rendered markdown ─────────────────────────────────── */
+.prose { min-width: 0; }
+.prose > * { max-width: 78ch; }
+.prose h2, .prose h3 { font: 600 1.18rem/1.3 var(--font-ui); margin: 30px 0 10px; text-wrap: balance; }
+.prose h3 { font-size: 1.05rem; color: var(--fg); }
+.prose h4 { font: 600 .95rem/1.3 var(--font-ui); margin: 20px 0 6px; color: var(--fg-2); }
+.prose p { margin: 0 0 12px; }
+.prose ul, .prose ol { margin: 0 0 14px; padding-left: 1.3em; }
+.prose li { margin-bottom: 5px; }
+.prose strong { color: var(--fg); font-weight: 600; }
+.prose em { color: var(--fg); }
+.prose blockquote { margin: 0 0 14px; padding: 10px 14px; border-left: 3px solid var(--trail); background: var(--raised); border-radius: 0 8px 8px 0; color: var(--fg); }
+.prose code { font: 400 .86em/1.4 var(--font-mono); background: var(--code-bg); border: 1px solid var(--line); padding: 1px 5px; border-radius: 4px; overflow-wrap: anywhere; }
+.prose pre { max-width: 100%; overflow-x: auto; background: var(--code-bg); border: 1px solid var(--line); border-radius: 8px; padding: 12px 14px; font: 400 12.5px/1.55 var(--font-mono); }
+.prose pre code { background: none; border: 0; padding: 0; overflow-wrap: normal; }
+.prose pre.mermaid { background: var(--panel); text-align: center; font-family: var(--font-ui); }
+.prose hr { border: 0; border-top: 1px solid var(--line); margin: 26px 0; }
+.path { font: 400 .86em/1.4 var(--font-mono); color: var(--fg-2); }
+.table-wrap { max-width: 100% !important; overflow-x: auto; margin: 4px 0 18px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); }
+.table-wrap table { border-collapse: collapse; width: 100%; font-size: 13.5px; min-width: 640px; }
+.table-wrap th, .table-wrap td { text-align: left; vertical-align: top; padding: 9px 12px; border-bottom: 1px solid var(--line); }
+.table-wrap th { font: 600 11px/1.4 var(--font-ui); letter-spacing: .06em; text-transform: uppercase; color: var(--faint); background: var(--raised); }
+.table-wrap tr:last-child td { border-bottom: 0; }
+.table-wrap td:first-child { font-variant-numeric: tabular-nums; }
+.table-wrap tr.now td { background: color-mix(in srgb, var(--trail) 14%, transparent); }
+.table-wrap tr.now td:first-child { box-shadow: inset 3px 0 0 var(--trail); }
+
+/* ── Panels ─────────────────────────────────────────────── */
+.callout { border: 1px solid var(--line-2); background: var(--panel); border-radius: 10px; padding: 16px 18px; margin-bottom: 22px; }
+.callout h3 { margin: 0 0 8px; font: 600 13px/1.3 var(--font-ui); letter-spacing: .06em; text-transform: uppercase; color: var(--trail); }
+.callout.warn h3 { color: var(--high); }
+.grid-2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 420px), 1fr)); gap: 18px; align-items: start; }
+.gallery { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 250px), 1fr)); gap: 12px; margin: 6px 0 24px; }
+.gallery figure { margin: 0; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; background: var(--panel); }
+.gallery img { display: block; width: 100%; aspect-ratio: 16 / 9; object-fit: cover; object-position: top left; max-width: 100%; }
+.gallery figcaption { padding: 7px 10px; font-size: 12.5px; color: var(--fg-2); }
+.gallery a { display: block; color: inherit; text-decoration: none; }
+
+/* ── Run of show ───────────────────────────────────────── */
+.seg { display: inline-flex; gap: 2px; padding: 3px; border: 1px solid var(--line-2); border-radius: 9px; background: var(--panel); }
+.seg button { border: 0; background: none; color: var(--fg-2); font: 500 13px/1 var(--font-ui); padding: 8px 12px; border-radius: 6px; cursor: pointer; }
+.seg button[aria-pressed="true"] { background: var(--raised); color: var(--fg); box-shadow: inset 0 0 0 1px var(--line-2); }
+.timer { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 14px; padding: 12px 14px; border: 1px solid var(--line-2); border-radius: 10px; background: var(--panel); margin: 14px 0 18px; }
+.timer .clock { font: 500 28px/1 var(--font-mono); letter-spacing: -.01em; font-variant-numeric: tabular-nums; min-width: 6ch; }
+.timer .now-block { color: var(--fg-2); font-size: 13.5px; flex: 1 1 220px; min-width: 0; }
+.timer .now-block b { color: var(--fg); }
+.btn { border: 1px solid var(--line-2); background: var(--raised); color: var(--fg); font: 500 13px/1 var(--font-ui); padding: 9px 13px; border-radius: 7px; cursor: pointer; }
+.btn.primary { background: var(--fg); color: var(--bg); border-color: var(--fg); }
+.btn:hover { border-color: var(--fg-2); }
+
+/* ── Question bank ─────────────────────────────────────── */
+.qbar { position: sticky; top: calc(env(safe-area-inset-top, 0px) + 45px); z-index: 5; display: grid; gap: 10px; padding: 12px 0; background: color-mix(in srgb, var(--bg) 94%, transparent); backdrop-filter: blur(8px); border-bottom: 1px solid var(--line); margin-bottom: 14px; }
+.qrow { display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: center; }
+.search { flex: 1 1 260px; min-width: 0; display: flex; align-items: center; gap: 8px; height: 38px; padding: 0 12px; border: 1px solid var(--line-2); border-radius: 8px; background: var(--panel); }
+.search input { flex: 1; min-width: 0; border: 0; outline: none; background: none; color: var(--fg); font: 400 14px/1 var(--font-ui); }
+.search input::placeholder { color: var(--faint); }
+.toggle { display: inline-flex; align-items: center; gap: 8px; color: var(--fg-2); font-size: 13.5px; cursor: pointer; user-select: none; }
+.toggle input { accent-color: var(--trail); width: 16px; height: 16px; }
+.pills { display: flex; flex-wrap: wrap; gap: 6px; }
+.pill { border: 1px solid var(--line); background: none; color: var(--fg-2); border-radius: 999px; padding: 5px 10px; font: 500 12.5px/1 var(--font-ui); cursor: pointer; }
+.pill[aria-pressed="true"] { border-color: var(--trail); color: var(--fg); background: color-mix(in srgb, var(--trail) 14%, transparent); }
+.pill .n { font-family: var(--font-mono); color: var(--faint); margin-left: 4px; }
+.qcount { color: var(--faint); font-size: 13px; }
+.qlist { display: grid; gap: 12px; }
+.q { border: 1px solid var(--line); border-radius: 10px; background: var(--panel); padding: 14px 16px; min-width: 0; }
+.q-head { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; margin-bottom: 6px; }
+.q-id { font: 500 12px/1 var(--font-mono); color: var(--trail); }
+.q-cat { font-size: 12px; color: var(--faint); }
+.owner { display: inline-grid; place-items: center; min-width: 22px; height: 20px; padding: 0 5px; border-radius: 5px; background: var(--raised); border: 1px solid var(--line-2); font: 600 11px/1 var(--font-mono); color: var(--fg); }
+.q-title { font: 600 16px/1.4 var(--font-ui); margin: 0 0 10px; text-wrap: pretty; }
+.q-part { display: grid; grid-template-columns: 92px minmax(0, 1fr); gap: 2px 12px; padding-top: 8px; border-top: 1px dashed var(--line); margin-top: 8px; }
+.q-part:first-of-type { border-top: 0; margin-top: 0; padding-top: 0; }
+.q-label { font: 600 11px/1.9 var(--font-ui); letter-spacing: .06em; text-transform: uppercase; color: var(--faint); }
+.q-label.say { color: var(--trail); }
+.q-body > :last-child { margin-bottom: 0; }
+.q-reveal { display: none; }
+body.practice .q:not(.open) .q-parts { display: none; }
+body.practice .q:not(.open) .q-reveal { display: inline-flex; }
+.q mark { background: color-mix(in srgb, var(--high) 35%, transparent); color: inherit; border-radius: 2px; }
+.empty { padding: 30px; text-align: center; color: var(--faint); border: 1px dashed var(--line-2); border-radius: 10px; }
+
+@media (max-width: 560px) {
+  .q-part { grid-template-columns: minmax(0, 1fr); }
+  .timer .clock { font-size: 24px; }
+}
+@media (prefers-reduced-motion: reduce) { * { scroll-behavior: auto !important; transition: none !important; } }
+</style>
+
+<header class="top">
+  <div class="wrap">
+    <div class="brand">
+      <svg width="26" height="18" viewBox="0 0 26 18" aria-hidden="true"><path d="M1 15C7 15 9 4 17 4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" opacity=".55"/><circle cx="21" cy="4" r="3" fill="currentColor"/></svg>
+      Contrail · Gujarat Police CCTV Hackathon “Sentinel”
+    </div>
+    <h1>Jury round playbook</h1>
+    <p class="sub">Twenty to thirty minutes to explain the product, run it live, and answer for it. Everything here was checked against the running platform; numbers carry their label — measured, arithmetic or extrapolated.</p>
+    <div class="chips" id="chips"></div>
+  </div>
+</header>
+
+<nav class="tabs" aria-label="Sections">
+  <div class="wrap" id="tabnav">
+    <a href="#brief">Brief</a>
+    <a href="#run">Run of show</a>
+    <a href="#demo">Live demo</a>
+    <a href="#proof">Proof it's real</a>
+    <a href="#questions">Questions<span class="count" id="qn"></span></a>
+    <a href="#gaps">Gaps &amp; fixes</a>
+    <a href="#architecture">Architecture</a>
+    <a href="#scale">Scale &amp; cost</a>
+    <a href="#team">Team</a>
+  </div>
+</nav>
+
+<main>
+  <div class="wrap" style="position:relative">
+
+    <section class="tab" id="tab-brief" aria-labelledby="h-brief">
+      <div class="tab-head"><h2 class="tab-title" id="h-brief">The brief for the room</h2><p class="tab-note" id="built"></p></div>
+      <div class="callout" id="updates-box" hidden><h3>Changed since the document was written</h3><div class="prose" id="updates"></div></div>
+      <div class="grid-2">
+        <div class="prose" id="intro"></div>
+        <div class="callout warn"><h3>Five facts that shape today's demo</h3><div class="prose" id="readfirst"></div></div>
+      </div>
+      <h3 style="font:600 13px/1.3 var(--font-ui);letter-spacing:.06em;text-transform:uppercase;color:var(--faint);margin:26px 0 10px">The screens you will show</h3>
+      <div class="gallery" id="gallery"></div>
+    </section>
+
+    <section class="tab" id="tab-run" aria-labelledby="h-run">
+      <div class="tab-head">
+        <h2 class="tab-title" id="h-run">Run of show</h2>
+        <div class="seg" role="group" aria-label="Length">
+          <button type="button" data-len="20">20 min</button>
+          <button type="button" data-len="25" aria-pressed="true">25 min</button>
+          <button type="button" data-len="30">30 min</button>
+        </div>
+      </div>
+      <div class="timer" aria-live="polite">
+        <span class="clock" id="clock">0:00</span>
+        <span class="now-block" id="nowblock">Start the clock for a timed rehearsal: the current block is highlighted in the table.</span>
+        <button type="button" class="btn primary" id="tstart">Start</button>
+        <button type="button" class="btn" id="treset">Reset</button>
+      </div>
+      <div class="prose" id="runtable"></div>
+      <h3 style="font:600 1.05rem/1.3 var(--font-ui);margin:26px 0 10px">Roles</h3>
+      <div class="prose" id="roles"></div>
+      <h3 style="font:600 1.05rem/1.3 var(--font-ui);margin:26px 0 10px">Presenter cues</h3>
+      <div class="prose" id="cues"></div>
+    </section>
+
+    <section class="tab" id="tab-demo" aria-labelledby="h-demo">
+      <div class="tab-head"><h2 class="tab-title" id="h-demo">The live demo, step by step</h2><p class="tab-note">Six mandatory steps, plus a new camera onboarded on the spot</p></div>
+      <div class="prose" id="demo"></div>
+    </section>
+
+    <section class="tab" id="tab-proof" aria-labelledby="h-proof">
+      <div class="tab-head"><h2 class="tab-title" id="h-proof">Proof it is real, not static</h2></div>
+      <div class="prose" id="proof"></div>
+    </section>
+
+    <section class="tab" id="tab-questions" aria-labelledby="h-questions">
+      <div class="tab-head"><h2 class="tab-title" id="h-questions">Question bank</h2><p class="tab-note">Answer · what to show · the follow-up if pressed</p></div>
+      <div class="qbar">
+        <div class="qrow">
+          <label class="search" for="qsearch">
+            <svg width="15" height="15" viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7" fill="none" stroke="currentColor" stroke-width="2"/><path d="M20 20l-4-4" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+            <input id="qsearch" type="search" placeholder="Search questions and answers — e.g. GPU, password, DPDP, 80,000" autocomplete="off">
+          </label>
+          <label class="toggle" for="practice"><input type="checkbox" id="practice"> Practice mode</label>
+          <span class="qcount" id="qcount"></span>
+        </div>
+        <div class="qrow"><span class="q-label" style="line-height:1">Owner</span><div class="pills" id="owners"></div></div>
+        <div class="qrow"><div class="pills" id="cats"></div></div>
+      </div>
+      <div class="prose" id="qpre" style="margin-bottom:10px"></div>
+      <div class="qlist" id="qlist"></div>
+    </section>
+
+    <section class="tab" id="tab-gaps" aria-labelledby="h-gaps">
+      <div class="tab-head"><h2 class="tab-title" id="h-gaps">What we lack, and how we'll close it</h2><p class="tab-note">Say the gaps before the jury finds them</p></div>
+      <div class="prose" id="gaps"></div>
+    </section>
+
+    <section class="tab" id="tab-architecture" aria-labelledby="h-architecture">
+      <div class="tab-head"><h2 class="tab-title" id="h-architecture">Architecture and code tour</h2></div>
+      <div class="prose"><!--ARCH--></div>
+    </section>
+
+    <section class="tab" id="tab-scale" aria-labelledby="h-scale">
+      <div class="tab-head"><h2 class="tab-title" id="h-scale">Scale, cost, the future, and why us</h2></div>
+      <div class="prose" id="scale"></div>
+    </section>
+
+    <section class="tab" id="tab-team" aria-labelledby="h-team">
+      <div class="tab-head"><h2 class="tab-title" id="h-team">For the team</h2></div>
+      <div class="prose" id="team"></div>
+      <h3 style="font:600 1.05rem/1.3 var(--font-ui);margin:26px 0 10px">New-camera rehearsal log</h3>
+      <div class="prose" id="appA"></div>
+      <h3 style="font:600 1.05rem/1.3 var(--font-ui);margin:26px 0 10px">Command cheat sheet</h3>
+      <div class="prose" id="appB"></div>
+    </section>
+  </div>
+</main>
+
+<script>
+const DATA = /*DATA*/null;
+const $ = (id) => document.getElementById(id);
+const store = {
+  get(k) { try { return localStorage.getItem(k) } catch { return null } },
+  set(k, v) { try { localStorage.setItem(k, v) } catch {} },
+};
+
+// Content
+$('built').textContent = `Built ${DATA.built} IST`;
+if (DATA.updates) { $('updates').innerHTML = DATA.updates; $('updates-box').hidden = false; }
+for (const [id, key] of [['intro','intro'],['readfirst','readFirst'],['roles','roles'],['cues','cues'],['demo','demo'],['proof','proof'],['qpre','qPre'],['gaps','gaps'],['scale','scale'],['team','team'],['appA','appendixA'],['appB','appendixB']]) $(id).innerHTML = DATA[key] || '';
+$('qn').textContent = DATA.questions.length;
+$('chips').innerHTML = [
+  `<span class="chip"><span class="dot"></span>Live platform, checked on the day</span>`,
+  `<span class="chip"><b>${DATA.questions.length}</b> rehearsed questions</span>`,
+  `<span class="chip"><b>6</b> test-case steps + new camera</span>`,
+  `<span class="chip"><b>20 · 25 · 30</b> minute runs</span>`,
+].join('');
+
+const SHOTS = [
+  ['01-command','Command — the network now'], ['02-live','Live — one camera, plate boxes, reads'],
+  ['03-investigate-grid','Investigate — a grid plate with pursuit'], ['04-investigate-candidates','Investigate — possibly the same vehicle'],
+  ['05-alarm-watchlist','Alarms — a watchlist hit'], ['06-alarm-person','Alarms — a possible person match'],
+  ['07-persons','Persons — four-eyes enrolment'], ['08-registries','Registries — reference VAHAN / eGujCop'],
+  ['09-map','Network — GIS map'], ['10-cameras','Network — camera registry'],
+  ['11-fleet-health','Network — fleet health and gaps'], ['12-insights','Insights — traffic'],
+  ['13-audit','Admin — audit trail'], ['14-watchlist','Alarms — watchlist'],
+];
+$('gallery').innerHTML = SHOTS.map(([f, cap]) => `<figure><a href="screens/${f}.png" target="_blank" rel="noopener"><img src="screens/${f}.png" alt="${cap}" loading="lazy"></a><figcaption>${cap}</figcaption></figure>`).join('');
+
+// Tabs (bare #tokens only)
+const TABS = ['brief','run','demo','proof','questions','gaps','architecture','scale','team'];
+function show(name) {
+  if (!TABS.includes(name)) name = 'brief';
+  for (const t of TABS) $('tab-' + t).classList.toggle('active', t === name);
+  for (const a of document.querySelectorAll('#tabnav a')) a.toggleAttribute('aria-current', a.getAttribute('href') === '#' + name), a.getAttribute('href') === '#' + name ? a.setAttribute('aria-current','page') : a.removeAttribute('aria-current');
+  store.set('jury.tab', name);
+}
+window.addEventListener('hashchange', () => { show(location.hash.slice(1)); window.scrollTo({ top: 0 }) });
+show(location.hash.slice(1) || store.get('jury.tab') || 'brief');
+
+// Run of show: length switch and a rehearsal clock that follows the table
+let len = store.get('jury.len') || '25';
+function renderRun() {
+  $('runtable').innerHTML = DATA['run' + len] || '';
+  for (const b of document.querySelectorAll('.seg button')) b.setAttribute('aria-pressed', String(b.dataset.len === len));
+  markRow();
+}
+for (const b of document.querySelectorAll('.seg button')) b.addEventListener('click', () => { len = b.dataset.len; store.set('jury.len', len); renderRun(); });
+let started = null, elapsed = 0, ticker = null;
+const fmt = (s) => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, '0')}`;
+const parseT = (t) => { const m = /^(\d+):(\d{2})$/.exec(t.trim()); return m ? +m[1] * 60 + +m[2] : null };
+function markRow() {
+  const rows = document.querySelectorAll('#runtable tbody tr');
+  let current = null;
+  rows.forEach((r) => {
+    const cell = r.cells[0]?.textContent || '';
+    const [a, b] = cell.split(/[–-]/).map(parseT);
+    const on = a !== null && b !== null && elapsed >= a && elapsed < b && (started || elapsed > 0);
+    r.classList.toggle('now', on);
+    if (on) current = r;
+  });
+  if (current) $('nowblock').innerHTML = `Now: <b>${current.cells[1]?.textContent || ''}</b> · ${current.cells[2]?.textContent || ''} · until ${(current.cells[0]?.textContent || '').split(/[–-]/)[1] || ''}`;
+  else if (elapsed > 0) $('nowblock').textContent = 'Past the last block — wrap up.';
+}
+function tick() { elapsed = (Date.now() - started) / 1000; $('clock').textContent = fmt(elapsed); markRow(); }
+$('tstart').addEventListener('click', () => {
+  if (ticker) { clearInterval(ticker); ticker = null; $('tstart').textContent = 'Resume'; return }
+  started = Date.now() - elapsed * 1000; ticker = setInterval(tick, 500); $('tstart').textContent = 'Pause'; tick();
+});
+$('treset').addEventListener('click', () => { clearInterval(ticker); ticker = null; started = null; elapsed = 0; $('clock').textContent = '0:00'; $('tstart').textContent = 'Start'; $('nowblock').textContent = 'Start the clock for a timed rehearsal: the current block is highlighted in the table.'; markRow(); });
+renderRun();
+
+// Question bank
+const Q = DATA.questions;
+let owner = 'All', cat = 'All', term = '';
+const owners = ['All', 'A', 'B', 'C', 'D'];
+const cats = ['All', ...DATA.categories];
+const countBy = (fn) => { const m = new Map(); for (const q of Q) for (const k of fn(q)) m.set(k, (m.get(k) || 0) + 1); return m };
+const ownCounts = countBy((q) => (q.owner ? q.owner.split('/') : []));
+const catCounts = countBy((q) => [q.cat]);
+function pills(el, list, counts, getter, setter) {
+  el.innerHTML = list.map((v) => `<button type="button" class="pill" data-v="${v}" aria-pressed="${v === getter()}">${v}${v !== 'All' && counts.get(v) ? `<span class="n">${counts.get(v)}</span>` : ''}</button>`).join('');
+  el.addEventListener('click', (e) => { const b = e.target.closest('button'); if (!b) return; setter(b.dataset.v); for (const x of el.children) x.setAttribute('aria-pressed', String(x.dataset.v === b.dataset.v)); renderQ(); });
+}
+pills($('owners'), owners, ownCounts, () => owner, (v) => (owner = v));
+pills($('cats'), cats, catCounts, () => cat, (v) => (cat = v));
+const esc = (s) => s.replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+function renderQ() {
+  const words = term.toLowerCase().split(/\s+/).filter(Boolean);
+  const hits = Q.filter((q) => (owner === 'All' || q.owner.split('/').includes(owner)) && (cat === 'All' || q.cat === cat) && words.every((w) => q.text.includes(w)));
+  $('qcount').textContent = `${hits.length} of ${Q.length}`;
+  if (!hits.length) { $('qlist').innerHTML = `<div class="empty">No question matches “${esc(term)}”. Clear the search or pick another category.</div>`; return }
+  $('qlist').innerHTML = hits.map((q) => `
+    <article class="q" data-id="${q.id}">
+      <div class="q-head"><span class="q-id">${q.id}</span>${q.owner ? `<span class="owner" title="Presenter">${q.owner}</span>` : ''}<span class="q-cat">${esc(q.cat)}</span></div>
+      <h3 class="q-title">${esc(q.title)}</h3>
+      <button type="button" class="btn q-reveal">Reveal the answer</button>
+      <div class="q-parts">
+        <div class="q-part"><span class="q-label say">Say</span><div class="q-body prose">${q.answer}</div></div>
+        ${q.show ? `<div class="q-part"><span class="q-label">Show</span><div class="q-body prose">${q.show}</div></div>` : ''}
+        ${q.pressed ? `<div class="q-part"><span class="q-label">If pressed</span><div class="q-body prose">${q.pressed}</div></div>` : ''}
+      </div>
+    </article>`).join('');
+}
+$('qlist').addEventListener('click', (e) => { const b = e.target.closest('.q-reveal'); if (b) b.closest('.q').classList.add('open'); });
+let debounce;
+$('qsearch').addEventListener('input', (e) => { clearTimeout(debounce); debounce = setTimeout(() => { term = e.target.value; renderQ() }, 120) });
+$('practice').checked = store.get('jury.practice') === '1';
+document.body.classList.toggle('practice', $('practice').checked);
+$('practice').addEventListener('change', (e) => { document.body.classList.toggle('practice', e.target.checked); store.set('jury.practice', e.target.checked ? '1' : '0'); for (const q of document.querySelectorAll('.q.open')) q.classList.remove('open'); });
+renderQ();
+</script>

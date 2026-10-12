@@ -85,3 +85,9 @@ infra/tls/*
 
 # `make backup` output: plate history and face media, i.e. personal data.
 backups/
+
+# Submission renders: the walk-through video (`tests/browser/record_demo.mjs`) and
+# the PDFs (`tests/browser/export_pdf.mjs`) are regenerated from the running stack
+# and the committed Markdown, so neither is versioned.
+docs/submission/video/
+docs/submission/pdf/

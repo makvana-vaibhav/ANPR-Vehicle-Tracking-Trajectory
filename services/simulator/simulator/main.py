@@ -18,12 +18,14 @@ import os
 from collections import Counter
 from collections.abc import AsyncIterator
 from pathlib import Path
-from typing import Any
+from typing import Annotated, Any
+from urllib.parse import quote
 
 import uvicorn
-from fastapi import FastAPI, HTTPException, status
-from sqlalchemy import false, or_, select, true
+from fastapi import Depends, FastAPI, Header, HTTPException, status
+from sqlalchemy import and_, false, or_, select, true
 
+from app.core import service_auth
 from app.core.config import settings
 from app.core.logging import configure_logging, get_logger
 from app.db.session import SessionLocal, dispose_engine
@@ -48,6 +50,17 @@ VIDEO_DIR = Path(os.environ.get("SIM_VIDEO_DIR", "/data/videos"))
 PINNED_VIDEOS = os.environ.get("SIM_CAMERA_VIDEOS", "")
 STREAM_COUNT = int(os.environ.get("SIM_STREAM_COUNT", "6"))
 RTSP_BASE = f"rtsp://{settings.mediamtx_host}:{settings.mediamtx_rtsp_port}"
+# What the publishers push to: the same gateway, as the publisher identity.
+# MediaMTX refuses an anonymous publish (it asks the API, gateway_auth.py), so
+# a stranger on the network cannot replace a camera's feed. Only the publisher
+# processes see this; RTSP_BASE, without it, is what the API reports.
+PUBLISH_BASE = (
+    f"rtsp://{quote(settings.mediamtx_publish_user, safe='')}:"
+    f"{quote(settings.mediamtx_publish_password, safe='')}@"
+    f"{settings.mediamtx_host}:{settings.mediamtx_rtsp_port}"
+    if settings.mediamtx_publish_password
+    else RTSP_BASE
+)
 
 #: Cities whose cameras are preferred for live streaming, so the ANPR pipeline
 #: and trajectory reconstruction have real video to work with. The fleet is an
@@ -72,7 +85,7 @@ OFFSET_STEP_S = (
 )
 
 
-publisher = StreamPublisher(RTSP_BASE)
+publisher = StreamPublisher(PUBLISH_BASE)
 _supervisor_task: asyncio.Task[None] | None = None
 
 
@@ -118,12 +131,27 @@ async def select_cameras(limit: int) -> list[Camera]:
                     select(Camera)
                     .where(
                         or_(
-                            Camera.camera_code.in_(pinned_codes)
-                            if pinned_codes
-                            else false(),
-                            Camera.source_file.is_not(None),
-                        ),
-                        Camera.vms_id.in_(simulated_vms),
+                            and_(
+                                or_(
+                                    Camera.camera_code.in_(pinned_codes)
+                                    if pinned_codes
+                                    else false(),
+                                    Camera.source_file.is_not(None),
+                                ),
+                                Camera.vms_id.in_(simulated_vms),
+                            ),
+                            # A camera onboarded in the UI with "Recorded
+                            # video" has no VMS at all: its clip *is* its
+                            # source. Without this it played only until this
+                            # process next restarted. One with a live URL is
+                            # left alone — the gateway pulls that URL into the
+                            # same path, and a publisher there would fight it.
+                            and_(
+                                Camera.source_file.is_not(None),
+                                Camera.vms_id.is_(None),
+                                Camera.stream_url.is_(None),
+                            ),
+                        )
                     )
                     .order_by(Camera.camera_code)
                 )
@@ -348,7 +376,7 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
 
 
 app = FastAPI(
-    title="NagarNetra Simulator",
+    title="Contrail Simulator",
     description=(
         "Synthetic camera fleet. Replays footage into MediaMTX as RTSP so the "
         "platform has live streams without hardware — the same technique the "
@@ -357,6 +385,24 @@ app = FastAPI(
     version="0.1.0",
     lifespan=lifespan,
 )
+
+
+async def require_control_token(
+    token: Annotated[str | None, Header(alias=service_auth.HEADER)] = None,
+) -> None:
+    """Refuse start/stop without a service token from the API.
+
+    These endpoints put footage behind a camera code, or take a camera's
+    picture away. The API calls them when a camera with a recorded clip is
+    onboarded, edited or deleted, signing each call (app/core/service_auth.py);
+    nobody else on the network gets to. By hand, from the host:
+    `docker compose exec api python /app/scripts/simulator_control.py start CODE`.
+    """
+    if not service_auth.verify(token, service_auth.SIMULATOR_CONTROL):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Simulator control needs a service token issued by the API",
+        )
 
 
 @app.get("/health", tags=["health"])
@@ -392,7 +438,11 @@ async def list_streams() -> dict[str, Any]:
     }
 
 
-@app.post("/streams/{camera_code}/stop", tags=["streams"])
+@app.post(
+    "/streams/{camera_code}/stop",
+    tags=["streams"],
+    dependencies=[Depends(require_control_token)],
+)
 async def stop_stream(camera_code: str) -> dict[str, Any]:
     """Kill one stream on purpose.
 
@@ -414,9 +464,13 @@ async def stop_stream(camera_code: str) -> dict[str, Any]:
     }
 
 
-@app.post("/streams/{camera_code}/start", tags=["streams"])
+@app.post(
+    "/streams/{camera_code}/start",
+    tags=["streams"],
+    dependencies=[Depends(require_control_token)],
+)
 async def start_stream(camera_code: str) -> dict[str, Any]:
-    """Bring a stopped stream back up."""
+    """Bring a stream up — a stopped one, or a camera just onboarded with a clip."""
     code = camera_code.upper()
     if code in publisher.running():
         return {"camera_code": code, "started": False, "detail": "Already publishing"}
@@ -428,8 +482,19 @@ async def start_stream(camera_code: str) -> dict[str, Any]:
             status_code=status.HTTP_404_NOT_FOUND, detail=f"{code} is not registered"
         )
 
+    if camera.stream_url:
+        # The gateway pulls this camera's live URL into its path; publishing a
+        # clip there as well would fight that pull (CLAUDE.md trap 1's cousin).
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"{code} has a live stream URL; the gateway pulls it, nothing to replay",
+        )
+
     videos = find_videos(VIDEO_DIR)
-    specs = build_specs([camera], videos)
+    # In a thread: a clip seen for the first time is transcoded once into a
+    # keyframe-dense copy (`prepare_clip`), which would otherwise stall every
+    # other request — and the supervisor — until it finished.
+    specs = await asyncio.to_thread(build_specs, [camera], videos)
     started = await publisher.start(specs[0])
     return {"camera_code": code, "started": started}
 

@@ -8,7 +8,10 @@ it is deliberately not a static URL:
   valid for ~2 minutes;
 * **every issuance writes an audit row** (`camera.view`), which is one of the
   three actions CLAUDE.md promises to record;
-* the token is verified before the gateway will serve the stream.
+* the token is verified before the gateway will serve the stream: MediaMTX asks
+  the API about every read (`authMethod: http`, app/routers/gateway_auth.py),
+  and for our own cameras the token rides on the WHEP and HLS URLs as
+  `?token=`, scoped to that camera's gateway path.
 
 A viewing URL that leaks from browser history or a screen-share is therefore
 useless within minutes, and cannot be repointed at a different camera.
@@ -18,6 +21,7 @@ from __future__ import annotations
 
 import uuid
 from typing import Annotated, Any
+from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 from pydantic import BaseModel, Field
@@ -36,6 +40,27 @@ from app.services import camera as camera_service
 log = get_logger("api.streams")
 
 router = APIRouter(prefix="/api/v1", tags=["streams"])
+
+
+def own_gateway_path(url: str | None, base: str, suffix: str) -> str | None:
+    """The MediaMTX path in a WHEP or HLS URL on our own gateway, else None.
+
+    A federated camera's URLs name somebody else's host and return None: its
+    video is not served by our gateway, so our token means nothing there.
+    """
+    base = base.rstrip("/")
+    if not url or not base or not url.startswith(f"{base}/") or not url.endswith(suffix):
+        return None
+    path = url[len(base) + 1 : -len(suffix)]
+    return path or None
+
+
+def with_token(url: str | None, token: str) -> str | None:
+    """`url` carrying the viewing token as `?token=` — what the gateway checks."""
+    if not url:
+        return url
+    separator = "&" if "?" in url else "?"
+    return f"{url}{separator}token={quote(token, safe='')}"
 
 
 class StreamGrant(BaseModel):
@@ -102,7 +127,19 @@ async def open_stream(
     finally:
         await adapter.close()
 
-    token = create_stream_token(user_id=user.id, camera_id=camera.id, username=user.username)
+    # Our own gateway serves this camera when its WHEP or HLS URL is on our
+    # public gateway address; then the token is scoped to that path and rides
+    # on both URLs, because MediaMTX checks it on every new session.
+    gateway_path = own_gateway_path(
+        endpoints.whep, settings.mediamtx_public_webrtc_url, "/whep"
+    ) or own_gateway_path(endpoints.hls, settings.mediamtx_public_hls_url, "/index.m3u8")
+
+    token = create_stream_token(
+        user_id=user.id,
+        camera_id=camera.id,
+        username=user.username,
+        gateway_path=gateway_path,
+    )
 
     # One of the three explicitly audited actions. Recorded at issuance rather
     # than trusting the client to report that it started watching.
@@ -122,9 +159,15 @@ async def open_stream(
     # A federated camera's HLS sits behind the grid's own login, which the
     # browser has no session for. Point it at our authenticated proxy instead;
     # the grid's credentials stay on the server. See routers/grid_media.py.
+    whep_url = endpoints.whep
     hls_url = endpoints.hls
     if adapter.adapter_type == "hosted_grid" and hls_url:
         hls_url = f"/api/v1/grid/{camera.id}/{token}/index.m3u8"
+    elif gateway_path:
+        if own_gateway_path(whep_url, settings.mediamtx_public_webrtc_url, "/whep"):
+            whep_url = with_token(whep_url, token)
+        if own_gateway_path(hls_url, settings.mediamtx_public_hls_url, "/index.m3u8"):
+            hls_url = with_token(hls_url, token)
 
     # The RTSP URL carries the grid's username and password — RTSP has nowhere
     # else to put them. It is returned for operator diagnosis and no browser
@@ -142,7 +185,7 @@ async def open_stream(
         expires_in=settings.stream_token_expire_seconds,
         # On the browser's own origin when it came in over HTTPS, so the player
         # is not blocked as mixed content; unchanged over HTTP.
-        whep_url=public_origin.gateway_url(endpoints.whep),
+        whep_url=public_origin.gateway_url(whep_url),
         hls_url=public_origin.gateway_url(hls_url),
         rtsp_url=rtsp_url,
     )
@@ -178,7 +221,7 @@ async def focus_camera(
 
 @router.get(
     "/streams/verify",
-    summary="Verify a stream token (called by the gateway)",
+    summary="Verify a stream token",
 )
 async def verify_stream_token(
     token: Annotated[str, Query(description="Camera-scoped viewing token")],
@@ -186,9 +229,10 @@ async def verify_stream_token(
 ) -> dict[str, Any]:
     """Validate a viewing token.
 
-    Deliberately unauthenticated: it is called by the media gateway, which has
-    only the token itself. It grants nothing — it merely reports whether a
-    token is currently valid and which camera it is scoped to.
+    Deliberately unauthenticated: whoever holds the token may ask about it. It
+    grants nothing — it merely reports whether a token is currently valid and
+    which camera it is scoped to. The media gateway itself does not call this;
+    it asks `app/routers/gateway_auth.py`, which also checks the path.
     """
     try:
         payload = decode_token(token, expected_type="stream")

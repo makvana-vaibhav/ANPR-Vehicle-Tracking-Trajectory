@@ -6,10 +6,16 @@ audited stream-token flow.
 
 from __future__ import annotations
 
+import uuid
+from datetime import date
+
 import pytest
 from httpx import AsyncClient
+from sqlalchemy import delete
 
-from app.services.fleet import CITY_TALUKAS
+from app.db.session import SessionLocal
+from app.models.registry import Camera
+from app.services import fleet
 
 #: A floor, not a count. The Ahmedabad fleet is ~58 cameras
 #: (scripts/generate_ahmedabad_cameras.py) and federated sources add to it, so
@@ -125,34 +131,85 @@ class TestGapAnalysis:
             "reliability_gaps",
         } <= body.keys()
 
-    async def test_coverage_gaps_name_only_genuinely_blind_talukas(
+    async def test_coverage_gaps_are_gujarat_districts_with_no_camera(
         self, client: AsyncClient, auth_headers
     ) -> None:
-        """A blind taluka is one a vehicle can cross entirely unobserved.
+        """A blind district is one a vehicle can cross entirely unobserved.
 
-        This asserts the report is *correct* rather than that gaps exist. The
-        previous version required `len(uncovered) > 0`, which quietly encoded
-        the old statewide fleet's coverage — 8 of Gujarat's 33 districts — and
-        broke as soon as the fleet covered every taluka it claims to. A fully
-        covered city is a passing state, not a failing one.
+        Over Gujarat's 33 districts by each camera's position — it used to be
+        seven hard-coded Ahmedabad talukas, so a statewide grid could never
+        show a blind district. This asserts the report is *correct* rather
+        than that gaps exist: a fully covered state is a passing state.
         """
-        headers = await auth_headers("analyst")
-        body = (await client.get("/api/v1/health/gaps", headers=headers)).json()
-        summary = (await client.get("/api/v1/cameras/summary", headers=headers)).json()
+        body = (
+            await client.get("/api/v1/health/gaps", headers=await auth_headers("analyst"))
+        ).json()
+        districts = {name for name, _ in fleet.gujarat_districts()}
+        assert len(districts) == 33
+        assert body["geography"]["districts"] == 33
 
-        # `by_district` is a mapping of district -> camera count.
-        with_cameras = {name for name, count in summary["by_district"].items() if count > 0}
+        with_cameras = {d["district"] for d in body["district_coverage"] if d["cameras"] > 0}
         uncovered = {gap["district"] for gap in body["coverage_gaps"]}
+        assert not uncovered & with_cameras
+        assert uncovered | with_cameras == districts
+        assert uncovered <= districts, f"not a Gujarat district: {uncovered - districts}"
 
-        # A taluka holding cameras can never be blind.
-        assert not (
-            uncovered & with_cameras
-        ), f"reported as blind despite having cameras: {uncovered & with_cameras}"
-        # And every blind taluka must be one the platform actually claims to
-        # cover, rather than an arbitrary string.
-        assert (
-            uncovered <= CITY_TALUKAS
-        ), f"unknown talukas in gap report: {uncovered - CITY_TALUKAS}"
+    async def test_recordings_and_unplaced_cameras_cover_nowhere(
+        self, client: AsyncClient, auth_headers
+    ) -> None:
+        """A looping clip covers no road, and a camera nobody can place covers
+        no district; both are named apart rather than counted."""
+        body = (
+            await client.get("/api/v1/health/gaps", headers=await auth_headers("analyst"))
+        ).json()
+        geography = body["geography"]
+        counted = sum(d["cameras"] for d in body["district_coverage"])
+        apart = (
+            len(geography["position_unknown"])
+            + len(geography["recorded_footage"])
+            + len(geography["outside_gujarat"])
+        )
+        fleet_total = (
+            await client.get("/api/v1/health/fleet", headers=await auth_headers("analyst"))
+        ).json()["total"]
+        assert counted + apart == fleet_total
+        assert not set(geography["recorded_footage"]) & set(geography["position_unknown"])
+
+    async def test_a_camera_counts_where_it_stands_not_where_its_text_says(
+        self, ageing_camera
+    ) -> None:
+        """Placed in the Dang by position, whatever its `district` text says."""
+        code, _ = ageing_camera
+        async with SessionLocal() as session:
+            gaps = await fleet.gap_analysis(session)
+        dang = next(d for d in gaps["district_coverage"] if d["district"] == "Dang")
+        assert dang["cameras"] >= 1
+        assert "Dang" not in {g["district"] for g in gaps["coverage_gaps"]}
+        assert code not in gaps["geography"]["position_unknown"]
+
+    async def test_ageing_cameras_and_unknown_install_dates_are_reported(
+        self, ageing_camera
+    ) -> None:
+        code, undated = ageing_camera
+        async with SessionLocal() as session:
+            gaps = await fleet.gap_analysis(session)
+        ageing = {g["camera_code"]: g for g in gaps["ageing_gaps"]}
+        assert code in ageing
+        assert ageing[code]["installed_on"] == "2014-03-01"
+        assert ageing[code]["age_years"] >= 12
+        assert "review after" in ageing[code]["reason"]
+        unknown = gaps["install_date_unknown"]
+        assert undated in unknown["camera_codes"]
+        assert code not in unknown["camera_codes"], "a dated camera reported as undated"
+        assert unknown["cameras"] == gaps["summary"]["install_date_unknown"]
+        assert "nothing is assumed" in unknown["reason"]
+
+    def test_points_fall_in_the_right_district(self) -> None:
+        assert fleet.district_at(23.0146, 72.5635) == "Ahmedabad"  # Paldi
+        assert fleet.district_at(21.5033, 70.4335) == "Junagadh"  # Timbavadi
+        assert fleet.district_at(23.9166, 72.3611) == "Patan"  # Dethali, Siddhpur
+        assert fleet.district_at(10.0, 76.0) is None  # Kerala
+        assert fleet.district_at(None, 72.0) is None
 
     async def test_every_gap_explains_itself(self, client: AsyncClient, auth_headers) -> None:
         """A report saying only "gap" is not actionable."""
@@ -171,6 +228,41 @@ class TestGapAnalysis:
         ).json()
 
         assert sum(d["cameras"] for d in body["district_coverage"]) >= ONBOARDED_FLEET
+
+
+@pytest.fixture
+async def ageing_camera():
+    """One camera installed in 2014 in the Dang (text says otherwise), one undated."""
+    tag = uuid.uuid4().hex[:6]
+    dated, undated = f"ZZTEST-GAP-{tag}-OLD", f"ZZTEST-GAP-{tag}-NEW"
+    async with SessionLocal() as session:
+        session.add_all(
+            [
+                Camera(
+                    camera_code=dated,
+                    name="Test ageing camera",
+                    district="Somewhere else entirely",
+                    location="SRID=4326;POINT(73.70 20.80)",
+                    status="unknown",
+                    anpr_enabled=False,
+                    installed_on=date(2014, 3, 1),
+                    tags=["zztest"],
+                ),
+                Camera(
+                    camera_code=undated,
+                    name="Test undated camera",
+                    location="SRID=4326;POINT(73.70 20.80)",
+                    status="unknown",
+                    anpr_enabled=False,
+                    tags=["zztest"],
+                ),
+            ]
+        )
+        await session.commit()
+    yield dated, undated
+    async with SessionLocal() as session:
+        await session.execute(delete(Camera).where(Camera.camera_code.in_((dated, undated))))
+        await session.commit()
 
 
 class TestCameraHealthHistory:

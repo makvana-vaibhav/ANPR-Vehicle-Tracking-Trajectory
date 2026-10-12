@@ -61,7 +61,11 @@ FAILURE_CODES = frozenset({400, 401, 403, 422})
 #: Never limited: the container healthcheck runs every few seconds and a
 #: throttled probe would report the service unhealthy and restart it, turning a
 #: rate limit into an outage.
-EXEMPT_PATHS = ("/health", "/ready", "/metrics")
+#:
+#: The media gateway's authorisation callback is exempt for a related reason:
+#: every viewer's request arrives from the one MediaMTX address, so a budget
+#: there would let one noisy client cut every operator's video.
+EXEMPT_PATHS = ("/health", "/ready", "/metrics", "/internal/mediamtx/auth")
 
 
 @dataclass(frozen=True, slots=True)
@@ -80,20 +84,20 @@ def client_key(request: Request) -> str:
     """Who is being counted.
 
     The authenticated subject when there is one, so a shared control-room NAT
-    does not make every operator share one allowance; the peer address
+    does not make every operator share one allowance; the client address
     otherwise, which is all an unauthenticated caller offers.
 
-    `X-Forwarded-For` is trusted only because nginx sets it and nothing else
-    can reach this service — see web/nginx.conf. Exposed directly to the
-    internet that header is caller-controlled and this would need revisiting.
+    The address is `request.client`, never a header read here. It used to be
+    the first `X-Forwarded-For` entry as sent, which anyone calling the API
+    port directly could rotate on every request — a fresh "client" per guess,
+    so the login limit never fired. The trusted-proxy middleware in
+    app/main.py now resolves the client once: the socket peer, unless the peer
+    is the web tier's nginx (FORWARDED_ALLOW_IPS), in which case the address
+    that nginx saw.
     """
     subject = getattr(request.state, "user_id", None)
     if subject:
         return f"user:{subject}"
-
-    forwarded = request.headers.get("x-forwarded-for", "")
-    if forwarded:
-        return f"ip:{forwarded.split(',')[0].strip()}"
     return f"ip:{request.client.host if request.client else 'unknown'}"
 
 

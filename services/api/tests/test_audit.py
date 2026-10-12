@@ -21,6 +21,7 @@ from sqlalchemy import String, delete, select
 from app.db.session import SessionLocal
 from app.models.security import AuditLog
 from app.services.audit import scrub
+from tests.conftest import demo_password, trusted_proxy
 
 pytestmark = pytest.mark.integration
 
@@ -82,7 +83,7 @@ class TestAuthenticationIsAudited:
         before = await _count("auth.login")
         await client.post(
             "/api/v1/auth/login",
-            json={"username": "analyst", "password": "NagarNetra@2026"},
+            json={"username": "analyst", "password": demo_password("analyst")},
         )
         assert await _count("auth.login") == before + 1
 
@@ -114,10 +115,10 @@ class TestAuthenticationIsAudited:
         """The single most important property of this table."""
         await client.post(
             "/api/v1/auth/login",
-            json={"username": "analyst", "password": "NagarNetra@2026"},
+            json={"username": "analyst", "password": demo_password("analyst")},
         )
         for row in await _rows("auth.login_failed") + await _rows("auth.login"):
-            assert "NagarNetra@2026" not in str(row.params)
+            assert demo_password("analyst") not in str(row.params)
 
     async def test_logout_is_recorded(self, client: AsyncClient, login) -> None:
         tokens = await login("operator")
@@ -135,7 +136,7 @@ class TestAuditRowContents:
         """Identity is denormalised so the trail stays readable years later."""
         await client.post(
             "/api/v1/auth/login",
-            json={"username": "supervisor", "password": "NagarNetra@2026"},
+            json={"username": "supervisor", "password": demo_password("supervisor")},
         )
         latest = (await _rows("auth.login", limit=1))[0]
 
@@ -145,16 +146,29 @@ class TestAuditRowContents:
         assert latest.ts is not None
         assert latest.ts.tzinfo is not None, "audit timestamps must be UTC-aware"
 
-    async def test_records_the_caller_address(self, client: AsyncClient) -> None:
-        """Answering 'who, from where' requires the client IP."""
-        await client.post(
-            "/api/v1/auth/login",
-            json={"username": "analyst", "password": "NagarNetra@2026"},
-            headers={"X-Forwarded-For": "10.20.30.40, 172.28.0.5"},
-        )
+    async def test_records_the_caller_address(self, client_from) -> None:
+        """Answering 'who, from where' requires the client IP — the one the
+        trusted proxy saw, not one the caller wrote into a header."""
+        async with client_from(trusted_proxy()) as via_nginx:
+            # nginx appends the address it accepted the connection from; what
+            # the browser put in front of it is the caller's own claim.
+            await via_nginx.post(
+                "/api/v1/auth/login",
+                json={"username": "analyst", "password": demo_password("analyst")},
+                headers={"X-Forwarded-For": "10.20.30.40, 198.51.100.23"},
+            )
         latest = (await _rows("auth.login", limit=1))[0]
-        # Left-most entry of the proxy chain is the real client.
-        assert str(latest.ip) == "10.20.30.40"
+        assert str(latest.ip) == "198.51.100.23"
+
+    async def test_a_direct_caller_cannot_choose_its_recorded_address(self, client_from) -> None:
+        async with client_from("198.51.100.24") as direct:
+            await direct.post(
+                "/api/v1/auth/login",
+                json={"username": "analyst", "password": demo_password("analyst")},
+                headers={"X-Forwarded-For": "10.20.30.40"},
+            )
+        latest = (await _rows("auth.login", limit=1))[0]
+        assert str(latest.ip) == "198.51.100.24"
 
     async def test_password_change_failure_is_audited(
         self, client: AsyncClient, auth_headers

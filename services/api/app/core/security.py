@@ -104,6 +104,9 @@ class TokenPayload:
     role: str | None = None
     department_id: str | None = None
     camera_id: str | None = None
+    #: Stream tokens only: the stream-gateway path the token may read, so the
+    #: gateway can check scope without a database lookup on every read.
+    gateway_path: str | None = None
 
     @property
     def user_id(self) -> uuid.UUID | None:
@@ -176,7 +179,11 @@ def create_refresh_token(*, user_id: uuid.UUID | str, username: str) -> str:
 
 
 def create_stream_token(
-    *, user_id: uuid.UUID | str, camera_id: uuid.UUID | str, username: str
+    *,
+    user_id: uuid.UUID | str,
+    camera_id: uuid.UUID | str,
+    username: str,
+    gateway_path: str | None = None,
 ) -> str:
     """Mint a viewing token scoped to a single camera.
 
@@ -188,6 +195,10 @@ def create_stream_token(
         str(user_id), "stream", timedelta(seconds=settings.stream_token_expire_seconds)
     )
     claims |= {"camera_id": str(camera_id), "username": username}
+    if gateway_path:
+        # The media gateway checks this against the path it is asked to serve
+        # (app/routers/gateway_auth.py): a token for one camera opens no other.
+        claims["path"] = gateway_path
     return _encode(claims)
 
 
@@ -235,4 +246,5 @@ def decode_token(token: str, *, expected_type: TokenType | None = None) -> Token
         role=claims.get("role"),
         department_id=claims.get("dept"),
         camera_id=claims.get("camera_id"),
+        gateway_path=claims.get("path"),
     )
