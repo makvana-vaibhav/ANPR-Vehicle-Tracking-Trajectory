@@ -133,7 +133,7 @@ services:
       /bin/sh -c "
       mc alias set local http://minio:9000 ${MINIO_ROOT_USER:-nagarnetra} ${MINIO_ROOT_PASSWORD:-nagarnetra_dev_pw} &&
       mc mb --ignore-existing local/${MINIO_BUCKET:-nagarnetra-media} &&
-      mc anonymous set download local/${MINIO_BUCKET:-nagarnetra-media} &&
+      mc anonymous set none local/${MINIO_BUCKET:-nagarnetra-media} &&
       mc mb --ignore-existing local/${MINIO_PERSONS_BUCKET:-nagarnetra-persons} &&
       mc anonymous set none local/${MINIO_PERSONS_BUCKET:-nagarnetra-persons} &&
       echo 'minio buckets ready: ${MINIO_BUCKET:-nagarnetra-media}, ${MINIO_PERSONS_BUCKET:-nagarnetra-persons} (private)'

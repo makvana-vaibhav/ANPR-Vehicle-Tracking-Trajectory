@@ -1,7 +1,8 @@
 """The private persons bucket: reference photos and matched face crops.
 
-Plate crops live in `MINIO_BUCKET`, which the demo stack exposes for anonymous
-download. Faces do not go there. They go in `MINIO_PERSONS_BUCKET`, which:
+Plate crops live in `MINIO_BUCKET` (private too since 12 Oct — it used to allow
+anonymous download, and every crop is reached through a presigned URL anyway).
+Faces do not go there. They go in `MINIO_PERSONS_BUCKET`, which:
 
 * is created by the platform **without any access policy** — MinIO's default,
   which is private — and is checked on first use: if somebody has since given
