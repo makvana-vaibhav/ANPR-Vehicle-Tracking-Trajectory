@@ -1,0 +1,13 @@
+{
+  "name": "contrail-browser-tests",
+  "private": true,
+  "type": "module",
+  "description": "End-to-end flows and screenshots in a real browser against the running stack",
+  "scripts": {
+    "flows": "node flows.mjs",
+    "shot": "node shot.mjs"
+  },
+  "dependencies": {
+    "playwright-core": "1.49.1"
+  }
+}

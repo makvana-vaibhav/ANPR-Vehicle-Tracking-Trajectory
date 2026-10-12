@@ -1,9 +1,10 @@
 /** Command centre shell: navigation, session, and routing. */
 
 import { useEffect, useState } from 'react'
-import { Navigate, Route, Routes } from 'react-router-dom'
+import { Navigate, Route, Routes, useLocation } from 'react-router-dom'
 
 import CommandPalette from '@/components/CommandPalette'
+import ErrorBoundary from '@/components/ErrorBoundary'
 import TopBar from '@/components/TopBar'
 import { ToastProvider } from '@/components/Toast'
 import { Spinner } from '@/components/ui'
@@ -70,6 +71,8 @@ function Shell() {
   // Where to send someone whose role cannot open the default screen.
   const landing = landingFor(can)
   const [searchOpen, setSearchOpen] = useState(false)
+  // Keys the error boundary: moving to another screen clears a failed one.
+  const { pathname } = useLocation()
 
   // ⌘K / Ctrl K from anywhere, and "/" when not typing — the two shortcuts
   // operators bring with them from every other tool.
@@ -95,6 +98,7 @@ function Shell() {
       {/* min-h-0 so a page that scrolls its own panels cannot push the
           window into scrolling — a flex child defaults to min-content. */}
       <main className="flex min-h-0 min-w-0 flex-1 flex-col print:block">
+        <ErrorBoundary key={pathname}>
         <Routes>
           <Route path="/" element={<Navigate to={landing} replace />} />
           <Route
@@ -224,6 +228,7 @@ function Shell() {
           />
           <Route path="*" element={<Navigate to={landing} replace />} />
         </Routes>
+        </ErrorBoundary>
       </main>
     </div>
   )

@@ -58,6 +58,8 @@ import {
   satelliteReachable,
   type Basemap,
 } from '@/lib/basemap'
+import { createMap } from '@/lib/maps'
+import MapUnavailable from '@/components/MapUnavailable'
 import { buildTimeline, istClock, journeySeconds, positionAt } from '@/lib/journey'
 import type { RouteHop } from '@/lib/types'
 
@@ -173,6 +175,7 @@ const RouteMap = forwardRef<RouteMapHandle, Props>(function RouteMap(
   // React's ids carry colons, which an SVG `url(#…)` reference can trip on.
   const swatch = `route-trail-${useId().replace(/:/g, '')}`
   const [ready, setReady] = useState(false)
+  const [unavailable, setUnavailable] = useState(false)
   const [choice, setChoice] = useState<Basemap>(basemap)
   const [effective, setEffective] = useState<Basemap>(basemap)
 
@@ -290,13 +293,17 @@ const RouteMap = forwardRef<RouteMapHandle, Props>(function RouteMap(
   // ── Create the map once ─────────────────────────────────────────────
   useEffect(() => {
     if (map.current || !container.current) return
-    const m = new maplibregl.Map({
+    const m = createMap({
       container: container.current,
       style: baseStyle({ ground: GROUND }),
       center: GUJARAT_CENTER,
       zoom: 6.2,
       attributionControl: false,
     })
+    if (!m) {
+      setUnavailable(true)
+      return
+    }
     m.addControl(new maplibregl.NavigationControl({ showCompass: false }), 'bottom-right')
     m.addControl(new maplibregl.AttributionControl({ compact: true }), 'bottom-left')
     m.on('load', () => setReady(true))
@@ -701,6 +708,7 @@ const RouteMap = forwardRef<RouteMapHandle, Props>(function RouteMap(
     <div className="flex h-full min-h-0 w-full flex-col">
       <div className="relative min-h-0 flex-1 overflow-hidden">
         <div ref={container} className="absolute inset-0" />
+        {unavailable && <MapUnavailable className="z-20" />}
 
         {/* The legend is also the map's caption: what a line here does and
             does not claim, on the map itself, where a screenshot keeps it. */}

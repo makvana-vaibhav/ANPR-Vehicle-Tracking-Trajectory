@@ -24,8 +24,10 @@ import { useEffect, useRef, useState } from 'react'
 import maplibregl from 'maplibre-gl'
 import 'maplibre-gl/dist/maplibre-gl.css'
 
+import MapUnavailable from '@/components/MapUnavailable'
 import { useEventStream } from '@/hooks/useEventStream'
 import { GUJARAT_CENTER } from '@/lib/basemap'
+import { createMap } from '@/lib/maps'
 import type { Place } from '@/lib/places'
 
 /* Map paint cannot take Tailwind classes, so the tokens it needs are repeated
@@ -101,6 +103,7 @@ export default function CommandMap({
   const placesRef = useRef(places)
   const fitted = useRef(false)
   const [ready, setReady] = useState(false)
+  const [unavailable, setUnavailable] = useState(false)
   const { subscribe } = useEventStream()
 
   onSelectRef.current = onSelect
@@ -109,7 +112,7 @@ export default function CommandMap({
   // ── The map, once ────────────────────────────────────────────────────
   useEffect(() => {
     if (!container.current || mapRef.current) return
-    const map = new maplibregl.Map({
+    const map = createMap({
       container: container.current,
       style: {
         version: 8,
@@ -124,6 +127,10 @@ export default function CommandMap({
       dragRotate: false,
       pitchWithRotate: false,
     })
+    if (!map) {
+      setUnavailable(true)
+      return
+    }
     map.touchZoomRotate.disableRotation()
     map.addControl(new maplibregl.NavigationControl({ showCompass: false }), 'bottom-right')
     map.on('load', () => setReady(true))
@@ -381,7 +388,12 @@ export default function CommandMap({
     [subscribe],
   )
 
-  return <div ref={container} className="absolute inset-0" />
+  return (
+    <>
+      <div ref={container} className="absolute inset-0" />
+      {unavailable && <MapUnavailable />}
+    </>
+  )
 }
 
 function buildMarker(place: Place, size: number, onClick: () => void): MarkerParts {

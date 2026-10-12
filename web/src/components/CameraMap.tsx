@@ -48,6 +48,8 @@ import {
 } from '@/components/network/mapClusters'
 import { Icon, StatusBadge } from '@/components/ui'
 import { baseStyle, GUJARAT_CENTER, satelliteReachable, type Basemap } from '@/lib/basemap'
+import { createMap } from '@/lib/maps'
+import MapUnavailable from '@/components/MapUnavailable'
 import { isUnplaced } from '@/lib/places'
 import type { Camera, CongestionLevel } from '@/lib/types'
 
@@ -144,6 +146,7 @@ const CameraMap = forwardRef<CameraMapHandle, Props>(function CameraMap(
   const clustersRef = useRef<MapCluster[]>([])
   const fitted = useRef(false)
   const [ready, setReady] = useState(false)
+  const [unavailable, setUnavailable] = useState(false)
   const [hover, setHover] = useState<Hover | null>(null)
 
   // Latest props, for handlers registered once with MapLibre or a marker and
@@ -174,7 +177,7 @@ const CameraMap = forwardRef<CameraMapHandle, Props>(function CameraMap(
   // ── The map, once ────────────────────────────────────────────────────
   useEffect(() => {
     if (!container.current || mapRef.current) return
-    const map = new maplibregl.Map({
+    const map = createMap({
       container: container.current,
       style: baseStyle({ ground: GROUND, dim: true }),
       center: GUJARAT_CENTER,
@@ -187,6 +190,10 @@ const CameraMap = forwardRef<CameraMapHandle, Props>(function CameraMap(
       dragRotate: false,
       pitchWithRotate: false,
     })
+    if (!map) {
+      setUnavailable(true)
+      return
+    }
     map.touchZoomRotate.disableRotation()
     // Zoom buttons are drawn by this component, in the console's own chrome.
     // MapLibre's scale and attribution are kept — the scale's arithmetic and
@@ -557,6 +564,7 @@ const CameraMap = forwardRef<CameraMapHandle, Props>(function CameraMap(
   return (
     <div className="absolute inset-0">
       <div ref={container} className="absolute inset-0" />
+      {unavailable && <MapUnavailable className="z-20" />}
       {hover && <MarkerTooltip hover={hover} />}
       <div className="absolute bottom-8 right-3 z-10 flex flex-col overflow-hidden rounded-md border border-border bg-card shadow-lg">
         <button
