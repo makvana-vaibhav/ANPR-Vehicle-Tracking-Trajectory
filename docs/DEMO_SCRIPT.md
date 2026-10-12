@@ -27,8 +27,8 @@ Seven workspaces across the top bar; a role sees only the ones it can use.
 |---|---|---|
 | **Command** | `/dashboard` | The network at a glance: map of towns, alarms docked beside it, plates arriving along the bottom ("Reading now") |
 | **Live** | `/anpr` | One camera on the stage with its plate boxes; the rest in a rail |
-| **Investigate** | `/vehicles` | A plate in, its timestamped route out; CSV, printable report, plate-read export |
-| **Alarms** | `/alerts`, `/watchlist` | The alarm queue (watchlist hits first) and the watchlist itself |
+| **Investigate** | `/vehicles`, `/registries` | A plate in, its timestamped route out, candidate misreads, pursuit; CSV, printable report, plate-read export; VAHAN/SARTHI/eGujCop/AFIS lookups (reference data) |
+| **Alarms** | `/alerts`, `/watchlist`, `/persons` | The alarm queue (watchlist and person matches first), the vehicle watchlist, and the persons watchlist (four-eyes enrolment) |
 | **Network** | `/map`, `/cameras`, `/health` | GIS map, the camera registry and onboarding, fleet health |
 | **Insights** | `/traffic` | Counts, flow, congestion, forecast |
 | **Admin** | `/users`, `/audit` | Accounts and the audit trail |
@@ -55,7 +55,7 @@ watching.
 ```bash
 docker compose ps                                     # all 12 containers healthy
 curl -s localhost:8000/health                         # "status": "alive"
-curl -s localhost:9100/streams | grep -c CAM-DEMO     # 1: the recorded clip is publishing
+curl -s localhost:9100/streams | grep -o 'CAM-DEMO-0[12]' | sort -u   # both recorded clips are publishing
 for w in contrail-ai-worker contrail-ai-worker-2 contrail-ai-worker-3; do
   docker logs $w --tail 2; done
 ```
@@ -72,7 +72,9 @@ In the browser at **http://localhost:8080**:
 - [ ] **Command** — the "Reading now" strip is moving and Paldi (CAM-DEMO-01) ripples
 - [ ] **Alarms** — no test alarm left open (nothing with case `FIR/E2E/…` or a demo case from a rehearsal)
 - [ ] **Watchlist** — the ten `DEMO/…` entries are watched (§6); the plate you mean to add live is **not** already on it
-- [ ] **Network → Cameras** — 31 cameras: 30 from the organisers' grid, 1 recorded clip
+- [ ] **Network → Cameras** — 32 cameras: 30 from the organisers' grid, 2 recorded clips (CAM-DEMO-01 plates, CAM-DEMO-02 persons)
+- [ ] **Alarms → Persons** — `DEMO/PERSONS/001` matched now; `DEMO/PERSONS/002` waiting for a second approver (keep it for the four-eyes moment, §2.4b)
+- [ ] Top bar shows **no** Pursuit pill (none left running from a rehearsal)
 - [ ] One browser tab only. A second tab on a grid camera spends the grid's watch quota twice
 
 ---
@@ -99,8 +101,10 @@ Only events cross the network; video is pulled only while someone watches.
 
 ### 2.2 Onboard heterogeneous cameras, and interoperability (2 min)
 
-The brief asks for about 50 cameras from several departments. **We have 31: the
-organisers' 30 and one recorded clip.** Say so; do not round up.
+The brief asks for about 50 cameras from several departments. **We have 32: the
+organisers' 30 and two recorded clips.** Say so; do not round up. The registry
+holds all 26 departments the brief lists; most grid cameras arrive with no
+department, and the screen says so rather than guessing one.
 
 1. **Network → Cameras.** The registry: each camera's department, integration,
    transport and position. "Connected systems" names the two VMS we federate
@@ -143,17 +147,35 @@ organisers' 30 and one recorded clip.** Say so; do not round up.
      Open the closest and compare its **crop** before saying anything — a near
      match is a lead, not a finding.
    - **Not on the map** lists reads at cameras with no known position.
+   - **Possibly the same vehicle** lists reads one or two characters away,
+     counting the classic misreads (0/O, 1/I, 8/B, 5/S…) as half a difference,
+     each with its reasons — which characters, the read's confidence, and
+     whether it fits the confirmed route in time and distance. **Include** one
+     and it joins the journey as a dashed *candidate* visit, never merged into
+     a confirmed one; **Dismiss** removes it. Each decision is audited, and the
+     CSV and printable report mark candidates as candidates.
    - On a sighting with no readable plate, **Find similar** offers candidates
      by appearance, labelled **Candidates · not confirmed**. Keep the label.
+4a. **Pursue.** The pursuit panel predicts the cameras the vehicle can reach
+   next from its last confirmed sighting (straight-line distance, a speed band
+   from observed journeys or a stated 10–60 km/h default) and, on **Start**,
+   keeps up to two of them analysed for 15 minutes. The top bar shows
+   *Pursuit: <plate> · N min left*. A read of the exact plate anywhere moves the
+   pursuit on. It never pins the recorded clips, and when the grid has gone
+   quiet it pins no grid camera and says why. Stop it when done.
+4b. **Registration.** The registry card under the figures shows what the
+   reference VAHAN record says — maker, colour, validity, linked FIRs — and
+   flags a mismatch with what the camera saw. It is labelled *Reference data —
+   not a live VAHAN query*; say so.
 5. **Then watchlist it** (§2.4) so the next pass on any analysed camera raises an
    alarm by itself.
 6. **Export** (§2.5).
 
 **What to say if it was never read:** *"We did not read that plate in the
-window. That is not evidence the vehicle was absent: this laptop analyses four
-cameras continuously and rotates the rest in 45-second slices, so a camera that
-was not being analysed when it passed could not have read it."* The report
-prints the same sentence.
+window. That is not evidence the vehicle was absent: this laptop analyses three
+grid cameras continuously, plus any camera opened in Live or pinned by a
+pursuit, so a camera that was not being analysed when it passed could not have
+read it."* The report prints the same sentence.
 
 ### 2.4 Cross-reference live feeds against the watchlist (2.5 min)
 
@@ -183,6 +205,24 @@ each step (it picks the best-read plate itself):
 docker compose exec -e NAGARNETRA_API_URL=http://api:8000 api python /app/scripts/demo_anpr.py
 ```
 It leaves its entry active and its alarm open: retire and close them after.
+
+### 2.4b Persons watchlist — wanted or missing persons (1.5 min, optional)
+
+**Say:** the brief asks for persons watchlists too. Faces are matched only on
+cameras explicitly tagged for it, never on the grid's junction cameras (faces
+there are a few pixels), and every match waits for a person to confirm it.
+
+1. **Alarms → Persons.** Two demonstration entries on recorded stock footage,
+   fictional cases, category *demo* — never "wanted".
+2. **Four-eyes:** `DEMO/PERSONS/002` was enrolled by `supervisor` and is waiting.
+   Approve it as `admin` (a different account). Show that the enroller cannot
+   approve their own entry.
+3. **Alarms.** A *Possible person match* shows the enrolled reference and the
+   captured face side by side, the similarity against the 0.45 threshold, the
+   frames that agreed, and **A person must confirm this match before anyone
+   acts.**
+4. **Say what is not stored:** faces that match nothing are never kept, not even
+   as numbers; every view of a reference photo is audited; entries expire.
 
 ### 2.5 Export the report of detected plates (1.5 min)
 

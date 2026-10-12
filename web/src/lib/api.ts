@@ -15,10 +15,18 @@ import type {
   CameraGeoJSON,
   CameraHealthHistory,
   CameraPage,
+  CandidateDecisionKind,
+  CandidateDecisionRecord,
+  CandidateReport,
   CongestionResponse,
   Department,
   DetectionPage,
   ManagedUser,
+  PersonEntry,
+  PersonGalleryStatus,
+  PersonMatchEvidence,
+  PersonPage,
+  PersonStatus,
   FleetHealth,
   FleetSummary,
   FlowResponse,
@@ -26,6 +34,8 @@ import type {
   HeatmapResponse,
   HotspotResponse,
   PlateSearchResponse,
+  Pursuit,
+  PursuitSummary,
   ReidMatchResponse,
   RouteDensityResponse,
   SpeedResponse,
@@ -43,9 +53,20 @@ import type {
   VmsInstance,
   WatchlistEntry,
 } from '@/lib/types'
+import {
+  referencePath,
+  type AfisLookup,
+  type LicenceLookup,
+  type Observed,
+  type VehicleLookup,
+} from '@/lib/registries'
+import { resolveApiBase } from '@/lib/apiBase'
 
-export const API_BASE_URL: string =
-  (import.meta.env.VITE_API_BASE_URL as string | undefined) ?? ''
+// Same-origin on an HTTPS page; see lib/apiBase.ts.
+export const API_BASE_URL: string = resolveApiBase(
+  (import.meta.env.VITE_API_BASE_URL as string | undefined) ?? '',
+  typeof window === 'undefined' ? '' : window.location.protocol,
+)
 
 const ACCESS_KEY = 'contrail.access_token'
 const REFRESH_KEY = 'contrail.refresh_token'
@@ -200,12 +221,16 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<T
  */
 export async function downloadExport(
   path: string,
-  params: Record<string, string | null | undefined> = {},
+  params: Record<string, string | null | undefined> | URLSearchParams = {},
   _retried = false,
 ): Promise<string> {
-  const query = new URLSearchParams(
-    Object.entries(params).filter((entry): entry is [string, string] => Boolean(entry[1])),
-  )
+  // URLSearchParams as given, for a parameter that repeats (`include`).
+  const query =
+    params instanceof URLSearchParams
+      ? params
+      : new URLSearchParams(
+          Object.entries(params).filter((entry): entry is [string, string] => Boolean(entry[1])),
+        )
   const search = query.toString()
   const response = await fetch(`${API_BASE_URL}${path}${search ? `?${search}` : ''}`, {
     headers: accessToken ? { Authorization: `Bearer ${accessToken}` } : {},
@@ -323,6 +348,40 @@ export const getFleetHealth = () => request<FleetHealth>('/api/v1/health/fleet')
 
 export const getGapReport = (hours = 24) =>
   request<GapReport>(`/api/v1/health/gaps?hours=${hours}`)
+
+/** The same gap analysis as a CSV file: one row per gap, IST and UTC. Audited. */
+export const downloadGapReport = (hours = 24) =>
+  downloadExport('/api/v1/reports/gaps.csv', { hours: String(hours) })
+
+// ── External registries (reference data) ──────────────────────────────
+// VAHAN + eGujCop/CCTNS by plate, SARTHI by licence, AFIS/NAFIS by case or
+// person reference. Every answer carries `source` and `provenance`; today
+// both say "reference", and the screen repeats it. Every call is audited.
+
+export const getVehicleRegistry = (
+  plate: string,
+  query: Observed & { detection_id?: string; case_ref?: string } = {},
+) => {
+  const params = searchOf({
+    detection_id: query.detection_id,
+    observed_type: query.vehicle_type,
+    observed_colour: query.colour,
+    observed_make: query.make,
+    case_ref: query.case_ref,
+  })
+  return request<VehicleLookup>(`/api/v1/registries/vehicle/${encodeURIComponent(plate)}?${params}`)
+}
+
+export const getLicenceRegistry = (licenceNumber: string, caseRef?: string) =>
+  request<LicenceLookup>(
+    `/api/v1/registries/licence/${encodeURIComponent(licenceNumber)}?${searchOf({ case_ref: caseRef })}`,
+  )
+
+/** A reference keeps its slashes ("DEMO/FIR/2026/RJT/0412"); the API's path takes them. */
+export const getAfisRegistry = (reference: string, caseRef?: string) =>
+  request<AfisLookup>(
+    `/api/v1/registries/afis/${referencePath(reference)}?${searchOf({ case_ref: caseRef })}`,
+  )
 
 export const getCameraHealth = (id: string, hours = 24) =>
   request<CameraHealthHistory>(`/api/v1/cameras/${id}/health?hours=${hours}`)
@@ -489,6 +548,74 @@ export const updateWatchlistEntry = (
 export const deleteWatchlistEntry = (id: string) =>
   request<void>(`/api/v1/watchlist/${id}`, { method: 'DELETE' })
 
+// ── Persons watchlist ─────────────────────────────────────────────────
+// Every read here is audited by the API, and names every photograph it signed
+// a link for — so these are fetched when a screen needs them, never polled.
+
+export interface PersonQuery {
+  status?: PersonStatus
+  category?: string
+  limit?: number
+  offset?: number
+}
+
+export const getPersons = (query: PersonQuery = {}) => {
+  const params = new URLSearchParams()
+  for (const [key, value] of Object.entries(query)) {
+    if (value !== undefined && value !== '') params.set(key, String(value))
+  }
+  return request<PersonPage>(`/api/v1/persons?${params}`)
+}
+
+export const getPerson = (id: string) =>
+  request<PersonEntry>(`/api/v1/persons/${encodeURIComponent(id)}`)
+
+export const getPersonGallery = () => request<PersonGalleryStatus>('/api/v1/persons/gallery/status')
+
+export interface PersonDraft {
+  photo: File
+  display_name: string
+  category: string
+  case_ref: string
+  purpose: string
+  notes?: string
+  valid_days?: number
+}
+
+/** Enrol from one reference photo. Pending until a different account approves. */
+export const enrolPerson = (draft: PersonDraft) => {
+  const form = new FormData()
+  form.append('photo', draft.photo)
+  form.append('display_name', draft.display_name)
+  form.append('category', draft.category)
+  form.append('case_ref', draft.case_ref)
+  form.append('purpose', draft.purpose)
+  if (draft.notes) form.append('notes', draft.notes)
+  if (draft.valid_days) form.append('valid_days', String(draft.valid_days))
+  // No Content-Type: the browser sets the multipart boundary itself. Longer
+  // than the default timeout because the face is found and embedded server-side.
+  return request<PersonEntry>('/api/v1/persons', { method: 'POST', body: form, timeoutMs: 30000 })
+}
+
+export const approvePerson = (id: string) =>
+  request<PersonEntry>(`/api/v1/persons/${encodeURIComponent(id)}/approve`, { method: 'POST' })
+
+export const rejectPerson = (id: string, reason: string) =>
+  request<PersonEntry>(`/api/v1/persons/${encodeURIComponent(id)}/reject`, {
+    method: 'POST',
+    body: JSON.stringify({ reason }),
+  })
+
+export const retirePerson = (id: string, reason: string) =>
+  request<PersonEntry>(`/api/v1/persons/${encodeURIComponent(id)}/retire`, {
+    method: 'POST',
+    body: JSON.stringify({ reason }),
+  })
+
+/** The enrolled reference and the captured face behind a `person_match` alarm. */
+export const getPersonMatch = (alertId: string) =>
+  request<PersonMatchEvidence>(`/api/v1/persons/matches/${encodeURIComponent(alertId)}`)
+
 // ── Alerts ────────────────────────────────────────────────────────────
 
 export interface AlertQuery {
@@ -526,16 +653,35 @@ export const transitionAlert = (id: string, status: AlertStatus, notes?: string)
 export interface RouteQuery {
   since?: string
   until?: string
+  /**
+   * Candidate sightings an analyst included (detection ids). Each joins the
+   * route as a visit marked `candidate`, never as a confirmed read.
+   */
+  include?: string[]
 }
 
-/** One vehicle's route as CSV: every visit in order, and the leg to it. */
+/** A route query as parameters, with `include` repeated as the API takes it. */
+function routeParams(query: RouteQuery, extra: Record<string, string> = {}): URLSearchParams {
+  const { include, ...window } = query
+  const params = searchOf({ ...window, ...extra })
+  for (const id of include ?? []) params.append('include', id)
+  return params
+}
+
+/** One vehicle's route as CSV: every visit in order, and the leg to it —
+ *  included candidates as rows marked `candidate`. */
 export const downloadRouteReport = (plate: string, query: RouteQuery = {}) =>
-  downloadExport(`/api/v1/reports/vehicle/${encodeURIComponent(plate)}.csv`, { ...query })
+  downloadExport(`/api/v1/reports/vehicle/${encodeURIComponent(plate)}.csv`, routeParams(query))
 
 /** Every plate read in a window as CSV, optionally for one camera or plate. */
 export const downloadPlatesReport = (
   query: RouteQuery & { camera_id?: string; plate?: string } = {},
-) => downloadExport('/api/v1/reports/plates.csv', { ...query })
+) => {
+  // Every read in the window: an analyst's candidate decisions belong to one
+  // vehicle's route, not to this list.
+  const { since, until, camera_id, plate } = query
+  return downloadExport('/api/v1/reports/plates.csv', { since, until, camera_id, plate })
+}
 
 /**
  * Query parameters from an object, without the ones that are not set.
@@ -552,7 +698,7 @@ function searchOf(query: Record<string, string | number | boolean | null | undef
 }
 
 export const getVehicleRoute = (plate: string, query: RouteQuery = {}) => {
-  const params = searchOf({ ...query })
+  const params = routeParams(query)
   return request<VehicleRoute>(
     `/api/v1/vehicles/${encodeURIComponent(plate)}/route?${params}`,
   )
@@ -560,11 +706,64 @@ export const getVehicleRoute = (plate: string, query: RouteQuery = {}) => {
 
 /** The same route as GeoJSON, for drawing. */
 export const getVehicleRouteGeoJSON = (plate: string, query: RouteQuery = {}) => {
-  const params = searchOf({ ...query, format: 'geojson' })
+  const params = routeParams(query, { format: 'geojson' })
   return request<GeoJSON.FeatureCollection>(
     `/api/v1/vehicles/${encodeURIComponent(plate)}/route?${params}`,
   )
 }
+
+/**
+ * Reads one or two characters away from a plate — or a few common
+ * misreadings away — each with its reasons. Nothing here changes the route:
+ * an analyst includes or dismisses each one.
+ */
+export const getCandidates = (
+  plate: string,
+  query: { since?: string; until?: string; limit?: number } = {},
+) =>
+  request<CandidateReport>(
+    `/api/v1/vehicles/${encodeURIComponent(plate)}/candidates?${searchOf({ ...query })}`,
+  )
+
+/** Record an analyst's include, dismiss or undo — an audited act. */
+export const decideCandidate = (
+  plate: string,
+  body: { detection_id: string; detection_ts: string; decision: CandidateDecisionKind },
+) =>
+  request<CandidateDecisionRecord>(
+    `/api/v1/vehicles/${encodeURIComponent(plate)}/candidates/decisions`,
+    { method: 'POST', body: JSON.stringify(body) },
+  )
+
+// ── Pursuit ───────────────────────────────────────────────────────────
+
+/** Pursuits active now — the top bar's pill. No sightings in it. */
+export const listPursuits = () => request<{ pursuits: PursuitSummary[] }>('/api/v1/pursuits')
+
+/** One pursuit's state. The first open per person is audited. */
+export const getPursuit = (plate: string) =>
+  request<Pursuit>(`/api/v1/pursuits/${encodeURIComponent(plate)}`)
+
+/** What starting a pursuit would rank and pin — nothing is pinned. */
+export const predictPursuit = (plate: string, pins?: number) =>
+  request<Pursuit>(
+    `/api/v1/pursuits/${encodeURIComponent(plate)}/prediction?${searchOf({ pins })}`,
+  )
+
+export const startPursuit = (plate: string, pins?: number) =>
+  request<Pursuit>('/api/v1/pursuits', {
+    method: 'POST',
+    body: JSON.stringify({ plate, ...(pins ? { pins } : {}) }),
+  })
+
+export const renewPursuit = (plate: string) =>
+  request<Pursuit>(`/api/v1/pursuits/${encodeURIComponent(plate)}/renew`, { method: 'POST' })
+
+export const stopPursuit = (plate: string) =>
+  request<{ plate: string; status: string; released: string[]; note: string }>(
+    `/api/v1/pursuits/${encodeURIComponent(plate)}`,
+    { method: 'DELETE' },
+  )
 
 export const getConvoys = (
   plate: string,

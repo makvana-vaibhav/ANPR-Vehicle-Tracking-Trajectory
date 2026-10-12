@@ -1,0 +1,18 @@
+# Contrail — dashboard provider. Loads every JSON file under
+# /var/lib/grafana/dashboards (infra/grafana/dashboards, mounted read-only)
+# into the "Contrail" folder. The files are the source of truth: edits made in
+# the UI cannot be saved back, so change the JSON and let Grafana reload it.
+apiVersion: 1
+
+providers:
+  - name: contrail
+    orgId: 1
+    folder: Contrail
+    folderUid: contrail
+    type: file
+    disableDeletion: true
+    allowUiUpdates: false
+    updateIntervalSeconds: 30
+    options:
+      path: /var/lib/grafana/dashboards
+      foldersFromFilesStructure: false

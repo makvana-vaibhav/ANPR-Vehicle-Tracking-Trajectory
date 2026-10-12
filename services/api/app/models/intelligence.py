@@ -224,12 +224,35 @@ class Alert(Base):
     #: predate migration 0005; `anomaly.py` is the first producer.
     reasons: Mapped[list[dict[str, Any]] | None] = mapped_column(JSONB)
 
+    # ── person_match only (migration 0009) ───────────────────────────────
+    #: The persons-watchlist entry the face matched. Entries are retired,
+    #: never deleted, so SET NULL is a backstop rather than a lifecycle.
+    person_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("person_watchlist.id", ondelete="SET NULL")
+    )
+    #: Cosine similarity of the best agreeing frame. Deliberately not
+    #: `confidence`: a similarity is not a probability, and a screen that
+    #: printed it as a percentage would overstate what was measured.
+    similarity: Mapped[float | None] = mapped_column(Float)
+    #: Object key of the captured face in the private persons bucket. Served
+    #: only through the audited `person.read` evidence endpoint, never in the
+    #: alert list, which every alert reader sees.
+    face_crop_key: Mapped[str | None] = mapped_column(Text)
+
     __table_args__ = (
         # The alerts screen: open alerts, highest priority first, newest first.
         Index("ix_alerts_status_created", "status", created_at.desc()),
         Index("ix_alerts_priority_created", "priority", created_at.desc()),
         Index("ix_alerts_plate", "plate_normalised"),
         Index("ix_alerts_camera_created", "camera_id", created_at.desc()),
+        # Person-match deduplication and an entry's match history.
+        Index(
+            "ix_alerts_person_camera_created",
+            "person_id",
+            "camera_id",
+            created_at.desc(),
+            postgresql_where=text("person_id IS NOT NULL"),
+        ),
     )
 
     def __repr__(self) -> str:

@@ -13,7 +13,7 @@
  */
 
 import PlateCrop from '@/components/PlateCrop'
-import { InfoHint } from '@/components/ui'
+import { InfoHint, PlateChip } from '@/components/ui'
 import * as api from '@/lib/api'
 import type { UnplacedSighting } from '@/lib/types'
 
@@ -61,6 +61,14 @@ export default function UnplacedSightings({
               <p className="truncate text-xs text-muted-foreground" title={sighting.camera_name}>
                 {sighting.camera_name}
               </p>
+              {/* An analyst's included candidate: a different plate was read. */}
+              {sighting.read_as && (
+                <p className="mt-1 flex flex-wrap items-center gap-1.5 text-[11px] text-primary">
+                  <span className="font-medium uppercase tracking-[0.06em]">Candidate</span>
+                  <span className="text-faint">read as</span>
+                  <PlateChip plate={sighting.read_as} size="xs" candidate />
+                </p>
+              )}
               <p className="mt-0.5 flex flex-wrap gap-x-2.5 font-mono text-[11px] text-faint">
                 <span>read {sighting.plate_confidence.toFixed(2)}</span>
                 {withDate && <span>{day.format(new Date(sighting.seen_at))}</span>}
@@ -68,7 +76,11 @@ export default function UnplacedSightings({
               </p>
             </div>
             <div className="flex items-start pt-0.5">
-              <PlateCrop url={crops[sighting.detection_id] ?? null} plate={plate} height={26} />
+              <PlateCrop
+                url={crops[sighting.detection_id] ?? null}
+                plate={sighting.read_as ?? plate}
+                height={26}
+              />
             </div>
           </li>
         ))}

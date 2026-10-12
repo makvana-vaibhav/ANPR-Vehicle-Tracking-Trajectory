@@ -17,6 +17,7 @@ export function alarmKind(alertType: string): AlarmKind {
   switch (alertType) {
     case 'watchlist_hit':
     case 'possible_match':
+    case 'person_match':
       return 'watchlist'
     case 'anomaly':
     case 'speed':
@@ -40,6 +41,10 @@ export function alarmTitle(alert: Pick<Alert, 'alert_type' | 'camera_id'>): stri
       return 'Watched vehicle read'
     case 'possible_match':
       return 'Possible watchlist match'
+    case 'person_match':
+      // Always "possible": a face that resembles an enrolled reference is a
+      // lead for a person to check, never an identification.
+      return 'Possible person match'
     case 'anomaly':
       return 'Journey to explain'
     case 'camera_down':

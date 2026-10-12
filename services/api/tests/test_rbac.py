@@ -7,14 +7,17 @@ analyst the ability to delete cameras.
 
 Specification:
 
-| Role       | Cameras | Streams | Watchlist | Alerts    | Search | Users | Audit |
-|------------|---------|---------|-----------|-----------|--------|-------|-------|
-| admin      | CRUD    | view    | CRUD      | all       | yes    | CRUD  | read  |
-| supervisor | CRU     | view    | CRU       | ack/close | yes    | –     | read  |
-| operator   | read    | view    | read      | ack       | yes    | –     | –     |
-| analyst    | read    | –       | read      | read      | yes    | –     | –     |
-| auditor    | read    | –       | read      | read      | –      | –     | read  |
-| api_client | create  | –       | –         | –         | –      | –     | –     |
+| Role       | Cameras | Streams | Watchlist | Persons | Alerts    | Search | Users | Audit |
+|------------|---------|---------|-----------|---------|-----------|--------|-------|-------|
+| admin      | CRUD    | view    | CRUD      | all     | all       | yes    | CRUD  | read  |
+| supervisor | CRU     | view    | CRU       | all     | ack/close | yes    | –     | read  |
+| operator   | read    | view    | read      | read    | ack       | yes    | –     | –     |
+| analyst    | read    | –       | read      | read    | read      | yes    | –     | –     |
+| auditor    | read    | –       | read      | read    | read      | –      | –     | read  |
+| api_client | create  | –       | –         | –       | –         | –      | –     | –     |
+
+Persons "all" is read, enrol, approve and retire. Four-eyes — the enroller may
+not approve — is per entry, not per role, and is tested in `test_persons.py`.
 """
 
 from __future__ import annotations
@@ -37,6 +40,10 @@ EXPECTED: dict[Role, set[Permission]] = {
         P.WATCHLIST_CREATE,
         P.WATCHLIST_READ,
         P.WATCHLIST_UPDATE,
+        P.PERSON_READ,
+        P.PERSON_ENROL,
+        P.PERSON_APPROVE,
+        P.PERSON_RETIRE,
         P.ALERT_READ,
         P.ALERT_ACKNOWLEDGE,
         P.ALERT_DISPATCH,
@@ -49,6 +56,7 @@ EXPECTED: dict[Role, set[Permission]] = {
         P.CAMERA_READ,
         P.STREAM_VIEW,
         P.WATCHLIST_READ,
+        P.PERSON_READ,
         P.ALERT_READ,
         P.ALERT_ACKNOWLEDGE,
         P.SEARCH_EXECUTE,
@@ -57,6 +65,7 @@ EXPECTED: dict[Role, set[Permission]] = {
     Role.ANALYST: {
         P.CAMERA_READ,
         P.WATCHLIST_READ,
+        P.PERSON_READ,
         P.ALERT_READ,
         P.SEARCH_EXECUTE,
         P.ANALYTICS_READ,
@@ -64,6 +73,7 @@ EXPECTED: dict[Role, set[Permission]] = {
     Role.AUDITOR: {
         P.CAMERA_READ,
         P.WATCHLIST_READ,
+        P.PERSON_READ,
         P.ALERT_READ,
         P.AUDIT_READ,
         P.ANALYTICS_READ,
@@ -145,6 +155,30 @@ class TestPrivilegeBoundaries:
         allowed = {Role.ADMIN, Role.SUPERVISOR, Role.AUDITOR}
         for role in Role:
             assert role_has(role, P.AUDIT_READ) is (role in allowed)
+
+    def test_only_admin_and_supervisor_change_the_persons_watchlist(self) -> None:
+        """Enrolling, approving and retiring a face are supervisory acts."""
+        allowed = {Role.ADMIN, Role.SUPERVISOR}
+        for role in Role:
+            for grant in (P.PERSON_ENROL, P.PERSON_APPROVE, P.PERSON_RETIRE):
+                assert role_has(role, grant) is (role in allowed), (role, grant)
+
+    def test_every_role_that_can_see_a_face_can_see_the_alarm_it_raised(self) -> None:
+        """A person-match alarm is triaged on the Alarms screen; a role shown
+        the photographs but not the alarm would hold evidence with no case."""
+        for role in Role:
+            if role_has(role, P.PERSON_READ):
+                assert role_has(role, P.ALERT_READ), role
+
+    def test_auditor_reads_persons_but_changes_nothing(self) -> None:
+        assert role_has(Role.AUDITOR, P.PERSON_READ)
+        assert not role_has(Role.AUDITOR, P.PERSON_ENROL)
+        assert not role_has(Role.AUDITOR, P.PERSON_APPROVE)
+        assert not role_has(Role.AUDITOR, P.PERSON_RETIRE)
+
+    def test_a_leaked_onboarding_key_sees_no_face(self) -> None:
+        granted = permissions_for(Role.API_CLIENT)
+        assert not granted & {P.PERSON_READ, P.PERSON_ENROL, P.PERSON_APPROVE, P.PERSON_RETIRE}
 
 
 class TestUnknownRoles:

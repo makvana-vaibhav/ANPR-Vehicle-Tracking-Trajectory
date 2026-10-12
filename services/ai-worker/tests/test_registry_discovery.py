@@ -227,3 +227,41 @@ class TestPlateRegions:
         assert CameraStream(camera_code="X", rtsp_url="rtsp://h/x").plate_regions == (
             "IN",
         )
+
+
+class TestAWorkerOutsideCompose:
+    """The native macOS worker reaches our gateway at localhost, not by the
+    compose name the roster carries; it must still get RTSP, not drop to HLS."""
+
+    async def test_our_gateway_is_reached_by_the_local_name(self, roster) -> None:
+        roster(
+            [
+                entry(
+                    "CAM-DEMO-01",
+                    rtsp_url="rtsp://mediamtx:8554/cam-demo-01",
+                    hls_url="http://localhost:8888/cam-demo-01/index.m3u8",
+                    plate_regions=["IN", "GB"],
+                )
+            ]
+        )
+        [stream] = await discover_registry(
+            "redis://x", 0, 1, rtsp_probe={}, gateway=("mediamtx", "localhost")
+        )
+        assert stream.rtsp_url == "rtsp://localhost:8554/cam-demo-01"
+        assert stream.transport == "rtsp"
+        assert stream.plate_regions == ("IN", "GB")
+
+    async def test_inside_compose_nothing_changes(self, roster) -> None:
+        roster([entry("CAM-1", rtsp_url="rtsp://mediamtx:8554/cam-1")])
+        [stream] = await discover_registry(
+            "redis://x", 0, 1, rtsp_probe={}, gateway=("mediamtx", "mediamtx")
+        )
+        assert stream.rtsp_url == "rtsp://mediamtx:8554/cam-1"
+
+    async def test_a_federated_camera_is_never_rewritten(self, roster) -> None:
+        url = "rtsp://user:secret@103.250.160.189:8554/stream/cam21"
+        roster([entry("SBX-cam21", rtsp_url=url)])
+        [stream] = await discover_registry(
+            "redis://x", 0, 1, rtsp_probe={}, gateway=("mediamtx", "localhost")
+        )
+        assert stream.rtsp_url == url

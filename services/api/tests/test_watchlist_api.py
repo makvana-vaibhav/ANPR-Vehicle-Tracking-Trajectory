@@ -238,5 +238,7 @@ class TestRoutesAreWhereTheClientExpects:
             "/health",
             "/ready",
             "/metrics",
+            # Prometheus scrapes this; same reasoning as /metrics above.
+            "/metrics/prometheus",
         }
         assert not outside, f"routes mounted outside /api/v1: {sorted(outside)}"

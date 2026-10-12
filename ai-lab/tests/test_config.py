@@ -71,3 +71,29 @@ def test_plate_classes_must_be_detectable() -> None:
 )
 def test_override_parsing(text: str, key: str, value: object) -> None:
     assert parse_override(text) == (key, value)
+
+
+@pytest.mark.parametrize("name", ["stream", "stream_demo"])
+def test_the_workers_read_the_raw_plate_crop(name: str) -> None:
+    """What the AI workers run: the crop exactly as the plate detector cut it.
+
+    Padding + CLAHE + upscale before PP-OCR measured 50 -> 61 of 98 labelled
+    grid plates *worse*, and twice the OCR calls (scripts/ocr_bench.py,
+    ai-lab/PERFORMANCE.md §12). If this changes, re-run that benchmark first.
+    """
+    import numpy as np
+
+    from ailab.preprocess import build_variants
+
+    config = RunConfig.load(name)
+    assert config.preprocess.variants == ["raw"]
+    crop = np.arange(24 * 80 * 3, dtype=np.uint8).reshape(24, 80, 3)
+    [(variant, prepared)] = build_variants(crop, config.preprocess)
+    assert variant == "raw" and prepared is crop
+
+
+def test_the_detection_fallback_is_sized_for_a_plate_not_a_page() -> None:
+    """RapidOCR ships 736 px on the short side: ~0.9 core-s per fallback firing."""
+    ocr = RunConfig.load("stream").ocr
+    assert (ocr.detection_fallback_limit_side_len, ocr.detection_fallback_limit_type) == (128, "min")
+    assert ocr.detection_fallback_use_cls is False

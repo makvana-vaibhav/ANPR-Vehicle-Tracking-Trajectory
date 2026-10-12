@@ -828,6 +828,69 @@ class TestThePlateBoxTravelsWithTheVehicle:
         assert entry["plate_bbox"] == [500.0, 430.0, 590.0, 452.0]
 
 
+class TestAPlateIsNeverDrawnTheSizeOfACar:
+    """`_anchored_plate` when the vehicle box stops framing one vehicle.
+
+    The regression: a detection that boxed two cars as one tripled the box's
+    width, the plate's fractions were reapplied to it, and the overlay drew a
+    180 px "plate" floating between the two cars — wider than either plate by
+    three times. A 60x15 plate on a 200x200 car is used throughout.
+    """
+
+    PLATE = BBox(170, 250, 230, 265)          # centre (200, 257.5)
+    CAR = BBox(100, 100, 300, 300)
+
+    def test_a_box_merged_with_the_car_alongside_does_not_inflate_the_plate(self) -> None:
+        # The car moved 10 px right; the detector now boxes it with its neighbour.
+        merged = BBox(110, 102, 710, 312)
+        old_width = (self.PLATE.width / self.CAR.width) * merged.width
+        assert old_width == pytest.approx(180.0)          # what used to be drawn
+
+        anchored = StreamRunner._anchored_plate(self.PLATE, self.CAR, merged)
+
+        # Scaled by the side that did not jump (height, x1.05), not by 3x.
+        assert anchored.width == pytest.approx(63.0)
+        assert anchored.height == pytest.approx(15.75)
+        # Held to the edge that stayed with this car, so it is still on it.
+        assert anchored.cx == pytest.approx(215.0)
+        assert anchored.x1 >= 110 and anchored.x2 <= 320
+
+    def test_a_merge_on_the_other_side_holds_the_other_edge(self) -> None:
+        car = BBox(400, 100, 600, 300)
+        plate = BBox(470, 250, 530, 265)                  # centre x 500
+        merged = BBox(0, 100, 600, 305)                   # a car joined on the left
+        anchored = StreamRunner._anchored_plate(plate, car, merged)
+        assert anchored.cx == pytest.approx(600 - 100 * (205 / 200))
+        assert anchored.width == pytest.approx(60 * (205 / 200))
+
+    def test_a_split_box_does_not_shrink_the_plate_to_nothing(self) -> None:
+        # Localised while the box covered two cars; now it frames one again.
+        merged = BBox(100, 100, 700, 310)
+        single = BBox(105, 100, 305, 300)
+        anchored = StreamRunner._anchored_plate(self.PLATE, merged, single)
+        # The old fractions gave a 20 px plate here.
+        assert anchored.width == pytest.approx(60 * (200 / 210))
+        assert anchored.cx == pytest.approx(105 + 100 * (200 / 210))
+
+    def test_an_implausible_localisation_is_capped_and_kept_on_the_vehicle(self) -> None:
+        # A "plate" 90% of the vehicle's width is not a plate-sized box.
+        plate = BBox(100, 100, 190, 140)
+        car = BBox(100, 100, 200, 150)
+        anchored = StreamRunner._anchored_plate(plate, car, car)
+        assert anchored.width == pytest.approx(60.0)       # 60% of 100
+        assert anchored.height == pytest.approx(20.0)      # 40% of 50
+        assert (anchored.cx, anchored.cy) == (pytest.approx(145.0), pytest.approx(120.0))
+        assert car.x1 <= anchored.x1 and anchored.x2 <= car.x2
+        assert car.y1 <= anchored.y1 and anchored.y2 <= car.y2
+
+    def test_a_vehicle_turning_slightly_is_still_anchored_by_fractions(self) -> None:
+        # Within the shape tolerance the original behaviour is unchanged.
+        turned = BBox(100, 100, 340, 300)                  # 20% wider, same height
+        anchored = StreamRunner._anchored_plate(self.PLATE, self.CAR, turned)
+        assert anchored.x1 == pytest.approx(100 + 0.35 * 240)
+        assert anchored.x2 == pytest.approx(100 + 0.65 * 240)
+
+
 class TestNagarNetraIntegrationRules:
     """The rules the hosted grid integration guide is explicit about.
 
@@ -881,85 +944,214 @@ class TestNagarNetraIntegrationRules:
         assert delays[-1] == 30.0, "backoff must cap, not grow without bound"
         assert all(b >= a for a, b in pairwise(delays))
 
-    def test_a_backwards_pts_jump_is_reported_as_a_discontinuity(self) -> None:
-        """The recording loops; the scene cuts. Long-lived state must rebuild."""
+    # ── presentation timestamps ──
+    #
+    # Every sequence below is in milliseconds, as OpenCV reports PTS, at the
+    # 25 fps the grid publishes. The jitter cases are taken from the AI
+    # workers' own log of 11-12 Oct ("scene discontinuity on .../cam21
+    # (PTS 35.64s -> 34.36s)"), where each was mistaken for a loop.
 
-        class FakeCapture:
-            def __init__(self, values: list[float]) -> None:
-                self._values = values
-                self._i = 0
+    @staticmethod
+    def _reader(fps: float = 25.0) -> StreamReader:
+        reader = StreamReader("rtsp://example.invalid/stream/cam21", reconnect_delay_s=0.0)
+        reader._fps = fps
+        return reader
+
+    @staticmethod
+    def _feed(reader: StreamReader, seconds: list[float]) -> list[tuple[float, bool, bool]]:
+        class Clock:
+            def __init__(self) -> None:
+                self.value = 0.0
 
             def get(self, _prop: int) -> float:
-                value = self._values[self._i]
-                self._i += 1
-                return value
+                return self.value
 
-        from ailab.stream.reader import ReaderStats
+        clock, out = Clock(), []
+        for value in seconds:
+            clock.value = value * 1000.0
+            reader.stats.frames_decoded += 1
+            out.append(reader._read_pts(clock))
+        return out
 
-        reader = StreamReader.__new__(StreamReader)
-        reader.source = "rtsp://example/stream/1"
-        reader.stats = ReaderStats()
-        reader._fps = 25.0
-        reader._pts_s = 0.0
-        reader._last_pts_s = None
-        reader._pts_offset_s = 0.0
-        reader._pts_available = True
+    @staticmethod
+    def _live(start: float, stop: float) -> list[float]:
+        return [round(start + 0.04 * i, 2) for i in range(int(round((stop - start) / 0.04)) + 1)]
 
-        capture = FakeCapture([1000.0, 2000.0, 3000.0, 100.0, 200.0])
-        flags = [reader._read_pts(capture)[1] for _ in range(5)]
+    @staticmethod
+    def _interleave(live: list[float], stale_after: dict[float, list[float]]) -> list[float]:
+        out: list[float] = []
+        for value in live:
+            out.append(value)
+            out.extend(stale_after.get(value, []))
+        return out
 
-        assert flags == [False, False, False, True, False], "loop point not detected"
+    @pytest.mark.parametrize(
+        "live_from,live_to,stale_after",
+        [
+            # Three excursions in three consecutive steps, ~1.28 s behind.
+            (35.0, 37.0, {35.64: [34.36], 35.72: [34.44], 35.80: [34.56]}),
+            # Two ~3.56 s behind, the live timeline back in between.
+            (13.0, 15.0, {14.00: [10.44], 14.16: [10.60]}),
+            # 7.56 and 8.84 s behind: far larger than any jitter threshold.
+            (390.0, 394.0, {391.48: [383.92], 392.80: [383.96]}),
+            # A burst of stale frames, not just one.
+            (50.0, 53.0, {51.00: [49.72, 49.76, 49.80, 49.84]}),
+        ],
+    )
+    def test_grid_timestamp_jitter_is_not_a_cut(
+        self, live_from: float, live_to: float, stale_after: dict[float, list[float]]
+    ) -> None:
+        """The regression: each of these rebuilt the tracker, 1,453 times on
+        11 Oct, and two in three grid plates were left with a single read."""
+        reader = self._reader()
+        stale = {v for values in stale_after.values() for v in values}
+        sequence = self._interleave(self._live(live_from, live_to), stale_after)
+
+        results = self._feed(reader, sequence)
+
+        assert reader.stats.discontinuities == 0
+        assert not any(cut for _t, cut, _hold in results)
+        # Only the off-timeline frames are withheld, and every one of them is.
+        held = [value for value, (_t, _c, hold) in zip(sequence, results, strict=True) if hold]
+        assert sorted(held) == sorted(stale)
+        assert reader.stats.pts_excursions == len(stale_after)
+        delivered = [t for t, _c, hold in results if not hold]
+        assert delivered == sorted(delivered) and len(set(delivered)) == len(delivered)
+
+    def test_a_loop_is_reported_once_the_stream_has_stayed_on_it(self) -> None:
+        """The recording loops; the scene cuts. Long-lived state must rebuild.
+
+        A 20 s clip at 25 fps runs out and starts again. The step back is held
+        until the stream has stayed on the new timeline for a second of its
+        own time, then reported once — and the frames in between are never
+        handed to the tracker, so nothing from after the cut meets the old
+        scene."""
+        reader = self._reader()
+        first, second = self._live(0.04, 20.0), self._live(0.04, 3.0)
+
+        results = self._feed(reader, first + second)
+
+        cuts = [i for i, (_t, cut, _h) in enumerate(results) if cut]
+        assert cuts == [len(first) + 25], "loop not reported, or reported more than once"
         assert reader.stats.discontinuities == 1
+        held = [i for i, (_t, _c, hold) in enumerate(results) if hold]
+        assert held == list(range(len(first), len(first) + 25))
+        # The clock carries on across the withheld second: 20.00 s, then the
+        # cut frame 1.04 s into the new pass lands at 21.04 s.
+        assert results[cuts[0]][0] == pytest.approx(21.04)
 
     def test_timestamps_stay_monotonic_across_a_loop(self) -> None:
         """Events must remain orderable even though the source clock reset."""
+        reader = self._reader()
+        results = self._feed(reader, self._live(0.04, 20.0) + self._live(0.04, 3.0))
+        delivered = [t for t, _c, hold in results if not hold]
+        assert delivered == sorted(delivered), "clock went backwards across the loop"
 
-        class FakeCapture:
-            def __init__(self, values: list[float]) -> None:
-                self._values, self._i = values, 0
+    def test_a_loop_surrounded_by_jitter_is_still_one_cut(self) -> None:
+        reader = self._reader()
+        before = self._interleave(self._live(10.0, 20.0), {15.00: [13.72], 18.00: [14.44]})
+        after = self._interleave(self._live(0.04, 4.0), {2.00: [0.72], 3.00: [1.80]})
+        self._feed(reader, before + after)
+        assert reader.stats.discontinuities == 1
 
-            def get(self, _prop: int) -> float:
-                value = self._values[self._i]
-                self._i += 1
-                return value
+    def test_a_clock_stalled_on_the_earlier_timeline_is_not_withheld_forever(self) -> None:
+        reader = self._reader()
+        results = self._feed(reader, self._live(0.04, 10.0) + [2.0] * 60)
+        cuts = [i for i, (_t, cut, _h) in enumerate(results) if cut]
+        # Two seconds' worth of frames at 25 fps.
+        assert cuts == [len(self._live(0.04, 10.0)) + 49]
 
-        from ailab.stream.reader import ReaderStats
+    def test_a_reconnect_is_a_cut_on_a_clock_that_keeps_rising(self, monkeypatch) -> None:
+        """A reconnect replays a buffered GOP on a new clock. It was neither
+        flagged nor re-based, so the clock restarted near zero and vehicles
+        seen before the outage were never retired."""
+        reader = self._reader()
+        before = self._feed(reader, self._live(100.0, 101.0))
+        monkeypatch.setattr(reader, "_open", lambda: True)
+        assert reader._handle_read_failure() is True
 
-        reader = StreamReader.__new__(StreamReader)
-        reader.source = "s"
-        reader.stats = ReaderStats()
-        reader._fps = 25.0
-        reader._pts_s = 0.0
-        reader._last_pts_s = None
-        reader._pts_offset_s = 0.0
-        reader._pts_available = True
+        after = self._feed(reader, self._live(0.04, 0.5))
 
-        capture = FakeCapture([1000.0, 2000.0, 3000.0, 100.0, 200.0, 300.0])
-        stamps = [reader._read_pts(capture)[0] for _ in range(6)]
-        assert stamps == sorted(stamps), f"clock went backwards across the loop: {stamps}"
+        assert after[0][1] is True and not any(cut for _t, cut, _h in after[1:])
+        assert reader.stats.discontinuities == 1
+        stamps = [t for t, _c, _h in before + after]
+        assert stamps == sorted(stamps)
 
     def test_a_source_without_pts_falls_back_and_says_so(self) -> None:
         """Some sources report 0 forever. Invent nothing silently."""
-
-        class NoPts:
-            def get(self, _prop: int) -> float:
-                return 0.0
-
-        from ailab.stream.reader import ReaderStats
-
-        reader = StreamReader.__new__(StreamReader)
-        reader.source = "s"
-        reader.stats = ReaderStats()
-        reader._fps = 25.0
-        reader._pts_s = 0.0
-        reader._last_pts_s = None
-        reader._pts_offset_s = 0.0
-        reader._pts_available = True
-
-        capture = NoPts()
-        stamps = [reader._read_pts(capture)[0] for _ in range(10)]
-        assert stamps == sorted(stamps)
+        reader = self._reader()
+        stamps = [t for t, _c, _h in self._feed(reader, [0.0] * 10)]
+        assert stamps == sorted(stamps) and len(set(stamps)) == 10
         assert reader.stats.pts_unavailable is True, "fallback must be recorded, not hidden"
+
+    # ── handing frames over ──
+
+    def test_a_cut_reaches_the_consumer_even_when_its_frame_is_replaced(self) -> None:
+        """Drop-to-latest replaces unconsumed frames; a cut must not go with them."""
+        from datetime import UTC, datetime
+
+        from ailab.stream.reader import CapturedFrame
+
+        def frame(index: int) -> CapturedFrame:
+            return CapturedFrame(
+                index=index, image=np.zeros((2, 2, 3), np.uint8),
+                captured_at=time.perf_counter(), wall_time=datetime.now(UTC),
+                source_t_s=float(index),
+            )
+
+        reader = self._reader()
+        reader._grabbed = 2
+        reader._pending_cut = True
+        reader._publish(frame(0))       # carries the cut...
+        reader._publish(frame(1))       # ...and is replaced before anyone reads it
+        taken = reader.read(timeout=0.1)
+
+        assert taken is not None and taken.index == 1 and taken.discontinuity is True
+        assert reader.stats.frames_dropped == 1
+
+    def test_only_the_frames_a_slow_consumer_takes_are_converted(
+        self, short_clip: Path, monkeypatch
+    ) -> None:
+        """Every frame is decoded; only those handed over are converted."""
+        import ailab.stream.reader as reader_module
+
+        real = reader_module.cv2.VideoCapture
+        calls = {"grab": 0, "retrieve": 0}
+
+        class Counting:
+            def __init__(self, *args: object) -> None:
+                self._capture = real(*args)
+
+            def __getattr__(self, name: str) -> object:
+                return getattr(self._capture, name)
+
+            def grab(self) -> bool:
+                calls["grab"] += 1
+                return bool(self._capture.grab())
+
+            def retrieve(self) -> tuple[bool, np.ndarray]:
+                calls["retrieve"] += 1
+                return self._capture.retrieve()
+
+        monkeypatch.setattr(reader_module.cv2, "VideoCapture", Counting)
+        with StreamReader(str(short_clip), realtime=True) as reader:
+            delivered = 0
+            deadline = time.perf_counter() + 2.6
+            while time.perf_counter() < deadline:
+                frame = reader.read(timeout=0.5)
+                if frame is None and reader.finished:
+                    break
+                if frame is not None:
+                    delivered += 1
+                    # Fresh: the frame taken is (nearly) the newest decoded.
+                    assert reader._grabbed - frame.index <= 4
+                    time.sleep(0.15)
+            stats = reader.stats
+
+        assert stats.frames_decoded == 60
+        assert stats.frames_skipped_unconverted > 0
+        assert calls["retrieve"] < calls["grab"] / 2
+        assert stats.frames_decoded == stats.frames_delivered + stats.frames_dropped
 
     def test_captures_are_opened_with_ffmpeg_only(self, monkeypatch) -> None:
         """Left to choose, OpenCV falls through to its image-sequence backend

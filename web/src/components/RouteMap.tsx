@@ -21,6 +21,11 @@
  * and dashed, labelled with why. They are the ones worth looking at — an
  * impossible leg is what a cloned plate looks like.
  *
+ * A **candidate** visit — a read of a different plate an analyst included as
+ * possibly this vehicle — is a hollow stop, and every leg touching it is cut
+ * out of the trail and drawn dashed in the trail's colour, labelled
+ * "candidate". During a pursuit, the cameras it can reach next are ringed.
+ *
  * Every label is HTML: a symbol layer would need a glyph server (CLAUDE.md §6).
  */
 
@@ -40,6 +45,7 @@ import {
 
 import {
   groupStops,
+  isCandidateLeg,
   journeyTrail,
   legSummary,
   sequenceLabel,
@@ -96,6 +102,16 @@ const PLAYBACK_SECONDS = 16
 /** Past this many labelled legs, only impossible and selected legs keep a label. */
 const MAX_LEG_LABELS = 4
 
+/** A camera a pursuit says the vehicle can reach next, ringed on the map. */
+export interface PredictedCamera {
+  code: string
+  lon: number
+  lat: number
+  /** `07:14–07:22 IST`, or why there is no time. */
+  label: string
+  pinned: boolean
+}
+
 export interface RouteMapHandle {
   /** Play the journey from its first sighting. */
   replay: () => void
@@ -115,6 +131,8 @@ interface Props {
   onSelectHop?: (sequence: number) => void
   /** So a replay control elsewhere on the page can say what it will do. */
   onPlayingChange?: (playing: boolean) => void
+  /** The cameras a pursuit ranks as reachable next. */
+  predicted?: PredictedCamera[]
   /**
    * Drawn over the map — a prompt before any search, or why there is nothing
    * to draw. The layer ignores the pointer; interactive children opt back in
@@ -144,10 +162,10 @@ function radiusFor(label: string): number {
   return 15
 }
 
-type Look = 'start' | 'end' | 'via' | 'impossible'
+type Look = 'start' | 'end' | 'via' | 'impossible' | 'candidate'
 
 function lookOf(group: StopGroup): Look {
-  return group.impossible ? 'impossible' : group.role
+  return group.impossible ? 'impossible' : group.candidate ? 'candidate' : group.role
 }
 
 /** Ink for the visit numbers, against each look's fill (see the paint spec). */
@@ -156,6 +174,7 @@ const NUMBER_INK: Record<Look, string> = {
   via: 'text-background',
   end: 'text-primary-foreground',
   impossible: 'text-priority-critical',
+  candidate: 'text-primary',
 }
 
 const TAG = 'pointer-events-none absolute left-full top-1/2 ml-2 -translate-y-1/2 whitespace-nowrap rounded bg-background/80 px-1.5 py-0.5 font-mono text-[10px] font-normal shadow'
@@ -163,13 +182,22 @@ const TAG = 'pointer-events-none absolute left-full top-1/2 ml-2 -translate-y-1/
 const LEG_TAG = 'pointer-events-none whitespace-nowrap rounded px-1.5 py-0.5 font-mono text-[10px] shadow'
 
 const RouteMap = forwardRef<RouteMapHandle, Props>(function RouteMap(
-  { hops, basemap = 'satellite', activeSequence = null, onSelectHop, onPlayingChange, children },
+  {
+    hops,
+    basemap = 'satellite',
+    activeSequence = null,
+    onSelectHop,
+    onPlayingChange,
+    predicted,
+    children,
+  },
   ref,
 ) {
   const container = useRef<HTMLDivElement>(null)
   const map = useRef<maplibregl.Map | null>(null)
   const stopMarkers = useRef<{ group: StopGroup; marker: maplibregl.Marker; tag: HTMLElement }[]>([])
   const legMarkers = useRef<{ sequence: number; impossible: boolean; marker: maplibregl.Marker }[]>([])
+  const predictedMarkers = useRef<maplibregl.Marker[]>([])
   const vehicle = useRef<maplibregl.Marker | null>(null)
   const legend = useRef<HTMLDivElement>(null)
   // React's ids carry colons, which an SVG `url(#…)` reference can trip on.
@@ -405,6 +433,7 @@ const RouteMap = forwardRef<RouteMapHandle, Props>(function RouteMap(
     m.addSource('route-trail', { type: 'geojson', data: EMPTY, lineMetrics: true })
     m.addSource('route-travelled', { type: 'geojson', data: EMPTY, lineMetrics: true })
     m.addSource('route-impossible', { type: 'geojson', data: EMPTY })
+    m.addSource('route-candidate', { type: 'geojson', data: EMPTY })
     m.addSource('route-stops', { type: 'geojson', data: EMPTY })
 
     const placeholder: ExpressionSpecification = [
@@ -443,6 +472,19 @@ const RouteMap = forwardRef<RouteMapHandle, Props>(function RouteMap(
       source: 'route-impossible',
       layout: { 'line-cap': 'butt', 'line-join': 'round' },
       paint: { 'line-color': IMPOSSIBLE, 'line-width': 2, 'line-dasharray': [2.5, 2] },
+    })
+    // Legs to or from a candidate: the trail's colour, dashed, never solid.
+    m.addLayer({
+      id: 'candidate-legs',
+      type: 'line',
+      source: 'route-candidate',
+      layout: { 'line-cap': 'butt', 'line-join': 'round' },
+      paint: {
+        'line-color': TRAIL,
+        'line-width': 2,
+        'line-opacity': 0.85,
+        'line-dasharray': [1.5, 1.5],
+      },
     })
     m.addLayer({
       id: 'travelled-glow',
@@ -491,6 +533,8 @@ const RouteMap = forwardRef<RouteMapHandle, Props>(function RouteMap(
           GROUND,
           'impossible',
           GROUND,
+          'candidate',
+          GROUND,
           'end',
           TRAIL,
           STOP,
@@ -502,9 +546,17 @@ const RouteMap = forwardRef<RouteMapHandle, Props>(function RouteMap(
           STOP,
           'impossible',
           IMPOSSIBLE,
+          'candidate',
+          TRAIL,
           GROUND,
         ],
-        'circle-stroke-width': ['match', ['get', 'look'], ['start', 'impossible'], 2, 1.5],
+        'circle-stroke-width': [
+          'match',
+          ['get', 'look'],
+          ['start', 'impossible', 'candidate'],
+          2,
+          1.5,
+        ],
       },
     })
   }, [ready])
@@ -549,6 +601,27 @@ const RouteMap = forwardRef<RouteMapHandle, Props>(function RouteMap(
     }
     setData(m, 'route-impossible', { type: 'FeatureCollection', features: impossible })
 
+    // One feature per believable leg that touches a candidate visit. An
+    // impossible one is already drawn red above, and stays red.
+    const candidateLegs: GeoJSON.Feature[] = []
+    for (let i = 1; i < hops.length; i += 1) {
+      if (!isCandidateLeg(hops, i) || !hops[i]!.plausible) continue
+      const from = hops[i - 1]!
+      const to = hops[i]!
+      candidateLegs.push({
+        type: 'Feature',
+        geometry: {
+          type: 'LineString',
+          coordinates: [
+            [from.lon, from.lat],
+            [to.lon, to.lat],
+          ],
+        },
+        properties: { sequence: i },
+      })
+    }
+    setData(m, 'route-candidate', { type: 'FeatureCollection', features: candidateLegs })
+
     // ── Stops: the dot is paint, the numbers and labels are HTML ──
     const labels = groups.map((g) => sequenceLabel(g.hops))
     setData(m, 'route-stops', {
@@ -583,7 +656,11 @@ const RouteMap = forwardRef<RouteMapHandle, Props>(function RouteMap(
 
       const tag = document.createElement('span')
       tag.className = `${TAG} text-foreground`
-      tag.textContent = stopCaption(group, api.formatIST(first.arrived_at, false).slice(0, 5))
+      const caption = stopCaption(group, api.formatIST(first.arrived_at, false).slice(0, 5))
+      // A stop that is only candidates says so, and what was actually read.
+      tag.textContent = group.candidate
+        ? `candidate · read as ${[...new Set(group.hops.map((h) => hops[h]!.read_as))].join(', ')} · ${caption}`
+        : caption
       element.appendChild(tag)
 
       // Clicking a camera visited more than once steps through its visits.
@@ -609,13 +686,16 @@ const RouteMap = forwardRef<RouteMapHandle, Props>(function RouteMap(
     const atMidpoint = new Map<string, number>()
     for (let i = 1; i < hops.length; i += 1) {
       const hop = hops[i]!
-      const text = legSummary(hop)
+      const candidate = isCandidateLeg(hops, i)
+      const text = legSummary(hop, candidate)
       if (!text) continue
       const from = hops[i - 1]!
       const element = document.createElement('span')
-      element.className = hop.plausible
-        ? `${LEG_TAG} bg-background/80 text-muted-foreground`
-        : `${LEG_TAG} border border-priority-critical/50 bg-background/90 text-priority-critical`
+      element.className = !hop.plausible
+        ? `${LEG_TAG} border border-priority-critical/50 bg-background/90 text-priority-critical`
+        : candidate
+          ? `${LEG_TAG} border border-dashed border-primary/50 bg-background/85 text-primary`
+          : `${LEG_TAG} bg-background/80 text-muted-foreground`
       element.textContent = text
       const mid: [number, number] = [(from.lon + hop.lon) / 2, (from.lat + hop.lat) / 2]
       const key = `${mid[0].toFixed(4)},${mid[1].toFixed(4)}`
@@ -623,7 +703,8 @@ const RouteMap = forwardRef<RouteMapHandle, Props>(function RouteMap(
       atMidpoint.set(key, stacked + 1)
       legMarkers.current.push({
         sequence: i,
-        impossible: !hop.plausible,
+        // Kept visible like an impossible leg: both are what a reader must not miss.
+        impossible: !hop.plausible || candidate,
         marker: new maplibregl.Marker({ element, anchor: 'center', offset: [0, stacked * 20] })
           .setLngLat(mid)
           .addTo(m),
@@ -693,6 +774,45 @@ const RouteMap = forwardRef<RouteMapHandle, Props>(function RouteMap(
     }
   }, [ready, hops, timeline, playhead, engaged])
 
+  // ── A pursuit's next cameras: rings, solid when pinned ───────────────
+  useEffect(() => {
+    const m = map.current
+    for (const marker of predictedMarkers.current) marker.remove()
+    predictedMarkers.current = []
+    if (!m || !ready || !predicted?.length) return
+    for (const camera of predicted) {
+      const element = document.createElement('div')
+      element.className = `pointer-events-none h-5 w-5 rounded-full border-2 ${
+        camera.pinned ? 'border-primary bg-primary/20' : 'border-dashed border-primary/70'
+      }`
+      const tag = document.createElement('span')
+      tag.className = `${TAG} ${camera.pinned ? 'text-primary' : 'text-muted-foreground'}`
+      tag.textContent = `${camera.pinned ? 'pinned' : 'next?'} · ${camera.code} · ${camera.label}`
+      element.appendChild(tag)
+      const marker = new maplibregl.Marker({ element, anchor: 'center' })
+        .setLngLat([camera.lon, camera.lat])
+        .addTo(m)
+      // After construction: MapLibre labels every marker "Map marker".
+      marker
+        .getElement()
+        .setAttribute('aria-label', `${camera.code}: can be reached next${camera.pinned ? ', pinned' : ''}`)
+      predictedMarkers.current.push(marker)
+    }
+    // With one place on the route the map sits at street level on it, and
+    // the cameras it can reach next would be off screen: frame them together.
+    // A journey of several places keeps its own framing.
+    if (groups.length <= 1) {
+      const bounds = new maplibregl.LngLatBounds()
+      for (const g of groups) bounds.extend([g.lon, g.lat])
+      for (const camera of predicted) bounds.extend([camera.lon, camera.lat])
+      m.fitBounds(bounds, {
+        padding: { top: 90, bottom: 40, left: 56, right: 220 },
+        maxZoom: 14,
+        duration: 600,
+      })
+    }
+  }, [ready, predicted, groups])
+
   // Remove the vehicle marker when the component goes away.
   useEffect(
     () => () => {
@@ -703,6 +823,7 @@ const RouteMap = forwardRef<RouteMapHandle, Props>(function RouteMap(
   )
 
   const impossibleCount = hops.filter((h, i) => i > 0 && !h.plausible).length
+  const candidateCount = hops.filter((_h, i) => isCandidateLeg(hops, i)).length
 
   return (
     <div className="flex h-full min-h-0 w-full flex-col">
@@ -744,6 +865,14 @@ const RouteMap = forwardRef<RouteMapHandle, Props>(function RouteMap(
                     <path d="M1 4h20" stroke="currentColor" strokeWidth="2" strokeDasharray="4 3" />
                   </svg>
                   Impossible leg — needs explaining
+                </li>
+              )}
+              {candidateCount > 0 && (
+                <li className="flex items-center gap-2 text-primary">
+                  <svg width="22" height="8" viewBox="0 0 22 8" aria-hidden="true" className="shrink-0">
+                    <path d="M1 4h20" stroke="currentColor" strokeWidth="2" strokeDasharray="2 2" />
+                  </svg>
+                  Candidate — a different plate read, included by an analyst
                 </li>
               )}
               <li className="flex items-center gap-2">
@@ -930,7 +1059,9 @@ function Timeline({
             const look =
               i > 0 && !hop.plausible
                 ? 'border-2 border-priority-critical bg-background'
-                : i === lastIndex
+                : hop.candidate
+                  ? 'border-2 border-dashed border-primary bg-background'
+                  : i === lastIndex
                   ? 'bg-primary'
                   : i === 0
                     ? 'border-2 border-foreground/80 bg-background'

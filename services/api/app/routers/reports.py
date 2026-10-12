@@ -36,7 +36,7 @@ from app.core.rbac import Permission, require_permission
 from app.models.intelligence import Detection
 from app.models.registry import Camera, Department
 from app.schemas.intelligence import normalise_plate
-from app.services import audit, correlator
+from app.services import audit, candidates, correlator
 
 router = APIRouter(prefix="/api/v1/reports", tags=["reports"])
 
@@ -83,6 +83,11 @@ ROUTE_COLUMNS = [
     "plausible",
     "notes",
     "evidence_detection_id",
+    # Last, so a spreadsheet built on the columns above keeps working.
+    # `confirmed` is a read of this plate; `candidate` is a read of another
+    # plate (`read_as`) that an analyst included as possibly this vehicle.
+    "sighting",
+    "read_as",
 ]
 
 PLATE_COLUMNS = [
@@ -165,6 +170,10 @@ async def vehicle_report_csv(
     request: Request,
     since: Annotated[datetime | None, Query(description="UTC lower bound")] = None,
     until: Annotated[datetime | None, Query(description="UTC upper bound")] = None,
+    include: Annotated[
+        list[uuid.UUID] | None,
+        Query(max_length=20, description="Candidate sightings an analyst included"),
+    ] = None,
 ) -> Response:
     """One row per visit to a camera, in the order they happened.
 
@@ -176,6 +185,11 @@ async def vehicle_report_csv(
 
     Sightings at cameras with no known position follow the route, one row
     each, marked and without coordinates or speeds.
+
+    Candidate visits an analyst included (`include`, the same list the
+    Investigate screen carries) are rows like any other, and say what they
+    are three times: `sighting` is `candidate`, `read_as` is the plate the
+    camera actually read, and the notes begin with it.
     """
     normalised = normalise_plate(plate)
     if len(normalised) < 4:
@@ -184,7 +198,9 @@ async def vehicle_report_csv(
             detail="A plate needs at least four alphanumeric characters to search on.",
         )
     window_from, window_to = _window(since, until)
-    route = await correlator.build_route(session, normalised, window_from, window_to)
+    route = await candidates.route_with_candidates(
+        session, normalised, window_from, window_to, include or ()
+    )
     departments = await _departments(
         session, {h.camera_id for h in route.hops} | {s.camera_id for s in route.unplaced}
     )
@@ -192,6 +208,16 @@ async def vehicle_report_csv(
     rows: list[list[Any]] = []
     for index, hop in enumerate(route.hops, start=1):
         notes = "; ".join(FLAG_WORDS.get(flag, flag) for flag in hop.flags)
+        if hop.candidate:
+            notes = "; ".join(
+                part
+                for part in (
+                    f"CANDIDATE: read as {hop.read_as}, included by an analyst — "
+                    f"not a confirmed read ({hop.candidate_note})",
+                    notes,
+                )
+                if part
+            )
         rows.append(
             [
                 normalised,
@@ -216,9 +242,17 @@ async def vehicle_report_csv(
                 "yes" if hop.plausible else "no",
                 notes,
                 str(hop.best_detection_id) if hop.best_detection_id else "",
+                "candidate" if hop.candidate else "confirmed",
+                hop.read_as or "",
             ]
         )
     for sighting in route.unplaced:
+        unplaced_note = "camera position unknown: not on the route"
+        if sighting.read_as is not None:
+            unplaced_note = (
+                f"CANDIDATE: read as {sighting.read_as}, included by an analyst — not a "
+                f"confirmed read; {unplaced_note}"
+            )
         rows.append(
             [
                 normalised,
@@ -241,8 +275,10 @@ async def vehicle_report_csv(
                 "",
                 "",
                 "",
-                "camera position unknown: not on the route",
+                unplaced_note,
                 str(sighting.detection_id),
+                "candidate" if sighting.read_as is not None else "confirmed",
+                sighting.read_as or "",
             ]
         )
 
@@ -254,6 +290,7 @@ async def vehicle_report_csv(
             "action": "report.route.csv",
             "from": window_from.isoformat(),
             "to": window_to.isoformat(),
+            **({"include": [str(i) for i in include]} if include else {}),
         },
         result_count=len(rows),
     )

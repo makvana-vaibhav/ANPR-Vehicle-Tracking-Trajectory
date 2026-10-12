@@ -101,6 +101,35 @@ def normalise(text: str) -> str:
     return cleaned
 
 
+def drop_leading_junk(plate: str, regions: tuple[str, ...] = ("IN",)) -> str:
+    """Drop one leading character, but only when that is what makes a plate.
+
+    An HSRP plate carries a hologram and a vertical "IND" strip at its left
+    edge, and the recogniser sometimes reads that strip as one more letter:
+    `HGJ01HU2061` for `GJ01HU2061`. `_NOISE_PREFIX` already removes a legible
+    "IND"; this handles the strip read as a single glyph.
+
+    The rule is deliberately narrow. The string must be invalid as read, and
+    what is left after removing exactly one character must be valid as it
+    stands — no confusion repair is allowed to help it get there, and the
+    legacy `AAA NNNN` form does not count, because any junk character followed
+    by seven plate-like characters would match it. Anything else is returned
+    unchanged: a string we cannot parse is evidence, and manufacturing a plate
+    out of it is the confident wrongness this module exists to avoid.
+
+    The research's 60 labelled grid crops: +1 exact read, no new error
+    (docs/research/ANPR_ACCURACY_LATENCY.md §4.6). The re-labelled set of
+    12 Oct (ai-lab/FINDINGS.md §9): no crop affected either way.
+    """
+    if len(plate) < 7 or validate(plate, regions).valid:
+        return plate
+    rest = plate[1:]
+    check = validate(rest, regions)
+    if check.valid and check.fmt != "legacy":
+        return rest
+    return plate
+
+
 def validate(plate: str, regions: tuple[str, ...] = ("IN",)) -> GrammarCheck:
     """Classify a normalised plate string against the accepted formats."""
     if not plate:

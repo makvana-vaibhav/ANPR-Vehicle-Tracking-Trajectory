@@ -1,0 +1,25 @@
+# The AI worker run natively on macOS, with CoreML (`make worker-native`).
+#
+# Identical to `stream` in every decision about what is detected and read;
+# only the model files differ, and they are the same weights repackaged
+# (scripts/derive_models.py, pinned in scripts/fetch_models.sh):
+#
+#   * yolov8n_fp32.onnx — CoreML takes an fp32 graph whole; the shipped fp16
+#     export it takes only in part, for no speed-up.
+#   * plate_yolo11n_static320.onnx — a fixed [1, 3, 320, 320] input, which
+#     CoreML needs and which the `fixed` 320 strategy always feeds anyway.
+#
+# `coreml` raises at start-up where the provider is absent — which is
+# everywhere inside Docker — rather than silently running on the CPU. The plate
+# model takes the best provider present ("auto"), which natively is CoreML.
+# Measured side by side with the Docker worker in docs/GPU.md §"Native worker".
+extends: stream.yaml
+name: stream_native
+description: Live worker run natively on macOS — CoreML, fp32 detector, static-shape plate model.
+
+detector:
+  weights: models/yolov8n_fp32.onnx
+  device: coreml
+
+plate:
+  weights: models/plate_yolo11n_static320.onnx

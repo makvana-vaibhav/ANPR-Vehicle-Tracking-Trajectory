@@ -253,6 +253,17 @@ class OcrConfig(BaseModel):
     detection_fallback_max_aspect: float = Field(default=2.6, ge=1.0)
     # Two rows need enough pixels to actually resolve two rows.
     detection_fallback_min_height: int = Field(default=36, ge=8)
+    # How large the fallback's text detector sees the crop. RapidOCR's shipped
+    # setting is 736 on the *short* side, so a 60x20 plate became a ~2,200x736
+    # DBNet input: 0.7-1.0 core-s per firing in the worker image, for a crop
+    # already cut to the plate. 128 on the short side keeps two rows resolvable
+    # and cost ~150 ms (docs/research/ANPR_ACCURACY_LATENCY.md §4.2; re-measured
+    # in ai-lab/PERFORMANCE.md §12). 736/"min" restores the shipped behaviour.
+    detection_fallback_limit_side_len: int = Field(default=128, ge=32)
+    detection_fallback_limit_type: Literal["min", "max"] = "min"
+    # PP-OCR's angle classifier exists for text that may be upside down. A
+    # number plate on a vehicle never is, so in the fallback it only costs time.
+    detection_fallback_use_cls: bool = False
     crop_gate: CropGateConfig = Field(default_factory=CropGateConfig)
 
 
@@ -272,6 +283,10 @@ class ConsensusConfig(BaseModel):
     # repair step tries to bend it into an Indian plate.
     plate_regions: tuple[str, ...] = ("IN",)
     apply_confusion_correction: bool = True
+    # Drop one leading character read off the HSRP hologram/"IND" strip, only
+    # when that alone turns an invalid read into a valid plate
+    # (`grammar.drop_leading_junk`). Applied per read, before the vote.
+    drop_leading_junk: bool = True
     require_grammar: bool = False   # when True, invalid strings can't win
     emit_min_confidence: float = Field(default=0.0, ge=0.0, le=1.0)
 
@@ -357,6 +372,67 @@ class HardCaseConfig(BaseModel):
     flag_disagreement_above: float = 0.35
 
 
+class FaceConfig(BaseModel):
+    """The persons watchlist's face stage (`ailab/face`).
+
+    It runs only on a camera the registry tags `analytics:faces` — never on a
+    junction camera by default, where faces are a few pixels across and the
+    CPU is wanted for plates. Defaults below were set against the persons demo
+    footage; see docs/BUILD_STATE.md for the measured similarity distributions.
+
+    The match policy here is a *floor*. The API publishes its own policy with
+    the gallery and the stricter of the two applies, so a camera can be made
+    more careful locally and never less careful than the platform allows.
+    """
+
+    #: Where `face_detection_yunet_2023mar.onnx` and
+    #: `face_recognition_sface_2021dec.onnx` live (fetched by
+    #: scripts/fetch_models.sh). Relative to the lab root unless absolute; the
+    #: worker points it at its mounted /models.
+    models_dir: str = "models"
+    #: At most this many analysed frames a second, per camera. A face is in
+    #: view for seconds at walking pace, so two looks a second is evidence
+    #: enough for agreement and costs a fraction of a core.
+    max_fps: float = Field(default=2.0, gt=0.0, le=10.0)
+    #: YuNet's own score floor for calling something a face.
+    detect_score: float = Field(default=0.80, ge=0.0, le=1.0)
+    #: Detection runs on the frame shrunk to this longer side (alignment and
+    #: embedding use the full frame), so cost does not grow with resolution.
+    #: 960 still puts a `min_face_px` face from a 1080p frame at ~28 px in
+    #: the detector's input, inside YuNet's range. Measured single-threaded on
+    #: the persons demo clip (1080p, a loaded host): 216 ms at 1280, 91 ms at
+    #: 960, 42 ms at 640, every size finding all three faces in every frame.
+    detect_max_side: int = Field(default=960, ge=160)
+    #: Faces smaller than this (their shorter side, in source pixels) are
+    #: skipped before any embedding is computed: SFace aligns to 112x112, and a
+    #: face upscaled several times into it produces an embedding that is
+    #: closer to every other face than it should be. On the demo clip, faces of
+    #: 45-60 px still scored 0.655+ against their own reference and at most
+    #: 0.221 against anyone else's; below that it was not measured.
+    min_face_px: int = Field(default=56, ge=16)
+    #: Cosine similarity a frame must reach. SFace's published operating point
+    #: is 0.363; a watchlist compares one face against every passer-by, so the
+    #: platform starts stricter. On the demo clip (3 people, 61 frames each,
+    #: reference cut from the clip's last frame) the same person scored
+    #: 0.581-0.963 and a different person -0.035-0.286, so 0.45 sits in the gap
+    #: with room on both sides. Three people is not a validation set: this is
+    #: the operating point the demo was checked at, not a measured error rate.
+    threshold: float = Field(default=0.45, ge=0.0, le=1.0)
+    #: Analysed frames of one face that must agree on one entry.
+    min_frames: int = Field(default=2, ge=1)
+    #: How far the best entry must lead the next-closest.
+    min_margin: float = Field(default=0.05, ge=0.0, le=1.0)
+    #: A face not seen for this long has left; its track and any evidence held
+    #: for it are dropped.
+    max_gap_s: float = Field(default=2.5, gt=0.0)
+    #: The same person is announced on the same camera at most once per this.
+    cooldown_s: float = Field(default=60.0, ge=0.0)
+    #: Context around the face in the uploaded crop, as a fraction of its size.
+    crop_margin: float = Field(default=0.25, ge=0.0, le=1.0)
+    #: The uploaded crop's longer side is capped at this.
+    crop_max_side: int = Field(default=256, ge=64)
+
+
 class RunConfig(BaseModel):
     """A complete, reproducible experiment definition."""
 
@@ -372,6 +448,7 @@ class RunConfig(BaseModel):
     output: OutputConfig = Field(default_factory=OutputConfig)
     stream: StreamConfig = Field(default_factory=StreamConfig)
     hard_cases: HardCaseConfig = Field(default_factory=HardCaseConfig)
+    faces: FaceConfig = Field(default_factory=FaceConfig)
 
     @model_validator(mode="after")
     def _check_plate_classes(self) -> RunConfig:

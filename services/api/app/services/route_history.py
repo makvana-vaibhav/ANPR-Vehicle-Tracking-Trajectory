@@ -85,6 +85,16 @@ def _has_advanced(route: correlator.Route, previous: VehicleTrack | None) -> boo
 
 
 async def snapshot(session: AsyncSession) -> dict[str, Any]:
+    """Persist changed journeys and score their new legs; see `_snapshot`.
+
+    Inside a dedup unit: an anomaly claimed in Redis by a cycle whose commit
+    then fails is released, so the next cycle can still raise it.
+    """
+    async with alerts.deduper.unit():
+        return await _snapshot(session)
+
+
+async def _snapshot(session: AsyncSession) -> dict[str, Any]:
     """Persist journeys that have changed since their last snapshot.
 
     Also the trajectory-anomaly producer (P5): a journey that has genuinely

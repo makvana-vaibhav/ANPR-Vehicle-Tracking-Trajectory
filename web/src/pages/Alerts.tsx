@@ -47,6 +47,7 @@ import {
 import { Link, useSearchParams } from 'react-router-dom'
 
 import PlateCrop from '@/components/PlateCrop'
+import RegistryCard from '@/components/RegistryCard'
 import { Skeleton, SkeletonRows } from '@/components/Skeleton'
 import { useToast } from '@/components/Toast'
 import {
@@ -70,7 +71,14 @@ import * as api from '@/lib/api'
 import { alarmKind, alarmTitle, type AlarmKind } from '@/lib/alarms'
 import { PERMISSIONS } from '@/lib/permissions'
 import { spacedPlate } from '@/lib/plates'
-import type { Alert, AlertReason, AlertStatus, Camera, WatchlistEntry } from '@/lib/types'
+import type {
+  Alert,
+  AlertReason,
+  AlertStatus,
+  Camera,
+  PersonMatchEvidence,
+  WatchlistEntry,
+} from '@/lib/types'
 
 /**
  * One page of the queue. The API caps a page at 200; an open queue is rarely
@@ -179,6 +187,8 @@ function guidanceFor(alert: Alert): string {
       return 'Compare the crop with the plate. If they agree, dispatch a unit; if they do not, mark it a false positive and say why.'
     case 'possible_match':
       return 'Check the crop before anything else: one misread character is enough to raise this alarm against a plate that is not watched.'
+    case 'person_match':
+      return 'Compare the two faces yourself. Act only if you judge them to be the same person — a similarity score is not an identification. If they differ, mark it a false positive and say why.'
     case 'anomaly':
       return 'Open the journey and judge whether it needs a person. A route that differs from the usual is a fact about the route, not about who is driving.'
     case 'camera_down':
@@ -195,6 +205,10 @@ const FACTOR_LABEL: Record<string, string> = {
   rare_transition: 'Rare route',
   slow_transition: 'Slower than usual',
   fast_transition: 'Faster than usual',
+  face_similarity: 'Face similarity',
+  frames_agreed: 'Frames agreed',
+  next_closest_entry: 'Next-closest entry',
+  watchlist_entry: 'Persons watchlist',
 }
 
 /** A reason's factor slug, as a label. Unknown factors are shown, not hidden. */
@@ -392,6 +406,10 @@ function headlineOf(alert: Alert, entry: WatchlistEntry | undefined): string | n
   }
   if (alert.alert_type === 'possible_match' && entry) {
     return `Near ${spacedPlate(entry.plate_normalised)} · verify before acting${read}`
+  }
+  if (alert.alert_type === 'person_match') {
+    const score = typeof alert.similarity === 'number' ? ` · similarity ${alert.similarity.toFixed(2)}` : ''
+    return `Compare the faces before acting${score}`
   }
   const strongest = strongestReason(alert.reasons)
   if (strongest) return `${factorLabel(strongest.factor)} · ${strongest.detail}`
@@ -1290,6 +1308,8 @@ function AlarmDetail({
 }) {
   const open = OPEN.has(alert.status)
   const plate = alert.plate_normalised
+  const isPerson = alert.alert_type === 'person_match'
+  const person = usePersonMatch(isPerson ? alert.id : null, can(PERMISSIONS.personRead))
   const { cause, notes } = splitNotes(alert)
   const steps = NEXT_STEPS[alert.status] ?? []
   const allowed = steps.filter((step) => can(TRANSITION_PERMISSION[step.to]))
@@ -1338,7 +1358,9 @@ function AlarmDetail({
       <div className="flex flex-wrap items-start gap-4">
         <div className="flex min-w-0 flex-[1_1_320px] flex-col gap-4">
           {/* ── Evidence: the plate and the pixels it was read from ── */}
-          {plate ? (
+          {isPerson ? (
+            <PersonMatchPanel state={person} alert={alert} />
+          ) : plate ? (
             <div className="flex flex-col gap-3 rounded-lg border border-border bg-card p-4">
               <PlateChip plate={plate} size="xl" watched={watched} className="self-start" />
               {/* The photograph the alarm is about. An operator acting on a
@@ -1410,12 +1432,22 @@ function AlarmDetail({
             </div>
           )}
 
-          {plate && (
+          {/* What the registration says about this plate — owner district,
+              maker, colour, validity, linked FIRs — from the reference
+              registry, labelled as such. Only for a role that may search:
+              each lookup is audited, and an auditor would be refused. */}
+          {!isPerson && plate && can(PERMISSIONS.searchExecute) && (
+            <RegistryCard plate={plate} detectionId={alert.detection_id ?? undefined} />
+          )}
+
+          {(plate || isPerson) && (
             <div className="rounded-lg border border-border bg-card p-4">
               {/* An anomaly is scored as a journey advances, so its camera is
                   where the vehicle had got to — not where anything was read
                   wrongly. */}
-              <p className="eyebrow">{alert.alert_type === 'anomaly' ? 'Last seen at' : 'Read at'}</p>
+              <p className="eyebrow">
+                {alert.alert_type === 'anomaly' ? 'Last seen at' : isPerson ? 'Seen at' : 'Read at'}
+              </p>
               {camera ? (
                 <div className="mt-1.5">
                   <CameraFacts camera={camera} can={can} />
@@ -1432,8 +1464,9 @@ function AlarmDetail({
         </div>
 
         {/* ── What it is about ── */}
-        {(alert.watchlist_id || plate) && (
+        {(alert.watchlist_id || plate || isPerson) && (
           <div className="flex min-w-0 flex-[1_1_300px] flex-col gap-4">
+            {isPerson && <PersonEntryCard state={person} />}
             {alert.watchlist_id && (
               <div className="rounded-lg border border-border bg-card p-4">
                 <p className="eyebrow">Watchlist entry</p>
@@ -1740,4 +1773,205 @@ function CameraFacts({
       </div>
     </div>
   )
+}
+
+// ── A person match: the two faces, side by side ───────────────────────
+
+export interface PersonMatchState {
+  /** False when the role lacks `person.read`: the alarm is visible, the faces are not. */
+  allowed: boolean
+  loading: boolean
+  evidence: PersonMatchEvidence | null
+  error: string | null
+}
+
+/**
+ * The evidence behind one person-match alarm, read once per alarm opened.
+ *
+ * Not part of the alarm list on purpose: every read signs two-minute links to
+ * two photographs of a person and is written to the audit trail, so it happens
+ * when an operator opens the alarm — not for every card on every refresh.
+ */
+export function usePersonMatch(alertId: string | null, allowed: boolean): PersonMatchState {
+  const [state, setState] = useState<PersonMatchState>({
+    allowed,
+    loading: Boolean(alertId && allowed),
+    evidence: null,
+    error: null,
+  })
+  useEffect(() => {
+    if (!alertId || !allowed) {
+      setState({ allowed, loading: false, evidence: null, error: null })
+      return
+    }
+    let cancelled = false
+    setState({ allowed, loading: true, evidence: null, error: null })
+    api
+      .getPersonMatch(alertId)
+      .then((evidence) => {
+        if (!cancelled) setState({ allowed, loading: false, evidence, error: null })
+      })
+      .catch((err: unknown) => {
+        if (!cancelled) {
+          setState({
+            allowed,
+            loading: false,
+            evidence: null,
+            error: err instanceof Error ? err.message : String(err),
+          })
+        }
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [alertId, allowed])
+  return state
+}
+
+/** One face in the comparison, or a frame that says why there is none. */
+function FaceFrame({ url, label, missing }: { url: string | null; label: string; missing: string }) {
+  const [failed, setFailed] = useState(false)
+  return (
+    <figure className="flex min-w-0 flex-1 flex-col gap-1.5">
+      <div className="flex aspect-[3/4] w-full items-center justify-center overflow-hidden rounded-md border border-border bg-background">
+        {url && !failed ? (
+          <img src={url} alt={label} className="h-full w-full object-contain" onError={() => setFailed(true)} />
+        ) : (
+          <p className="max-w-[12rem] px-3 text-center text-xs leading-relaxed text-faint">
+            {url ? 'The link has lapsed — reopen the alarm to see this face again.' : missing}
+          </p>
+        )}
+      </div>
+      <figcaption className="eyebrow text-center">{label}</figcaption>
+    </figure>
+  )
+}
+
+function PersonMatchPanel({ state, alert }: { state: PersonMatchState; alert: Alert }) {
+  const evidence = state.evidence
+  const similarity = evidence?.similarity ?? alert.similarity ?? null
+  return (
+    <div className="flex flex-col gap-3 rounded-lg border border-priority-high/45 bg-card p-4">
+      {/* The rule this alarm exists under, stated where the faces are. */}
+      <p
+        role="note"
+        className="flex items-start gap-2 rounded-md border border-priority-high/45 bg-priority-high/10 px-3 py-2 text-[13px] font-medium leading-snug text-priority-high"
+      >
+        <Icon name="shield" size={16} className="mt-px" />
+        A person must confirm this match before anyone acts.
+      </p>
+      {!state.allowed ? (
+        <p className="text-[13px] text-muted-foreground">
+          Seeing the faces needs the <code className="font-mono text-foreground">person.read</code>{' '}
+          permission.
+        </p>
+      ) : state.loading ? (
+        <div className="flex gap-3" aria-busy="true">
+          <Skeleton className="aspect-[3/4] flex-1" />
+          <Skeleton className="aspect-[3/4] flex-1" />
+        </div>
+      ) : state.error ? (
+        <ErrorBanner>Could not read the faces: {state.error}</ErrorBanner>
+      ) : (
+        <div className="flex gap-3">
+          <FaceFrame
+            url={evidence?.person?.photo_url ?? null}
+            label="Enrolled reference"
+            missing={
+              evidence?.person?.photo_purged
+                ? 'The reference photo has passed its retention date.'
+                : 'No reference photo is held for this entry.'
+            }
+          />
+          <FaceFrame
+            url={evidence?.face_url ?? null}
+            label="Captured by the camera"
+            missing={
+              evidence?.face_purged
+                ? 'The captured face has passed its retention date, or never arrived.'
+                : 'The captured face could not be fetched.'
+            }
+          />
+        </div>
+      )}
+      <dl className="flex flex-wrap gap-x-5 gap-y-1 text-xs text-muted-foreground">
+        <div className="flex gap-1.5">
+          <dt>Similarity</dt>
+          <dd className="font-mono text-foreground">{similarity !== null ? similarity.toFixed(2) : '—'}</dd>
+        </div>
+        {evidence && (
+          <div className="flex gap-1.5">
+            <dt>Threshold</dt>
+            <dd className="font-mono">
+              {evidence.threshold.toFixed(2)}
+              <span className="text-faint"> (model {evidence.model_threshold.toFixed(3)})</span>
+            </dd>
+          </div>
+        )}
+        {evidence?.frames_agreed !== null && evidence?.frames_agreed !== undefined && (
+          <div className="flex gap-1.5">
+            <dt>Frames agreed</dt>
+            <dd className="font-mono">
+              {evidence.frames_agreed}
+              {evidence.frames_required ? <span className="text-faint"> of {evidence.frames_required} needed</span> : null}
+            </dd>
+          </div>
+        )}
+        <div>
+          <dt className="sr-only">Kind</dt>
+          <dd>Possible match — not an identification</dd>
+        </div>
+      </dl>
+    </div>
+  )
+}
+
+function PersonEntryCard({ state }: { state: PersonMatchState }) {
+  const person = state.evidence?.person ?? null
+  return (
+    <div className="rounded-lg border border-border bg-card p-4">
+      <p className="eyebrow">Persons watchlist entry</p>
+      {person ? (
+        <div className="mt-1.5 space-y-1">
+          <p className="text-[15px] font-medium">{person.display_name}</p>
+          <p className="text-[13px]">
+            {personCategoryLabel(person.category)} ·{' '}
+            <span className="font-mono text-[13px]">{person.case_ref}</span>
+          </p>
+          <p className="text-[13px] leading-relaxed text-muted-foreground">{person.purpose}</p>
+          {person.notes && <p className="text-xs text-muted-foreground">{person.notes}</p>}
+          <p className="text-xs text-faint">
+            Enrolled by {person.enrolled_by_username}
+            {person.approved_by_username ? `, approved by ${person.approved_by_username}` : ''} ·{' '}
+            {person.matchable ? `valid until ${api.formatIST(person.valid_until)} IST` : 'no longer matched'}
+          </p>
+        </div>
+      ) : (
+        <p className="mt-1.5 text-[13px] text-muted-foreground">
+          {!state.allowed
+            ? 'Reading the entry needs the person.read permission.'
+            : state.loading
+              ? 'Reading the entry…'
+              : state.error
+                ? 'The entry could not be read.'
+                : 'The entry this alarm names is no longer held.'}
+        </p>
+      )}
+      {state.allowed && (
+        <Link to="/persons" className="mt-2 inline-flex items-center gap-1 text-xs text-primary hover:underline">
+          Persons <Icon name="arrowRight" size={12} />
+        </Link>
+      )}
+    </div>
+  )
+}
+
+const PERSON_CATEGORY: Record<string, string> = {
+  missing: 'Missing person',
+  wanted: 'Wanted — warrant',
+  demo: 'Demo — fictional case',
+}
+
+function personCategoryLabel(category: string): string {
+  return PERSON_CATEGORY[category] ?? capitalise(category)
 }

@@ -31,6 +31,14 @@ once the detection expires. `evidence_expired()` exists so a screen can say
 "the evidence for this alert is past its retention date" rather than showing an
 operator a lookup failure that looks like a bug.
 
+**Crops behind an open alert survive their retention date.** Plate and vehicle
+crops are deleted after `retention_media_days` by `expire_crops`, a day at a
+time, because the worker writes them under `crops/<kind>/YYYY/MM/DD/`. A crop
+that an alert still being handled points at — its detection's `crop_key`, or
+any per-frame read crop recorded beside it — is kept until the alert is closed
+or marked a false positive: deleting the photograph an officer is about to act
+on would be the retention policy destroying evidence mid-case.
+
 **The audit log outlives everything else** — five years by default. It is the
 record of who looked at whom, which is exactly what an inquiry into misuse
 would need, and it must not be purgeable on the same schedule as the data it
@@ -41,16 +49,20 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+from collections.abc import Collection
 from dataclasses import dataclass, field
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import delete, func, select, text
+import aioboto3
+from botocore.config import Config
+from sqlalchemy import and_, delete, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.core.logging import get_logger
 from app.db.session import SessionLocal
+from app.models.enums import AlertStatus
 from app.models.intelligence import Alert, Detection
 from app.models.security import AuditLog
 
@@ -59,6 +71,22 @@ log = get_logger(__name__)
 #: How often the sweep runs. Daily: retention is measured in months, so a
 #: shorter interval buys nothing and a longer one lets an expiry sit for weeks.
 SWEEP_INTERVAL_S = 24 * 3600.0
+
+#: Where the worker writes plate and vehicle crops: `crops/<kind>/YYYY/MM/DD/`
+#: (`ai_worker/crops.py`). Face crops live in the persons bucket and are purged
+#: by the persons sweeper, not here.
+CROPS_PREFIX = "crops/"
+
+#: An alert in one of these states is still being handled, and the crops
+#: behind it are kept past their retention date.
+OPEN_ALERT_STATUSES = (
+    AlertStatus.NEW.value,
+    AlertStatus.ACKNOWLEDGED.value,
+    AlertStatus.DISPATCHED.value,
+)
+
+#: S3 DeleteObjects takes at most this many keys per call.
+DELETE_BATCH = 1000
 
 #: Hypertables, and which setting governs each.
 HYPERTABLES = {
@@ -75,6 +103,10 @@ class SweepResult:
     dry_run: bool
     chunks_dropped: dict[str, int] = field(default_factory=dict)
     audit_rows_deleted: int = 0
+    #: Expired plate/vehicle crops removed (or, on a dry run, that would be).
+    crops_deleted: int = 0
+    #: Expired crops kept because an open alert still points at them.
+    crops_kept_for_open_alerts: int = 0
     errors: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
@@ -83,8 +115,19 @@ class SweepResult:
             "dry_run": self.dry_run,
             "chunks_dropped": dict(self.chunks_dropped),
             "audit_rows_deleted": self.audit_rows_deleted,
+            "crops_deleted": self.crops_deleted,
+            "crops_kept_for_open_alerts": self.crops_kept_for_open_alerts,
             "errors": list(self.errors),
         }
+
+
+@dataclass(slots=True)
+class CropSweep:
+    """What one pass over the crop store found."""
+
+    deleted: int = 0
+    kept_for_open_alerts: int = 0
+    days_expired: list[str] = field(default_factory=list)
 
 
 def cutoff_for(days: int) -> datetime:
@@ -140,6 +183,132 @@ async def _expire_audit(session: AsyncSession, days: int, dry_run: bool) -> int:
     return doomed
 
 
+async def protected_crop_keys(session: AsyncSession) -> set[str]:
+    """Every crop an open alert still points at.
+
+    The detection's own `crop_key`, plus the per-frame read crops recorded in
+    `ocr_raw.reads` — an operator verifying a plate looks at those too. Alerts
+    are few and the join is on the detections primary key, so this is cheap.
+    """
+    rows = await session.execute(
+        select(Detection.crop_key, Detection.ocr_raw)
+        .join(
+            Alert,
+            and_(Alert.detection_id == Detection.id, Alert.detection_ts == Detection.ts),
+        )
+        .where(Alert.status.in_(OPEN_ALERT_STATUSES))
+    )
+    keys: set[str] = set()
+    for crop_key, ocr_raw in rows.all():
+        if crop_key:
+            keys.add(crop_key)
+        reads = ocr_raw.get("reads") if isinstance(ocr_raw, dict) else None
+        for read in reads or []:
+            if isinstance(read, dict) and isinstance(read.get("crop"), str) and read["crop"]:
+                keys.add(read["crop"])
+    return keys
+
+
+def _s3_kwargs() -> dict[str, Any]:
+    return {
+        "endpoint_url": settings.minio_url,
+        "aws_access_key_id": settings.minio_root_user,
+        "aws_secret_access_key": settings.minio_root_password,
+        "config": Config(signature_version="s3v4", retries={"max_attempts": 2}),
+    }
+
+
+async def _subprefixes(s3: Any, bucket: str, prefix: str) -> list[str]:
+    """The next level of `prefix/` — what a directory listing would show."""
+    found: list[str] = []
+    paginator = s3.get_paginator("list_objects_v2")
+    async for page in paginator.paginate(Bucket=bucket, Prefix=prefix, Delimiter="/"):
+        found.extend(entry["Prefix"] for entry in page.get("CommonPrefixes", []))
+    return found
+
+
+def _segment(prefix: str) -> str:
+    return prefix.rstrip("/").rsplit("/", 1)[-1]
+
+
+async def _expired_days(s3: Any, bucket: str, kind_prefix: str, cutoff: date) -> list[str]:
+    """Day prefixes under `crops/<kind>/` strictly older than `cutoff`.
+
+    Years and months entirely after the cutoff are not descended into, so the
+    listing costs a handful of calls however much recent evidence there is.
+    A segment that is not a number is not ours to judge, and is left alone.
+    """
+    days: list[str] = []
+    for year_prefix in await _subprefixes(s3, bucket, kind_prefix):
+        year = _segment(year_prefix)
+        if not year.isdigit() or int(year) > cutoff.year:
+            continue
+        for month_prefix in await _subprefixes(s3, bucket, year_prefix):
+            month = _segment(month_prefix)
+            if not month.isdigit() or (int(year), int(month)) > (cutoff.year, cutoff.month):
+                continue
+            for day_prefix in await _subprefixes(s3, bucket, month_prefix):
+                day = _segment(day_prefix)
+                try:
+                    when = date(int(year), int(month), int(day))
+                except ValueError:
+                    continue
+                if when < cutoff:
+                    days.append(day_prefix)
+    return days
+
+
+async def expire_crops(
+    cutoff: datetime,
+    *,
+    dry_run: bool,
+    kinds: Collection[str] | None = None,
+    bucket: str | None = None,
+) -> CropSweep:
+    """Delete plate and vehicle crops from days before `cutoff`.
+
+    Whole days, because the worker partitions crops by the day it wrote them:
+    a crop goes within a day of its retention date, never before it. Crops an
+    open alert points at are kept (`protected_crop_keys`). `kinds` narrows the
+    sweep to some `crops/<kind>/` trees — for tests; the scheduled sweep takes
+    every kind it finds.
+    """
+    result = CropSweep()
+    bucket = bucket or settings.minio_bucket
+    async with SessionLocal() as session:
+        protected = await protected_crop_keys(session)
+
+    async with aioboto3.Session().client("s3", **_s3_kwargs()) as s3:
+        for kind_prefix in await _subprefixes(s3, bucket, CROPS_PREFIX):
+            if kinds is not None and _segment(kind_prefix) not in kinds:
+                continue
+            for day_prefix in await _expired_days(s3, bucket, kind_prefix, cutoff.date()):
+                result.days_expired.append(day_prefix)
+                doomed: list[str] = []
+                paginator = s3.get_paginator("list_objects_v2")
+                async for page in paginator.paginate(Bucket=bucket, Prefix=day_prefix):
+                    for obj in page.get("Contents", []):
+                        if obj["Key"] in protected:
+                            result.kept_for_open_alerts += 1
+                        else:
+                            doomed.append(obj["Key"])
+                for start in range(0, len(doomed), DELETE_BATCH):
+                    batch = doomed[start : start + DELETE_BATCH]
+                    if not dry_run:
+                        response = await s3.delete_objects(
+                            Bucket=bucket,
+                            Delete={"Objects": [{"Key": key} for key in batch], "Quiet": True},
+                        )
+                        failed = response.get("Errors", [])
+                        if failed:
+                            raise RuntimeError(
+                                f"{len(failed)} crop deletions refused under {day_prefix}: "
+                                f"{failed[0].get('Code')}"
+                            )
+                    result.deleted += len(batch)
+    return result
+
+
 async def sweep(dry_run: bool = False) -> SweepResult:
     """Delete everything past its retention date."""
     result = SweepResult(ran_at=datetime.now(UTC), dry_run=dry_run)
@@ -174,13 +343,26 @@ async def sweep(dry_run: bool = False) -> SweepResult:
         log.warning("retention.audit_failed", error=str(exc))
         result.errors.append(f"audit_log: {exc}")
 
+    # Plate and vehicle crops. Object storage being down must not cost the
+    # database its sweep, so this is last and on its own.
+    try:
+        crops = await expire_crops(cutoff_for(settings.retention_media_days), dry_run=dry_run)
+        result.crops_deleted = crops.deleted
+        result.crops_kept_for_open_alerts = crops.kept_for_open_alerts
+    except Exception as exc:
+        log.warning("retention.crops_failed", error=str(exc), exc_info=True)
+        result.errors.append(f"crops: {exc}")
+
     log.info(
         "retention.swept",
         dry_run=dry_run,
         chunks=result.chunks_dropped,
         audit_rows=result.audit_rows_deleted,
+        crops_deleted=result.crops_deleted,
+        crops_kept_for_open_alerts=result.crops_kept_for_open_alerts,
         errors=len(result.errors),
         detections_days=settings.retention_detections_days,
+        media_days=settings.retention_media_days,
         audit_days=settings.retention_audit_days,
     )
     return result

@@ -72,6 +72,39 @@ class Settings(BaseSettings):
     minio_secure: bool = False
     minio_public_endpoint: str = "http://localhost:9000"
 
+    # ── Persons watchlist (face matching) ─────────────────────────────
+    # Reference photos and matched face crops live in their own bucket, which
+    # is never given an anonymous-read policy: every object in it is a face,
+    # and the only way to see one is a short-lived URL from an audited
+    # `person.read` endpoint. See docs/SECURITY.md § Persons watchlist.
+    minio_persons_bucket: str = "nagarnetra-persons"
+    #: Where the YuNet and SFace weights are mounted (ai-lab/models). The API
+    #: embeds reference photos with the very code and models the cameras use.
+    face_models_dir: Path = Path("/models")
+    #: The platform's match policy, published with the gallery. A camera can
+    #: be stricter, never looser (`ailab.face.gallery.MatchPolicy.stricter`).
+    #: 0.45 is stricter than SFace's published 0.363; see ai-lab FaceConfig
+    #: for what it was checked against.
+    person_match_threshold: float = Field(default=0.45, ge=0.0, le=1.0)
+    person_match_min_frames: int = Field(default=2, ge=1)
+    person_match_min_margin: float = Field(default=0.05, ge=0.0, le=1.0)
+    #: A repeat match on the same entry at the same camera within this window
+    #: folds into the alert already raised rather than raising another.
+    person_match_dedup_seconds: int = Field(default=300, ge=0)
+    #: Purpose limitation: an entry lapses after this many days unless the
+    #: enroller asks for less, and can never be asked for more than the max.
+    person_default_valid_days: int = Field(default=30, ge=1)
+    person_max_valid_days: int = Field(default=90, ge=1)
+    #: Reference photo constraints at enrolment.
+    person_photo_max_bytes: int = Field(default=8_000_000, ge=10_000)
+    person_min_face_px: int = Field(default=80, ge=24)
+    #: How long a published gallery stays usable by a worker that can no
+    #: longer refresh it. Past this a cut-off worker matches nothing.
+    person_gallery_ttl_seconds: int = Field(default=900, ge=60)
+    #: Photos of retired or rejected entries, and the face crops on person
+    #: match alerts, are deleted from object storage after this many days.
+    retention_person_media_days: int = Field(default=90, ge=1)
+
     # ── Search ────────────────────────────────────────────────────────
     opensearch_url: str = "http://opensearch:9200"
     opensearch_index_detections: str = "detections"
@@ -178,6 +211,16 @@ class Settings(BaseSettings):
     # from a government camera network.
     sandbox_rtsp_username: str = ""
     sandbox_rtsp_password: str = ""
+
+    # ── Pursuit (app/services/pursuit.py) ─────────────────────────────
+    # Mirrors of the AI workers' own settings, read from the same `.env`, so a
+    # pursuit never pins more cameras than a worker opens for focus
+    # (`FOCUS_MAX_STREAMS`, the worker's default 3) and spends no pin on a
+    # camera the workers analyse continuously anyway. A value set only in
+    # docker-compose's worker block is not visible here — set it in `.env`.
+    focus_max_streams: int = Field(default=3, ge=0)
+    ai_worker_always_on: str = ""
+    ai_worker_pinned: str = ""
 
     # ── Rate limiting ─────────────────────────────────────────────────
     # Counted in Redis, so the limit is per-deployment rather than per-replica.

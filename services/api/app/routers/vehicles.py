@@ -13,22 +13,25 @@ from __future__ import annotations
 
 import uuid
 from datetime import UTC, datetime, timedelta
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from pydantic import BaseModel, Field
 from sqlalchemy import select, text
 
 from app.api.deps import CurrentUserDep, DbSession
 from app.core.logging import get_logger
 from app.core.rbac import Permission, require_permission
-from app.models.intelligence import Watchlist
+from app.middleware.audit import RECORDED_EXPLICITLY
+from app.models.intelligence import Detection, Watchlist
+from app.models.registry import Camera
 from app.schemas.intelligence import (
     PlateSearchResponse,
     PlateSearchResult,
     WatchlistHit,
     normalise_plate,
 )
-from app.services import audit, correlator
+from app.services import audit, candidates, correlator
 
 router = APIRouter(prefix="/api/v1/vehicles", tags=["vehicles"])
 log = get_logger(__name__)
@@ -37,6 +40,10 @@ log = get_logger(__name__)
 #: question an operator usually has ("where has it been today?") without
 #: scanning a hypertable that grows forever.
 DEFAULT_WINDOW = timedelta(days=1)
+
+#: Candidate sightings one route may include. An analyst weighing more than
+#: this is no longer adding misreads to a journey but building a different one.
+MAX_INCLUDED = 20
 
 
 def _window(since: datetime | None, until: datetime | None) -> tuple[datetime, datetime | None]:
@@ -58,6 +65,16 @@ async def vehicle_route(
     fmt: Annotated[
         str, Query(alias="format", pattern="^(json|geojson)$", description="json | geojson")
     ] = "json",
+    include: Annotated[
+        list[uuid.UUID] | None,
+        Query(
+            max_length=MAX_INCLUDED,
+            description=(
+                "Candidate sightings an analyst included (detection ids). Each joins the "
+                "route as a separate visit marked `candidate`, never as a confirmed read."
+            ),
+        ),
+    ] = None,
 ) -> dict[str, Any]:
     normalised = normalise_plate(plate)
     if len(normalised) < 4:
@@ -67,7 +84,9 @@ async def vehicle_route(
         )
 
     window_from, window_to = _window(since, until)
-    route = await correlator.build_route(session, normalised, window_from, window_to)
+    route = await candidates.route_with_candidates(
+        session, normalised, window_from, window_to, include or ()
+    )
 
     # Reconstructing a vehicle's movements is the most privacy-sensitive read
     # this system offers, so it is audited explicitly rather than left to the
@@ -80,6 +99,7 @@ async def vehicle_route(
             "action": "route",
             "from": window_from.isoformat(),
             "to": window_to.isoformat() if window_to else None,
+            **({"include": [str(i) for i in include]} if include else {}),
         },
         result_count=len(route.hops),
     )
@@ -87,6 +107,155 @@ async def vehicle_route(
     if fmt == "geojson":
         return route.to_geojson()
     return route.to_dict()
+
+
+@router.get(
+    "/{plate}/candidates",
+    dependencies=[Depends(require_permission(Permission.SEARCH_EXECUTE))],
+    summary="Sightings that may be this vehicle, read as a slightly different plate",
+)
+async def vehicle_candidates(
+    plate: str,
+    session: DbSession,
+    user: CurrentUserDep,
+    request: Request,
+    since: Annotated[datetime | None, Query(description="UTC lower bound")] = None,
+    until: Annotated[datetime | None, Query(description="UTC upper bound")] = None,
+    limit: Annotated[int, Query(ge=1, le=100)] = candidates.DEFAULT_LIMIT,
+) -> dict[str, Any]:
+    """Reads one or two characters away from the plate — or a few common
+    misreadings away — each with plain reasons: which characters differ, how
+    confidently it was read, whether it fits the confirmed route in time and
+    space by the correlator's own rules, and what kind of vehicle it was.
+
+    Nothing here changes the route. An analyst includes or dismisses each
+    candidate (`POST …/candidates/decisions`), and the route takes the
+    included ones as `include` — always marked as candidates.
+    """
+    normalised = normalise_plate(plate)
+    if len(normalised) < 4:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="A plate needs at least four alphanumeric characters to search on.",
+        )
+    window_from, window_to = _window(since, until)
+    report = await candidates.find_candidates(
+        session, normalised, window_from, window_to, limit=limit
+    )
+
+    # One row for this request, naming what was asked: a search for reads
+    # *near* a plate is still a search for that vehicle.
+    await audit.record_plate_search(
+        request=request,
+        user=user,
+        query=normalised,
+        filters={
+            "action": "candidates",
+            "from": window_from.isoformat(),
+            "to": window_to.isoformat() if window_to else None,
+        },
+        result_count=len(report.visits),
+    )
+    setattr(request.state, RECORDED_EXPLICITLY, True)
+    return report.to_dict()
+
+
+class CandidateDecision(BaseModel):
+    """An analyst's call on one candidate sighting."""
+
+    detection_id: uuid.UUID
+    detection_ts: datetime = Field(description="The sighting's ts: detections are keyed by both")
+    decision: Literal["include", "dismiss", "undo"]
+    note: str | None = Field(default=None, max_length=500)
+
+
+@router.post(
+    "/{plate}/candidates/decisions",
+    status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(require_permission(Permission.SEARCH_EXECUTE))],
+    summary="Include a candidate sighting in a journey, dismiss it, or undo either",
+)
+async def decide_candidate(
+    plate: str,
+    body: CandidateDecision,
+    session: DbSession,
+    user: CurrentUserDep,
+    request: Request,
+) -> dict[str, Any]:
+    """Record a deliberate decision about a candidate, in the audit trail.
+
+    The decision itself travels with the investigation — in the screen's
+    address, so a link carries it — and this row is the record of who made
+    it, when, and on what: the plate asked about, the plate actually read,
+    and how they differ. Refused for a read that is not a candidate for this
+    plate, so the trail never records a decision about something else.
+    """
+    normalised = normalise_plate(plate)
+    if len(normalised) < 4:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="A plate needs at least four alphanumeric characters to search on.",
+        )
+    row = (
+        await session.execute(
+            select(Detection.plate_normalised, Detection.plate_confidence, Camera.camera_code)
+            .join(Camera, Camera.id == Detection.camera_id, isouter=True)
+            .where(Detection.id == body.detection_id, Detection.ts == body.detection_ts)
+        )
+    ).first()
+    if row is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No such sighting")
+    read_as = row[0] or ""
+    if read_as == normalised:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"That sighting is a read of {normalised} itself, not a candidate.",
+        )
+    match = candidates.near(normalised, read_as)
+    if match is None:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"{read_as or 'An unread plate'} is not close enough to {normalised} "
+            "to be a candidate for it.",
+        )
+
+    decided_at = datetime.now(UTC)
+    await audit.record(
+        action=f"candidate.{body.decision}",
+        user=user,
+        request=request,
+        resource_type="detection",
+        resource_id=body.detection_id,
+        params={
+            "plate": normalised,
+            "read_as": read_as,
+            "difference": match.describe(),
+            "camera_code": row[2],
+            "seen_at": body.detection_ts.isoformat(),
+            "read_confidence": round(float(row[1] or 0.0), 4),
+            "note": body.note,
+        },
+    )
+    setattr(request.state, RECORDED_EXPLICITLY, True)
+    log.info(
+        "vehicles.candidate_decision",
+        plate=normalised,
+        read_as=read_as,
+        decision=body.decision,
+        detection_id=str(body.detection_id),
+        by=user.username,
+    )
+    return {
+        "plate": normalised,
+        "detection_id": str(body.detection_id),
+        "detection_ts": body.detection_ts.isoformat(),
+        "decision": body.decision,
+        "read_as": read_as,
+        "camera_code": row[2],
+        "difference": match.describe(),
+        "decided_by": user.username,
+        "decided_at": decided_at.isoformat(),
+    }
 
 
 @router.get(

@@ -66,7 +66,7 @@ Corrected 9 Sep 2026: this table previously disagreed with its own body, marking
 | 10 | Scale profile & 80,000-camera proof | ✅ complete — 2,774 events/s, 0 failures |
 | 11 | Documentation & submission artifacts | ✅ complete, but **written for the old brief** — P12 |
 | 12 | Demo hardening | ✅ complete for the old brief's demo — **P6 redoes it for the 8 PS steps** |
-| 13 | Person & face detection, crowd counting | ⬜ **out of scope for SIH26127** |
+| 13 | Person & face detection, crowd counting | 🟡 face matching against a four-eyes persons watchlist built (12 Oct — *The persons watchlist* below); person detection and crowd counting not |
 | 14 | Government database integration (VAHAN/SARTHI) | ⬜ **out of scope for SIH26127** |
 
 ---
@@ -1093,7 +1093,7 @@ MinIO crops under the CSP).
 **Open:** the traffic endpoint's 20,000-row read is oldest-first and unflagged;
 a plate search writes four audit rows; `_anchored_plate` in
 `ai-lab/ailab/stream/runner.py` can scale a plate box to a whole car when one
-detection merges two vehicles.
+detection merges two vehicles. *(Fixed 12 Oct: "ANPR accuracy and latency, measured".)*
 
 ---
 
@@ -1147,6 +1147,245 @@ alarm. Runbooks: `docs/DEMO_SCRIPT.md` rewritten for the live test,
 **Open:** the grid's PTS jitter (above); 16 analytics tests skip on a registry
 with one corridor-tagged camera; the four inactive `test.*` accounts from
 earlier runs cannot be deleted (they acted) and stay deactivated.
+
+---
+
+## ANPR accuracy and latency, measured ✅ (12 Oct; deployed by the 11:02 IST worker restart)
+
+Acts on `docs/research/ANPR_ACCURACY_LATENCY.md`. Its scripts, labelled crops
+and model copies lived in `/tmp` and were lost at the 06:29 reboot, so the
+evaluation was rebuilt **in the repo**: `ai-lab/scripts/{fetch_eval_crops,
+label_sheets, ocr_bench, profile_clip, bench_fallback, bench_reader, bus_window,
+derive_models}.py`, with crops and labels under gitignored `ai-lab/datasets/`.
+Numbers: `ai-lab/FINDINGS.md` §9 (accuracy), `ai-lab/PERFORMANCE.md` §12 (cost),
+`docs/PERFORMANCE.md` §8, `docs/GPU.md` (native worker).
+
+**The evaluation set.** 160 grid crops (11 Oct night, one per vehicle) + 50
+CAM-DEMO-01 crops, pulled through the API, labelled blind by two independent AI
+labellers and adjudicated mechanically: 54 gold, 44 agreed, 17 disputed
+(excluded). AI labels on a set biased to partly-readable plates: it ranks
+options, it does not certify accuracy.
+
+| Change | Measured effect (worker image unless stated) | Where |
+|---|---|---|
+| 1. OCR reads the raw crop (`preprocess.variants: [raw]`) | Grid gold 42 → 47/54; gold+agreed 50 → 61/98 (McNemar p=0.035); committed reads right 91% → 92%; demo clip 8 → 10 plates right, 3 → 0 wrong; OCR 64 → 25 ms/crop | `configs/stream.yaml` |
+| 2. Bounded PP-OCR fallback (128 px short side, no angle classifier) | 246 → 56 ms per firing; rendered two-row plates still 3/3 | `OcrConfig`, `ocr/rapid.py` |
+| 5. Decode all, convert only analysed frames | H.264 0.140 → 0.070 cores per open stream (H.265 0.154 → 0.121); paused streams 0.103 → 0.063 | `stream/reader.py` |
+| 6. Drop one leading junk char only if that makes a valid plate | No crop in this set affected (research: +1/60); unit-tested | `grammar.drop_leading_junk` |
+| 7. int8 plate detector | 24.2 → 8.6 ms/search, but finds 33/35 of fp32's plates (held-out) — **not deployed**; opt-in `stream_int8` | `scripts/derive_models.py` |
+| 4. Native CoreML worker | Harness 0.30 → 0.10–0.13 core-s/frame, same plates. Live: every frame analysed (14.9 fps) for 0.58 cores, capture-to-event p50 25 ms vs 241 — but it misreads `BG65USJ` every loop and never reads `NA54KGJ`, which Docker does: not switched over (docs/GPU.md) | `make worker-native` (opt-in) |
+
+**Live, after the 11:02 restart (CAM-DEMO-01, whose clip loops identically, so before and after are comparable; `ai-lab/scripts/bus_window.py`).** Old code, 27 min: 987 valid plates, 70% in the labelled set, 27% not (86 distinct strings), 24% resting on a single read, median 2 reads, capture-to-event p50 330 ms. New code, 6.5 min: 249 valid, **79% in the set, 13% not** (31 distinct), **9% single-read, median 4 reads**, p50 241 ms. The grid before/after still needs equal night windows.
+
+**Bugs fixed, with regression tests.**
+
+* **PTS jitter rebuilt the tracker** (1,453 times on 11 Oct). A backward step is
+  now held and its frame withheld; it is a cut only if the stream stays on the
+  earlier timeline for 1 s. Tests use sequences from the workers' own logs
+  (`35.64 → 34.36`, `391.48 → 383.92`, …) and a real 20 s loop. Also fixed in
+  passing: a reconnect is now a cut with a clock that keeps rising (it used to
+  restart near zero, so nothing in view was retired), and a cut on a frame that
+  is replaced before consumption is no longer lost.
+* **`_anchored_plate`** drew a car-sized plate when a detection merged two
+  vehicles (live: a bus box `[1088,243,1296,430]` with plate `[1085,244,1302,438]`).
+  Scaled by the box side that did not jump, held to the edge that stayed, never
+  over 60% × 40% of the vehicle.
+* **`LoadedRun.hard_case_index()`** returned the index's keys; `ailab report`
+  and `ailab mine` work again, and the two `type: ignore` in `cli.py` are gone.
+
+**Also built.** The native worker reaches our gateway as `localhost`
+(`ROSTER_GATEWAY_HOST` rewrite in registry discovery); `fetch_models.sh
+--derived/--int8` with SHA-256 pins (fp32 detector `f866cb78…`, identical to the
+research's file; static plate `315568ce…`; int8 `25e9f127…`).
+
+**Verified.** ai-lab 301 passed in the worker image (natively 294 + 1
+macOS-only face-thread failure, not from this work); worker 147 passed;
+`make lint-anpr` clean (ruff + mypy, 79 files).
+
+**Still open.** The live grid before/after (`bus_window.py`, equal windows, same
+time of night) — after the 11:02 restart; a human-labelled set to quote
+accuracy from; two-row plates (3 labelled) and motorcycles; int8 recall at a
+re-tuned threshold on a larger set; native thermals over hours.
+
+---
+
+## The persons watchlist: face matching behind four eyes ✅ (code) · edge stage awaits a worker restart
+
+12 Oct, branch `sentinel-gj`. The Sentinel brief asks for watchlists of
+"wanted or missing persons" beside vehicles. Approved by the owner with these
+conditions, each built as a control rather than a convention: supervisor
+approval to enrol, a full audit trail, permissively licensed models, and a
+human confirming every match — the system never acts on its own.
+
+**Models.** OpenCV Zoo **YuNet** (`face_detection_yunet_2023mar.onnx`, MIT,
+©2020 Shiqi Yu) and **SFace** (`face_recognition_sface_2021dec.onnx`,
+Apache-2.0), run by `cv2.FaceDetectorYN` / `cv2.FaceRecognizerSF` (OpenCV
+4.11.0 in the worker, the lab and now the API image). Licences read from
+`opencv_zoo/models/*/LICENSE`; fetched by `ai-lab/scripts/fetch_models.sh` from
+URLs pinned to the opencv_zoo commits that last changed them, SHA-256 pinned
+(`8f2383e4…` YuNet, `0ba9fbfa…` SFace); gitignored under `ai-lab/models/`.
+OpenCV DNN has no per-network thread count — it uses OpenCV's process-wide
+pool — so `ailab.face.models.FaceModels` calls `runtime.apply_opencv_threads()`
+before creating either network (one thread when several cameras share the
+worker; tested).
+
+**Code.**
+
+| Where | What |
+|---|---|
+| `ai-lab/ailab/face/` | `models` (YuNet+SFace inside the budget), `enrol` (one photo → one embedding or a refusal: header-checked JPEG/PNG ≤ 40 MP, exactly one face, ≥ 80 px, re-encoded without EXIF), `gallery` (the published active set + policy; expires), `matching` (`FaceWatch`: face tracks and multi-frame agreement), `stage` (≤ 2 fps, min face 56 px), `events` (`ailab.person.match.v1`) |
+| `ailab/stream/runner.py` | `face_stage=` and `vehicles=False` (faces only: no vehicle pipeline at all) |
+| `services/ai-worker` | `gallery.GalleryCache` (Redis, refreshed every 10 s), `face_pool.FaceModelsPool`, face crops → private bucket by key prefix (`crops.bucket_for`), roster `analytics` field |
+| migration `0009` | `person_watchlist` (status lifecycle, `valid_until`, purpose, case ref, photo key + SHA-256, embeddings, who enrolled/approved/rejected/retired) with **CHECK constraints for four-eyes** and "active ⇒ approved"; `alerts.person_id / similarity / face_crop_key` |
+| `app/routers/persons.py` | enrol (multipart) · approve/reject (four-eyes) · retire · list · get · gallery status · match evidence. Every endpoint writes an explicit `person.*` audit row, reads included, naming every photo it signed a link for |
+| `app/services/persons.py` | gallery publish (`nagarnetra:persons:gallery`: ids, categories, case refs, embeddings, policy — no photo, no name; TTL 15 min), `person.match` → `person_match` alert (policy re-checked server-side, entry re-checked *now*, dedupe 5 min per entry+camera, reasons), sweeper (expiry each minute, media retention hourly) |
+| `app/services/person_media.py` | the private `nagarnetra-persons` bucket: refuses to store a face if the bucket ever acquires a policy; 2-minute signed links |
+| RBAC | `person.read` (all human roles), `person.enrol` / `.approve` / `.retire` (admin, supervisor) |
+| web | `/persons` in Alarms (list with thumbnails, enrol drawer with preview and required purpose, approval queue that shows *why* you cannot approve your own entry, retire/reject with a reason); Alarms renders a `person_match` with both faces side by side, similarity against threshold, frames agreed, and "A person must confirm this match before anyone acts"; Command's dock carries the same line |
+
+**Measured on the demo clip** (`persons_demo.mp4`: "Officemates Walking on the
+Street", olia danilevich, Pexels License — three people walking toward a
+camera, 12.3 s, 1080p15). References cut from the last frame; 61 frames per
+person every 3rd frame:
+
+| | same person | anyone else |
+|---|---|---|
+| cosine similarity | 0.581 – 0.963 (faces 45–60 px: ≥ 0.655) | −0.035 – 0.286 |
+
+Threshold **0.45** (stricter than SFace's published 0.363) sits in the gap with
+≥ 0.13 either side, and two frames must agree. Three people is not a
+validation set: this is the point the demo was checked at, not an error rate.
+YuNet single-threaded on a loaded host: 216 ms at 1280 px input, 91 ms at 960
+(the default), 42 ms at 640, all finding 3/3 faces; SFace ~54 ms a face.
+
+**Verified end to end, without restarting a worker.** The worker's face stage,
+run standalone in a one-off `contrail/ai-worker:dev` container on the recorded
+clip against the live Redis/MinIO (`--cpus 2`): 23 frames analysed in 12.3 s
+(≤ 2 fps), 69 faces, 66 compared, **21 candidate frames — every one the
+enrolled person's, none the other two's** — 1 match announced, 1 crop uploaded,
+0 crops held at the end; 83.7 ms per analysed frame. The live API raised
+`person_match` (high, similarity 0.73, 2 frames, reasons), the evidence
+endpoint returned both faces as signed links (200) and the same objects
+unsigned returned 403. The demo entry was enrolled by `supervisor`, refused
+self-approval (403, audited), approved by `admin` — `scripts/demo_persons.py`.
+
+**Tests.** ai-lab `tests/test_face.py` 41 (threshold, margin, multi-frame
+agreement, cooldown, no crop of a non-match or after an announcement, evidence
+released with the track, retired entry, real models built inside the budget,
+pixel-bomb refusal before decode); worker 132 (`test_persons_edge.py`: roster
+analytics, gallery cache incl. expiry under outage, pool, bucket by key); API
+`test_persons.py` 29 (RBAC, refusals audited, four-eyes in API and DB, gallery
+publish without photo or name, retire stops matching, every photo view audited,
+event → alarm with reasons, dedupe, platform policy over edge claims, retired
+entry raises nothing, list carries no face, evidence audited, triage order,
+expiry, private bucket) — full API suite 672 passed / 16 skipped; web 36 files /
+352. mypy at zero on both trees, ruff and `ruff format` clean on every file this touches, `tsc` clean. Browser flows 11/11; e2e 34.
+
+**To switch the edge stage on** (the lead restarts; not done here, each worker
+restart risks a grid login lockout): the simulator must publish CAM-DEMO-02
+(its `source_file` is already `persons_demo.mp4`), and the workers must load
+the new code. CAM-DEMO-02 is faces-only, so it costs a decode and ~2 YuNet
+passes a second, but it does take an inference slot when analysed; add it to
+`AI_WORKER_ALWAYS_ON` in `.env` to watch it continuously, otherwise it is
+analysed while someone has it open in Live.
+
+**Open:** no measurement on real CCTV faces (angle, night, distance) — the
+grid's junction cameras cannot resolve faces at all; person detection and crowd
+counting (old Phase 13) are not built; the gallery is read by a 10 s poll
+rather than pushed; a pending demo entry (`DEMO/PERSONS/002`, left-hand person)
+is left in the approval queue to show four-eyes live — approve it as `admin` or
+withdraw it; it lapses on its own in 3 days.
+
+---
+
+## External registries (VAHAN · SARTHI · eGujCop/CCTNS · AFIS/NAFIS), 26 departments, gap report CSV ✅
+
+12 Oct, branch `sentinel-gj`. Old Phase 14, built honestly: the brief names
+VAHAN, SARTHI, eGujCop/CCTNS and AFIS/NAFIS, and this platform has access to
+none of them. So: **real adapters behind one interface, answering from a
+labelled local reference dataset** — never presented as live.
+
+**Interface.** `app/adapters/registries/` mirrors the camera adapters:
+`base.py` defines the record types and `RegistryAdapter` with one abstract
+subclass per registry (`VehicleRegistry`, `LicenceRegistry`, `CaseRegistry`,
+`FingerprintRegistry`); `reference.py` implements each over its table; a
+database failure raises `RegistryError` (→ 502), never "no record".
+`registries_for(session)` is the one place an implementation is chosen — a live
+connector is one class plus that line. `source` and `provenance` are class
+attributes of the implementation and the API copies them into every response,
+so nothing downstream can relabel a reference answer as live; a test double
+declaring `source = "live"` comes out as live (`TestSwappable`). AFIS records
+have no field that could carry biometric data, in the dataclass or the table.
+
+**Data.** Migration **0010** (`0010_external_registry_reference.py`, revises
+0009, single head verified) adds `ref_vahan_vehicles`, `ref_sarthi_licences`,
+`ref_cctns_firs`, `ref_afis_records`. `scripts/generate_registry_reference.py`
+writes `data/seed/registries/*.csv` deterministically: 330 registrations, 20
+FIRs, 146 licences, 9 AFIS records; owners "Reference Owner NNN", district-level
+addresses, `DEMO/`/`REF/` case numbers. All ten watchlist plates are covered and
+consistent with their remarks (the six FIR cases carry the FIR their watchlist
+`case_ref` names, so a hit resolves in eGujCop). Every generated plate is ≥3
+edits from all 1,700 plates the cameras had read (`--avoid`; verified
+independently with a full Levenshtein pass). `seed.py --only registries`
+replaces each table with its CSV; on by default, `SEED_REGISTRIES=false` skips.
+
+**Checks** (`app/services/registry_checks.py`, no model, no score): document
+validity against today in IST (valid / expiring <30 d / expired / not on record
+/ not applicable — fitness and permit only for transport vehicles, PUC not for
+EVs); the registration against what was seen — the sighting's class (the named
+`detection_id`, else the plate's latest), and colour/make an officer typed off
+the crop, each tagged `sighting` or `officer`. Class compatibility is
+deliberately coarse (COCO calls SUVs "truck" and has no auto-rickshaw), so only
+two-wheels-vs-four or bus-vs-car can mismatch. Flags carry their reason:
+blacklist / open FIR critical, expired / missing / mismatch high, expiring low.
+
+**API** (`routers/registries.py`, `search.execute`): `GET
+/api/v1/registries/vehicle/{plate}` (VAHAN + eGujCop; `observed_type`,
+`observed_colour`, `observed_make`, `detection_id`, `case_ref`), `GET
+/licence/{number}`, `GET /afis/{reference:path}` (takes `DEMO/FIR/…` slashes,
+encoded or not; matches a case reference or an FIR number). Every call writes a
+`registry.vehicle|licence|afis` audit row — found, not found or failed (result
+`error`) — with the case reference. Not-found is 200 `found: false`.
+
+**Departments.** `seed.py` now seeds 26 (the original six untouched, plus Home,
+R&B, Ports & Transport, GMB, Forests, Education, Revenue, Smart City SPVs,
+Railways and Airports liaison, GIDC, Mines, Tourism, Water Resources, Energy,
+Sports, Heritage, WCD, Fisheries, Food & Civil Supplies), insert-if-missing,
+no contact addresses invented for the new ones. Live DB: 26 departments, camera
+ownership unchanged (5 of 32 owned, same codes). `DepartmentCode` in
+`enums.py` still lists six; nothing validates against it.
+
+**Gap report CSV.** `GET /api/v1/reports/gaps.csv` (`camera.read`) in its own
+module `routers/gap_report.py` under the reports prefix, reusing `reports.py`'s
+CSV helpers: BOM, one row per gap with `gap_type`, IST + UTC window, each gap
+camera's department and last answered probe in the window, audited as
+`report.gaps`. Fleet health has a "Download gap report" button in the gap panel
+header, outcome shown inline.
+
+**UI.** `components/RegistryCard.tsx` (self-contained: fetches once per distinct
+input; `RegistryCardView`, `ProvenanceLabel`, `FlagList`, `DocumentList`
+exported) and `pages/Registries.tsx` (Vehicle / Licence / AFIS tabs, query in
+the URL: `?plate=`, `?type=&colour=&make=&case=`, `?tab=licence&licence=`,
+`?tab=afis&ref=`). **Not yet routed** — `App.tsx`/`nav.ts` belong to another
+session; the route is `/registries` in Investigate, behind `searchExecute`.
+
+**Verified:** API suite 820 passed / 16 skipped (50 new in `test_registries.py`,
+`test_gap_report.py`); web 40 files / 399 passed, including new `RegistryCard`
+(8), `Registries` (6) and FleetHealth +2; `tsc --noEmit` clean; `make lint-api`
+clean (ruff, format, mypy). Live: `GJ01RV4827` + officer "white / Hyundai i20" → FIR-linked,
+insurance expired, PUC expiring, colour and maker mismatches; the Fleet health
+button downloaded the CSV through nginx (39 gap rows, BOM).
+
+**Found, not fixed (shared file):** every CSV export downloads as `export.csv`
+on the deployed build — the web calls the API cross-origin and CORS
+`expose_headers` in `app/main.py` lacks `Content-Disposition`, so
+`downloadExport` cannot read the server's filename. One-entry fix.
+
+**Open:** the reference plates are ≥3 edits from reads *up to 12 Oct*; re-run
+the generator with a fresh `--avoid` export before trusting that for later
+reads. Colour comparison waits on a colour producer (P9); make comparison has
+only an officer's reading. Not attributed to a case reference by force — the
+`case_ref` is optional.
 
 ---
 
@@ -1304,11 +1543,11 @@ test case (Q26–28) designates a *vehicle*, not a person.
 
 - [ ] Person detection on the same ONNX pipeline as vehicles
 - [ ] Crowd density / occupancy counting per camera and per zone
-- [ ] Face detection with quality gating (blur, pose, minimum resolution)
-- [ ] Face matching against an enrolled watchlist, behind its own permission
-- [ ] Every match written to `audit_log`; no silent enrolment
-- [ ] Retention limits enforced separately and more strictly than vehicle data
-- [ ] UI clearly labels confidence and never presents a match as an identification
+- [x] Face detection with gating — minimum face size, detector score (12 Oct; no blur/pose gate)
+- [x] Face matching against an enrolled watchlist, behind its own permission (`person.read`)
+- [x] Every enrolment, decision and view audited; no silent enrolment (four-eyes)
+- [x] Retention enforced separately: embeddings destroyed when an entry stops matching, photos and face crops deleted after `RETENTION_PERSON_MEDIA_DAYS`
+- [x] UI shows similarity against threshold and never presents a match as an identification
 
 **Controls this phase must ship with, not after:** face recognition against a
 person database is the most privacy-sensitive capability in the platform. It

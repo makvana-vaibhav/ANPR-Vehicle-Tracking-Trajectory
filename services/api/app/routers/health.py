@@ -25,11 +25,13 @@ from typing import Any, Literal, cast
 import httpx
 import redis.asyncio as aioredis
 from fastapi import APIRouter, Response, status
+from prometheus_client import CONTENT_TYPE_LATEST
 from redis.exceptions import RedisError
 
 from app.core.config import settings
 from app.core.logging import get_logger
 from app.db.session import check_database
+from app.services import metrics as metrics_service
 from app.services.alert_fanout import subscriber
 from app.services.event_bus import broadcaster
 from app.services.event_consumer import WORKER_STATS_KEY, WORKER_STATS_TTL_S, consumer
@@ -339,3 +341,20 @@ async def metrics() -> dict[str, Any]:
         "sockets": broadcaster.stats(),
         "now": datetime.now(UTC).isoformat(),
     }
+
+
+@router.get(
+    "/metrics/prometheus",
+    summary="Prometheus exposition",
+    response_class=Response,
+    responses={200: {"content": {CONTENT_TYPE_LATEST: {}}}},
+)
+async def prometheus_metrics() -> Response:
+    """The same picture as `/metrics`, in Prometheus text format, plus request
+    rate and latency per route, consumer lag, alerts by type and priority,
+    per-camera plate-read freshness and the edge workers' counters.
+
+    Unauthenticated and unthrottled for the reason `/metrics` is, and carrying
+    no plate, person or user — see `app/services/metrics.py`.
+    """
+    return Response(content=await metrics_service.exposition(), media_type=CONTENT_TYPE_LATEST)

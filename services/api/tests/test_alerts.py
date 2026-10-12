@@ -106,10 +106,10 @@ def _critical_entry(plate: str = "GJ03AB1234") -> WatchlistEntry:
 
 
 @pytest.fixture
-def fresh_deduper():
-    deduper.clear()
+async def fresh_deduper():
+    await deduper.clear()
     yield
-    deduper.clear()
+    await deduper.clear()
 
 
 class TestRealPriorityOnTheDay:

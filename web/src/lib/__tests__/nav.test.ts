@@ -53,13 +53,28 @@ describe('visiblePages', () => {
     expect(alarms).toBeDefined()
     if (!alarms) return
     expect(visiblePages(alarms, only(PERMISSIONS.alertRead)).map((p) => p.to)).toEqual(['/alerts'])
-    expect(visiblePages(alarms, everything).map((p) => p.to)).toEqual(['/alerts', '/watchlist'])
+    expect(visiblePages(alarms, everything).map((p) => p.to)).toEqual([
+      '/alerts',
+      '/watchlist',
+      '/persons',
+    ])
+  })
+
+  it('shows the persons watchlist only to a role that may see faces', () => {
+    const alarms = WORKSPACES.find((w) => w.key === 'alarms')
+    if (!alarms) throw new Error('no alarms workspace')
+    const plateOnly = only(PERMISSIONS.alertRead, PERMISSIONS.watchlistRead)
+    expect(visiblePages(alarms, plateOnly).map((p) => p.to)).not.toContain('/persons')
+    expect(
+      visiblePages(alarms, only(PERMISSIONS.alertRead, PERMISSIONS.personRead)).map((p) => p.to),
+    ).toContain('/persons')
   })
 })
 
 describe('locate', () => {
   it('finds the workspace a screen belongs to', () => {
     expect(locate('/watchlist')?.workspace.key).toBe('alarms')
+    expect(locate('/persons')?.workspace.key).toBe('alarms')
     expect(locate('/health')?.workspace.key).toBe('network')
     expect(locate('/dashboard')?.page.to).toBe('/dashboard')
   })

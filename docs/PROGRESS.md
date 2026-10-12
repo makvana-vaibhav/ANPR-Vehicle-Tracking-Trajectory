@@ -1,3 +1,28 @@
+> # ⚠️ SUPERSEDED — historical record only
+>
+> This page was last updated **12–13 Sep 2026**, while the project was aimed at **SIH26127** (a
+> city-wide brief, under the name NagarNetra). The project is now back on the Gujarat Police CCTV
+> Hackathon **"Sentinel"** as **Contrail**, so the "8 PS demo steps" scorecard below is not the
+> acceptance test.
+>
+> Several statements below are out of date:
+>
+> - the 51-camera Ahmedabad fleet (the fleet is now the organisers' 30-camera grid plus a recorded
+>   clip);
+> - "mypy does not pass" (CI now runs it);
+> - "gates not yet run".
+>
+> **For the current state, read:**
+>
+> - [README.md](../README.md) — status
+> - [HLD.md](HLD.md) — architecture
+> - [REQUIREMENTS.md](REQUIREMENTS.md) — Sentinel requirement map
+> - [DEMO_SCRIPT.md](DEMO_SCRIPT.md) — the live test
+> - [BUILD_STATE.md](BUILD_STATE.md) — latest dated sections (11–12 Oct)
+>
+> The measurements below (latency, overlay sizes) remain valid as measurements and are cited from
+> the new documents.
+
 # NagarNetra — progress & next steps
 
 **Read this first.** One page: what works, what doesn't, what to do next.

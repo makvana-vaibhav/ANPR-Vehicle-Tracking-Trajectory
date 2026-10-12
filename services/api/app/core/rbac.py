@@ -7,16 +7,27 @@ can an analyst actually do?" without grepping.
 
 The matrix, as specified:
 
-| Role       | Cameras | Streams | Watchlist | Alerts    | Search | Analytics | Users | Audit |
-|------------|---------|---------|-----------|-----------|--------|-----------|-------|-------|
-| admin      | CRUD    | view    | CRUD      | all       | yes    | read      | CRUD  | read  |
-| supervisor | CRU     | view    | CRU       | ack/close | yes    | read      | –     | read  |
-| operator   | read    | view    | read      | ack       | yes    | read      | –     | –     |
-| analyst    | read    | –       | read      | read      | yes    | read      | –     | –     |
-| auditor    | read    | –       | read      | read      | –      | read      | –     | read  |
-| api_client | create  | –       | –         | –         | –      | –         | –     | –     |
+| Role       | Cameras | Streams | Watchlist | Persons     | Alerts    | Search | Analytics | Users | Audit |
+|------------|---------|---------|-----------|-------------|-----------|--------|-----------|-------|-------|
+| admin      | CRUD    | view    | CRUD      | all         | all       | yes    | read      | CRUD  | read  |
+| supervisor | CRU     | view    | CRU       | all         | ack/close | yes    | read      | –     | read  |
+| operator   | read    | view    | read      | read        | ack       | yes    | read      | –     | –     |
+| analyst    | read    | –       | read      | read        | read      | yes    | read      | –     | –     |
+| auditor    | read    | –       | read      | read        | read      | –      | read      | –     | read  |
+| api_client | create  | –       | –         | –           | –         | –      | –         | –     | –     |
 
-Three entries deserve explanation:
+(Persons "all" = read, enrol, approve, retire.)
+
+Four entries deserve explanation:
+
+* **persons: the same roles enrol and approve, never the same account.** The
+  matrix cannot express four-eyes — it grants per role — so it is enforced per
+  entry: the API refuses an approval or rejection by the account that enrolled
+  it, and a database constraint refuses it again (migration 0009). The demo
+  seeds both a supervisor and an admin, so the second pair of eyes exists.
+  `person.read` is its own grant, and it gates the photographs: holding
+  `alert.read` shows that a person-match alarm exists and why it fired, never
+  whose face it was.
 
 * **auditor has no search.** An auditor's job is to review *who did what*, not
   to look up vehicles. Granting plate search to the role that oversees plate
@@ -33,8 +44,9 @@ Three entries deserve explanation:
 
 from __future__ import annotations
 
+from collections.abc import Callable, Coroutine
 from enum import StrEnum
-from typing import Annotated
+from typing import Annotated, Any
 
 from fastapi import Depends, HTTPException, Request, status
 
@@ -60,6 +72,16 @@ class Permission(StrEnum):
     WATCHLIST_READ = "watchlist.read"
     WATCHLIST_UPDATE = "watchlist.update"
     WATCHLIST_DELETE = "watchlist.delete"
+
+    # Persons watchlist (face matching). Separate from the plate watchlist
+    # because a face is a different order of sensitivity: reading an entry
+    # shows a photograph of a person, so holding `watchlist.read` must not
+    # imply it. Enrolling, approving and retiring are separate grants, and
+    # four-eyes on approval is enforced per entry (app/routers/persons.py).
+    PERSON_READ = "person.read"
+    PERSON_ENROL = "person.enrol"
+    PERSON_APPROVE = "person.approve"
+    PERSON_RETIRE = "person.retire"
 
     # Alerts
     ALERT_READ = "alert.read"
@@ -98,6 +120,12 @@ _ALERT_ALL = {
     Permission.ALERT_DISPATCH,
     Permission.ALERT_CLOSE,
 }
+_PERSONS_ALL = {
+    Permission.PERSON_READ,
+    Permission.PERSON_ENROL,
+    Permission.PERSON_APPROVE,
+    Permission.PERSON_RETIRE,
+}
 
 #: The authorisation matrix. Single source of truth.
 ROLE_PERMISSIONS: dict[Role, frozenset[Permission]] = {
@@ -106,6 +134,7 @@ ROLE_PERMISSIONS: dict[Role, frozenset[Permission]] = {
         _CAMERA_RW
         | _WATCHLIST_RW
         | _ALERT_ALL
+        | _PERSONS_ALL
         | {
             Permission.STREAM_VIEW,
             Permission.SEARCH_EXECUTE,
@@ -118,6 +147,7 @@ ROLE_PERMISSIONS: dict[Role, frozenset[Permission]] = {
             Permission.CAMERA_READ,
             Permission.STREAM_VIEW,
             Permission.WATCHLIST_READ,
+            Permission.PERSON_READ,
             Permission.ALERT_READ,
             Permission.ALERT_ACKNOWLEDGE,
             Permission.SEARCH_EXECUTE,
@@ -128,6 +158,7 @@ ROLE_PERMISSIONS: dict[Role, frozenset[Permission]] = {
         {
             Permission.CAMERA_READ,
             Permission.WATCHLIST_READ,
+            Permission.PERSON_READ,
             Permission.ALERT_READ,
             Permission.SEARCH_EXECUTE,
             Permission.ANALYTICS_READ,
@@ -137,6 +168,10 @@ ROLE_PERMISSIONS: dict[Role, frozenset[Permission]] = {
         {
             Permission.CAMERA_READ,
             Permission.WATCHLIST_READ,
+            # Read-only: an auditor reviewing who enrolled whom, and who
+            # approved it, has to be able to see the entry. Every view of a
+            # photograph is audited like anyone else's.
+            Permission.PERSON_READ,
             Permission.ALERT_READ,
             Permission.AUDIT_READ,
             Permission.ANALYTICS_READ,
@@ -170,7 +205,11 @@ def role_has(role: Role | str, permission: Permission) -> bool:
 # and confusing, so keep these imports at the top.
 
 
-def require_permission(*required: Permission):
+#: What both factories return: an async dependency that resolves to the caller.
+UserCheck = Callable[..., Coroutine[Any, Any, CurrentUser]]
+
+
+def require_permission(*required: Permission) -> UserCheck:
     """Dependency requiring **all** of the given permissions.
 
     Denials are recorded in the audit trail before the 403 is raised: an
@@ -200,7 +239,7 @@ def require_permission(*required: Permission):
     return _check
 
 
-def require_role(*allowed: Role):
+def require_role(*allowed: Role) -> UserCheck:
     """Dependency restricting an endpoint to specific roles.
 
     Prefer ``require_permission`` — it says *why* access is granted rather than

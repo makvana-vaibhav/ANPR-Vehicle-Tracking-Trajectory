@@ -20,10 +20,30 @@ class WorkerSettings(BaseSettings):
     # milliseconds; the cap exists so a stopped consumer cannot fill Redis.
     event_stream_maxlen: int = 100_000
 
+    # ── store and forward (ai_worker/publisher.py) ──
+    # Sightings made while the bus is unreachable are held here and replayed
+    # in order when it answers. Memory first, bounded by count and bytes;
+    # then, if a directory is given (a mounted volume), segment files on disk
+    # bounded by bytes. Past every bound the oldest are dropped and counted.
+    # Each worker uses its own subdirectory, so several can share one volume.
+    ai_worker_spool_max_events: int = Field(default=20_000, ge=1)
+    ai_worker_spool_max_bytes: int = Field(default=48 * 1024 * 1024, ge=1024)
+    ai_worker_spool_dir: str = ""
+    ai_worker_spool_disk_max_bytes: int = Field(default=1024 * 1024 * 1024, ge=1024)
+    # Where each worker reports its counters for the platform's Prometheus
+    # exporter (one hash field per worker), and how often.
+    ai_worker_stats_key: str = "nagarnetra:ai:workers"
+    ai_worker_stats_every_s: float = Field(default=5.0, gt=0.0)
+
     # ── where video comes from ──
     mediamtx_host: str = "mediamtx"
     mediamtx_rtsp_port: int = 8554
     mediamtx_api_url: str = "http://mediamtx:9997"
+    # How the registry roster names our own gateway in camera URLs (the API's
+    # MEDIAMTX_HOST). A worker that reaches the gateway by another name — the
+    # native macOS worker, at localhost — has those URLs rewritten to
+    # `mediamtx_host`. Inside compose both are "mediamtx" and nothing changes.
+    roster_gateway_host: str = "mediamtx"
 
     # ── Object storage for evidence crops ──
     minio_endpoint: str = "minio:9000"
@@ -31,6 +51,17 @@ class WorkerSettings(BaseSettings):
     minio_root_password: str = ""
     minio_bucket: str = "nagarnetra-media"
     minio_secure: bool = False
+    # Matched face crops go here, never to `minio_bucket`: this bucket has no
+    # anonymous policy and is read only through the API's audited endpoints.
+    minio_persons_bucket: str = "nagarnetra-persons"
+
+    # ── the persons watchlist (face stage) ──
+    # Where the API publishes the active gallery (app/services/persons.py):
+    # approved, unexpired entries as ids and embeddings — no photos, no names.
+    persons_gallery_key: str = "nagarnetra:persons:gallery"
+    # How often it is re-read. The API also refuses an alert for an entry
+    # retired since, so this bounds wasted work, not wrong alerts.
+    persons_gallery_refresh_s: float = 10.0
 
     # ── which cameras this worker owns ──
     #

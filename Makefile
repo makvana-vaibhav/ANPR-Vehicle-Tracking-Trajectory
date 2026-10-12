@@ -159,6 +159,14 @@ demo: ## Full judge demo: fresh data, fleet, worker, verified
 models: ## Download and export AI model weights to ONNX
 	@./ai-lab/scripts/fetch_models.sh
 
+.PHONY: models-derived
+models-derived: ## Derived detector copies: fp32 + static-320 (native worker); INT8=1 adds the opt-in int8 plate model
+	@./ai-lab/scripts/fetch_models.sh --derived $(if $(INT8),--int8)
+
+.PHONY: worker-native
+worker-native: ## Opt-in: one AI worker natively on macOS with CoreML — CAM-DEMO-01, trial stream (docs/GPU.md)
+	@./scripts/worker_native.sh
+
 .PHONY: videos
 videos: ## Download sample traffic clips
 	@./scripts/fetch_videos.sh
@@ -277,9 +285,23 @@ ai-multi: ## Start three ANPR workers that split the camera grid between them
 	@$(MAKE) --no-print-directory wait-healthy
 
 .PHONY: scale
-scale: ## Start the scale profile (Redpanda, replicas, Grafana)
+scale: ## Start the scale profile (3 ingest consumer replicas; the bus stays Redis)
+	@# docker-compose.scale.yml adds consumer replicas and stops the API
+	@# persisting. There is no Redpanda: EVENT_BUS_BACKEND=kafka is a config seam
+	@# with no client behind it (docs/HLD.md §13). Monitoring is `make monitoring`.
 	@$(COMPOSE_SCALE) up -d --build
-	@printf "\033[32mscale profile up\033[0m — Grafana http://localhost:3000\n"
+	@printf "\033[32mscale profile up\033[0m — 3 consumer replicas on the Redis stream\n"
+
+.PHONY: monitoring
+monitoring: ## Start Prometheus + Grafana (alert rules, pipeline dashboard)
+	@# Pinned images, `monitoring` compose profile. Leaves every running service
+	@# alone (--no-deps): only the two monitoring containers are created.
+	@$(COMPOSE) --profile monitoring up -d --no-deps prometheus grafana
+	@$(MAKE) --no-print-directory wait-healthy
+	@printf "\033[32mmonitoring up\033[0m\n"
+	@printf "  Grafana     http://localhost:$${GRAFANA_HOST_PORT:-3000}  (dashboard: Contrail — pipeline)\n"
+	@printf "  Prometheus  http://localhost:$${PROMETHEUS_HOST_PORT:-9090}/alerts\n"
+	@printf "  Exporter    $(API_URL)/metrics/prometheus\n"
 
 .PHONY: load
 load: ## Run the 80,000-camera load test (ingest throughput + latency)

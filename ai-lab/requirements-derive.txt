@@ -1,0 +1,8 @@
+# Model derivation only: scripts/derive_models.py (fp32 / static-shape / int8
+# copies of the pinned detectors). Installed on top of requirements.txt, in a
+# throwaway volume next to the worker image (`make models-derived`) or in the
+# native worker's venv (`make worker-native`) — never into the worker image.
+# onnx is Apache-2.0; the int8 calibration itself is onnxruntime's.
+onnx==1.23.2
+ml_dtypes==0.5.4
+protobuf==7.36.2

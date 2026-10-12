@@ -40,6 +40,14 @@ log = get_logger("event_tailer")
 BLOCK_MS = 2000
 BATCH_SIZE = 500
 
+#: Events that ride the stream to the consumer but are never fanned out raw.
+#: A `person.match` names a persons-watchlist entry and a face crop; the live
+#: feed reaches every signed-in role, while a face is for `person.read` alone.
+#: Operators learn of a match from the `person_match` alert the consumer
+#: raises — which carries no photograph — and see the faces through the
+#: audited evidence endpoint.
+PRIVATE_EVENTS = frozenset({"person.match"})
+
 
 class EventTailer:
     """Reads the stream from now, and fans every event out to local sockets."""
@@ -103,9 +111,10 @@ class EventTailer:
                 for entry_id, raw in entries:
                     last_id = entry_id
                     event = parse_event(raw)
-                    if event is not None:
-                        self.tailed += 1
-                        await broadcaster.publish(event)
+                    if event is None or event.get("event") in PRIVATE_EVENTS:
+                        continue
+                    self.tailed += 1
+                    await broadcaster.publish(event)
 
         return last_id
 

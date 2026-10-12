@@ -25,7 +25,7 @@ import cv2
 import numpy as np
 
 from ailab.aggregate.consensus import consensus
-from ailab.aggregate.grammar import normalise, validate
+from ailab.aggregate.grammar import drop_leading_junk, normalise, validate
 from ailab.annotate import Annotator, TrackLabel, VideoWriter, transcode_to_h264
 from ailab.artifacts import CropStore, RunDirectory, runs_root
 from ailab.config import RunConfig
@@ -630,7 +630,12 @@ class Pipeline:
             result = self.ocr.read(prepared)
             self.timer.add("ocr", time.perf_counter() - t0)
 
+            # Per read, before any voting: a read that kept the HSRP strip as
+            # an extra letter must have the same length as its neighbours, or
+            # the per-character vote splits them into rival candidates.
             text = normalise(result.text)
+            if cfg.consensus.drop_leading_junk:
+                text = drop_leading_junk(text, cfg.consensus.plate_regions)
             if not text or not (cfg.ocr.min_chars <= len(text) <= cfg.ocr.max_chars):
                 continue
             if result.confidence < cfg.ocr.min_confidence:

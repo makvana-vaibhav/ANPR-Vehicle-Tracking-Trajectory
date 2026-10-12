@@ -53,7 +53,7 @@ export const WORKSPACES: Workspace[] = [
     key: 'investigate',
     label: 'Investigate',
     icon: 'search',
-    hint: "A vehicle's journey and every sighting",
+    hint: "A vehicle's journey, its sightings and its registration",
     pages: [
       {
         to: '/vehicles',
@@ -61,6 +61,8 @@ export const WORKSPACES: Workspace[] = [
         needs: PERMISSIONS.searchExecute,
         also: ['/reports/vehicle'],
       },
+      // VAHAN, SARTHI, eGujCop and AFIS lookups — reference data, labelled.
+      { to: '/registries', label: 'Registries', needs: PERMISSIONS.searchExecute },
     ],
   },
   {
@@ -71,6 +73,9 @@ export const WORKSPACES: Workspace[] = [
     pages: [
       { to: '/alerts', label: 'Alarms', needs: PERMISSIONS.alertRead },
       { to: '/watchlist', label: 'Watchlist', needs: PERMISSIONS.watchlistRead },
+      // Faces, not plates: its own screen and its own grant, because reading
+      // it shows photographs of people.
+      { to: '/persons', label: 'Persons', needs: PERMISSIONS.personRead },
     ],
   },
   {

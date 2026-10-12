@@ -43,6 +43,13 @@ defusedxml==0.7.1
 shapely==2.0.6
 geojson-pydantic==1.1.2
 
+# ── Persons watchlist: enrolment embeddings ───────────────────
+# A reference photo is embedded with the same code (ai-lab/ailab/face) and the
+# same YuNet + SFace weights the cameras use, so both sides compute embeddings
+# in one space. Headless (no libGL on a server); the same pin as the AI worker
+# and the lab, because OpenCV's DNN decodes YuNet 2023mar only from 4.8 on.
+opencv-python-headless==4.11.0.86
+
 # ── Observability ─────────────────────────────────────────────
 structlog==24.4.0
 prometheus-client==0.21.1

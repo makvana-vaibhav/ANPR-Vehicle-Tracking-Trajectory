@@ -76,3 +76,12 @@ Thumbs.db
 # one machine on one day rather than something to review in a diff.
 tests/load/results/
 tests/browser/out/
+
+# TLS material for the web tier's HTTPS server (mkcert or the generated
+# self-signed pair) — never committed. The directory itself is kept so the
+# bind mount exists on a fresh clone.
+infra/tls/*
+!infra/tls/.gitkeep
+
+# `make backup` output: plate history and face media, i.e. personal data.
+backups/

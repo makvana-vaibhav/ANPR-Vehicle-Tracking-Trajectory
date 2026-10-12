@@ -1,0 +1,21 @@
+fir_number,police_station,district,state,registered_on,sections,status,linked_plate,vehicle_role,summary
+DEMO/FIR/2026/RJT/0412,"Reference Police Station 04, Rajkot City",Rajkot,Gujarat,2026-09-28,BNS 303(2),under_investigation,GJ03AB1234,stolen,Reference record — four-wheeler reported stolen from a residential street off Kalawad Road.
+DEMO/FIR/2026/AHM/0957,"Reference Police Station 11, Ahmedabad City",Ahmedabad,Gujarat,2026-10-03,BNS 303(2),under_investigation,GJ01RV4827,stolen,Reference record — car reported stolen from a parking lot near Navrangpura.
+DEMO/FIR/2026/PUNE/0388,"Reference Police Station 02, Pune City",Pune,Maharashtra,2026-08-19,BNS 303(2),under_investigation,MH12DE1433,stolen,"Reference record — out-of-state theft, circulated to Gujarat through CCTNS inter-state alerts."
+DEMO/FIR/2026/SRT/0764,"Reference Police Station 07, Surat City",Surat,Gujarat,2026-09-12,BNS 303(2),under_investigation,GJ05NR3318,stolen,Reference record — two-wheeler reported stolen from outside a shop in Udhna.
+DEMO/FIR/2026/GNR/1187,"Reference Police Station 03, Gandhinagar",Gandhinagar,Gujarat,2026-09-30,BNS 304(2),under_investigation,GJ18W3962,used_in_offence,Reference record — two-wheeler named by a witness to a chain snatching.
+DEMO/FIR/2026/AND/0219,"Reference Police Station 01, Anand",Anand,Gujarat,2026-07-06,BNS 106(2)|BNS 281|MV Act 134,under_investigation,GJ23CK5190,accident,Reference record — hit-and-run; driver not yet identified.
+REF/FIR/2026/GJ18/0001,"Reference Police Station 13, Gandhinagar",Gandhinagar,Gujarat,2026-02-03,BNS 309(4),chargesheeted,GJ18D4563,used_in_offence,Reference record — vehicle named in a robbery complaint.
+REF/FIR/2025/GJ06/0002,"Reference Police Station 07, Vadodara City",Vadodara,Gujarat,2025-06-21,BNS 303(2)|BNS 317(2),closed,GJ06BW4830,stolen,Reference record — vehicle stolen; parts recovered later.
+REF/FIR/2024/GJ01/0003,"Reference Police Station 03, Ahmedabad City",Ahmedabad,Gujarat,2024-08-06,BNS 318(4)|BNS 336(3),closed,GJ01T8048,used_in_offence,Reference record — vehicle sold on forged papers.
+REF/FIR/2025/GJ01/0004,"Reference Police Station 01, Ahmedabad City",Ahmedabad,Gujarat,2025-11-12,BNS 318(4)|BNS 336(3),under_investigation,GJ01TM6011,used_in_offence,Reference record — vehicle sold on forged papers.
+REF/FIR/2025/GJ01/0005,"Reference Police Station 01, Ahmedabad City",Ahmedabad,Gujarat,2025-06-30,BNS 281|BNS 125(a),chargesheeted,GJ01JN8985,accident,Reference record — rash driving causing hurt.
+REF/FIR/2024/GJ03/0006,"Reference Police Station 10, Rajkot City",Rajkot,Gujarat,2024-11-29,BNS 318(4)|BNS 336(3),closed,GJ03PF5334,used_in_offence,Reference record — vehicle sold on forged papers.
+REF/FIR/2026/GJ11/0007,"Reference Police Station 24, Junagadh",Junagadh,Gujarat,2026-07-18,BNS 309(4),closed,GJ11DF5113,used_in_offence,Reference record — vehicle named in a robbery complaint.
+REF/FIR/2026/GJ01/0008,"Reference Police Station 30, Ahmedabad City",Ahmedabad,Gujarat,2026-03-07,BNS 309(4),under_investigation,GJ01TS5361,used_in_offence,Reference record — vehicle named in a robbery complaint.
+REF/FIR/2024/GJ02/0009,"Reference Police Station 01, Mehsana",Mehsana,Gujarat,2024-09-08,BNS 318(4)|BNS 336(3),chargesheeted,GJ02QH7518,used_in_offence,Reference record — vehicle sold on forged papers.
+REF/FIR/2024/GJ01/0010,"Reference Police Station 24, Ahmedabad City",Ahmedabad,Gujarat,2024-04-30,BNS 303(2),closed,GJ01J1106,stolen,Reference record — vehicle reported stolen by its owner.
+REF/FIR/2026/GJ24/0011,"Reference Police Station 25, Patan",Patan,Gujarat,2026-02-23,BNS 281|BNS 125(a),closed,GJ24VP9318,accident,Reference record — rash driving causing hurt.
+REF/FIR/2024/GJ01/0012,"Reference Police Station 18, Ahmedabad City",Ahmedabad,Gujarat,2024-10-08,BNS 303(2)|BNS 317(2),under_investigation,GJ01MS2206,stolen,Reference record — vehicle stolen; parts recovered later.
+REF/FIR/2026/GJ05/0013,"Reference Police Station 15, Surat City",Surat,Gujarat,2026-01-27,BNS 318(4)|BNS 336(3),chargesheeted,GJ05YV8065,used_in_offence,Reference record — vehicle sold on forged papers.
+REF/FIR/2025/GJ18/0014,"Reference Police Station 24, Gandhinagar",Gandhinagar,Gujarat,2025-11-01,BNS 281|BNS 125(a),closed,GJ18YP6955,accident,Reference record — rash driving causing hurt.

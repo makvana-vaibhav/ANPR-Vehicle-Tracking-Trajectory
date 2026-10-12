@@ -1,0 +1,1213 @@
+{
+  "uid": "contrail-pipeline",
+  "title": "Contrail — pipeline",
+  "tags": [
+    "contrail"
+  ],
+  "timezone": "browser",
+  "schemaVersion": 41,
+  "version": 1,
+  "editable": false,
+  "refresh": "15s",
+  "time": {
+    "from": "now-1h",
+    "to": "now"
+  },
+  "graphTooltip": 1,
+  "annotations": {
+    "list": []
+  },
+  "templating": {
+    "list": []
+  },
+  "links": [],
+  "description": "Event pipeline, alerts, camera freshness and edge workers, from the API's /metrics/prometheus and MediaMTX.",
+  "panels": [
+    {
+      "type": "row",
+      "id": 1,
+      "title": "Pipeline",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "id": 2,
+      "title": "Ingest throughput",
+      "description": "Events the ingest consumers read off the bus, and settled sightings written. Overlay batches (camera.tracks) are the live boxes: consumed, never persisted, so they are shown apart — the consumed rate is not a sighting rate.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "contrail-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 1
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "contrail-prometheus"
+          },
+          "expr": "sum(rate(contrail_ingest_consumed_total[$__rate_interval]))",
+          "legendFormat": "consumed",
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "contrail-prometheus"
+          },
+          "expr": "sum(rate(contrail_ingest_persisted_total[$__rate_interval]))",
+          "legendFormat": "persisted (sightings)",
+          "refId": "B"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "contrail-prometheus"
+          },
+          "expr": "sum(rate(contrail_ingest_boxes_total[$__rate_interval]))",
+          "legendFormat": "overlay batches",
+          "refId": "C"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "id": 3,
+      "title": "Events emitted at the edge, by kind",
+      "description": "What the AI workers' pipelines emitted, per second. Read from the stats hash each worker rewrites every ~5 s; absent for a worker started before that code.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "contrail-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 1
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "contrail-prometheus"
+          },
+          "expr": "sum by (kind) (rate(contrail_ai_worker_events_by_kind_total[$__rate_interval]))",
+          "legendFormat": "{{kind}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "id": 4,
+      "title": "Capture → persisted latency",
+      "description": "Per consumer, over its last 10,000 sightings (a rolling sample, not a time window — slow to react on a quiet stream). The red line is the 3 s budget. Events replayed from an edge spool keep their capture time and raise it honestly.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "contrail-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 1
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "contrail-prometheus"
+          },
+          "expr": "max by (quantile) (contrail_ingest_latency_ms)",
+          "legendFormat": "p{{quantile}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 3000
+              }
+            ]
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 0,
+            "showPoints": "never",
+            "thresholdsStyle": {
+              "mode": "line"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "id": 5,
+      "title": "Bus: lag, pending, stream length",
+      "description": "Lag: entries not yet delivered to the consumer group (Redis reports none when it cannot compute it). Pending: delivered, not yet acknowledged. The stream is capped at ~100,000 entries, so its length sits at the cap in steady state.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "contrail-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 9
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "contrail-prometheus"
+          },
+          "expr": "max by (group) (contrail_ingest_consumer_lag)",
+          "legendFormat": "lag {{group}}",
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "contrail-prometheus"
+          },
+          "expr": "max by (group) (contrail_ingest_consumer_pending)",
+          "legendFormat": "pending {{group}}",
+          "refId": "B"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "contrail-prometheus"
+          },
+          "expr": "contrail_event_stream_length",
+          "legendFormat": "stream length",
+          "refId": "C"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "type": "stat",
+      "id": 6,
+      "title": "Fleet",
+      "description": "Ingest consumers reporting in the last 30 s; edge workers that reported in the last minute; browsers on the live feed of this API.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "contrail-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 9
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "contrail-prometheus"
+          },
+          "expr": "max(contrail_ingest_workers)",
+          "legendFormat": "ingest consumers",
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "contrail-prometheus"
+          },
+          "expr": "count(contrail_ai_worker_stats_age_seconds < 60) or vector(0)",
+          "legendFormat": "edge workers",
+          "refId": "B"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "contrail-prometheus"
+          },
+          "expr": "sum(contrail_websocket_clients)",
+          "legendFormat": "live-feed browsers",
+          "refId": "C"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "none",
+        "graphMode": "area",
+        "textMode": "value_and_name",
+        "orientation": "horizontal"
+      }
+    },
+    {
+      "type": "row",
+      "id": 7,
+      "title": "Alerts",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 17
+      },
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "id": 8,
+      "title": "Alerts raised (per hour)",
+      "description": "From the alerts table: all-time counts per type and priority, so increase() is the rate they were raised at. Alerts are never purged, so the counter never goes backwards.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "contrail-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 14,
+        "x": 0,
+        "y": 18
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "contrail-prometheus"
+          },
+          "expr": "sum by (type, priority) (increase(contrail_alerts_raised_total[1h]))",
+          "legendFormat": "{{type}} · {{priority}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "type": "bargauge",
+      "id": 9,
+      "title": "Open alerts",
+      "description": "Alerts not yet closed or marked a false positive, by type and priority.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "contrail-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 10,
+        "x": 14,
+        "y": 18
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "contrail-prometheus"
+          },
+          "expr": "sum by (type, priority) (contrail_alerts_open) > 0",
+          "legendFormat": "{{type}} · {{priority}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "#EAB839",
+                "value": 1
+              },
+              {
+                "color": "red",
+                "value": 10
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "displayMode": "basic",
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showUnfilled": true
+      }
+    },
+    {
+      "type": "row",
+      "id": 10,
+      "title": "Camera freshness",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 26
+      },
+      "panels": []
+    },
+    {
+      "type": "bargauge",
+      "id": 11,
+      "title": "Seconds since each ANPR camera last read a plate",
+      "description": "Per ANPR-enabled camera, stalest first; (always on) marks the cameras the workers analyse whatever is on screen — the ones the no-plate-read alert watches. 86400 means no read in the last 24 h, not a measurement. At night the grid's plate yield is low, so amber on a quiet junction is not necessarily a fault.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "contrail-prometheus"
+      },
+      "gridPos": {
+        "h": 12,
+        "w": 16,
+        "x": 0,
+        "y": 27
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "contrail-prometheus"
+          },
+          "expr": "sort_desc(contrail_camera_last_plate_read_age_seconds)",
+          "legendFormat": "{{camera}} (always on: {{always_on}})",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "#EAB839",
+                "value": 300
+              },
+              {
+                "color": "red",
+                "value": 600
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "displayMode": "gradient",
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showUnfilled": true,
+        "minVizHeight": 10
+      }
+    },
+    {
+      "type": "timeseries",
+      "id": 12,
+      "title": "Edge cameras by state",
+      "description": "Summed over the AI workers: cameras owned (assigned), with a stream open, and being analysed now. Open but not analysing is a camera waiting for a slot or kept open after leaving the screen.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "contrail-prometheus"
+      },
+      "gridPos": {
+        "h": 12,
+        "w": 8,
+        "x": 16,
+        "y": 27
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "contrail-prometheus"
+          },
+          "expr": "sum by (state) (contrail_ai_worker_cameras)",
+          "legendFormat": "{{state}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "type": "row",
+      "id": 13,
+      "title": "Edge workers (CPU-relevant)",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 39
+      },
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "id": 14,
+      "title": "CPU per worker (cores)",
+      "description": "Process CPU time per second, all threads — ONNX Runtime pools and decoders included.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "contrail-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 40
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "contrail-prometheus"
+          },
+          "expr": "rate(contrail_ai_worker_cpu_seconds_total[$__rate_interval])",
+          "legendFormat": "worker {{worker}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "id": 15,
+      "title": "Threads per worker",
+      "description": "OS threads in each worker process (from /proc). The inference budget below caps only the ONNX intra-op pools; decode and OCR threads come on top.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "contrail-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 40
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "contrail-prometheus"
+          },
+          "expr": "contrail_ai_worker_threads",
+          "legendFormat": "worker {{worker}}",
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "contrail-prometheus"
+          },
+          "expr": "contrail_ai_worker_inference_budget_threads",
+          "legendFormat": "budget {{worker}}",
+          "refId": "B"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "id": 16,
+      "title": "Resident memory per worker",
+      "description": "Current RSS of each worker.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "contrail-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 40
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "contrail-prometheus"
+          },
+          "expr": "contrail_ai_worker_rss_bytes",
+          "legendFormat": "worker {{worker}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "id": 17,
+      "title": "Slots and report age",
+      "description": "Slots: cameras each worker analyses at once. Report age: seconds since the worker last wrote its stats (~5 s normally); over 60 s means it has stopped.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "contrail-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 48
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "contrail-prometheus"
+          },
+          "expr": "contrail_ai_worker_slots",
+          "legendFormat": "slots {{worker}}",
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "contrail-prometheus"
+          },
+          "expr": "contrail_ai_worker_stats_age_seconds",
+          "legendFormat": "report age {{worker}} (s)",
+          "refId": "B"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "id": 18,
+      "title": "Edge spool: held now",
+      "description": "Sightings each worker is holding because the central bus cannot take them, and the spool's size by tier. Zero while the bus is reachable.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "contrail-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 48
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "contrail-prometheus"
+          },
+          "expr": "contrail_ai_worker_spool_events",
+          "legendFormat": "held {{worker}}",
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "contrail-prometheus"
+          },
+          "expr": "contrail_ai_worker_spool_bytes",
+          "legendFormat": "{{tier}} bytes {{worker}}",
+          "refId": "B"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "id": 19,
+      "title": "Edge spool: held, replayed, dropped (per 5 min)",
+      "description": "Spooled: settled sightings held back by an outage. Replayed: held sightings later delivered in order. Dropped: discarded because every bound was full — lost. Ephemeral: live-only boxes and provisional reads discarded during an outage by design.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "contrail-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 48
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "contrail-prometheus"
+          },
+          "expr": "sum by (worker) (increase(contrail_ai_worker_spooled_total[5m]))",
+          "legendFormat": "spooled {{worker}}",
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "contrail-prometheus"
+          },
+          "expr": "sum by (worker) (increase(contrail_ai_worker_replayed_total[5m]))",
+          "legendFormat": "replayed {{worker}}",
+          "refId": "B"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "contrail-prometheus"
+          },
+          "expr": "sum by (worker) (increase(contrail_ai_worker_spool_dropped_total[5m]))",
+          "legendFormat": "dropped {{worker}}",
+          "refId": "C"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "contrail-prometheus"
+          },
+          "expr": "sum by (worker) (increase(contrail_ai_worker_ephemeral_dropped_total[5m]))",
+          "legendFormat": "ephemeral {{worker}}",
+          "refId": "D"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "type": "row",
+      "id": 20,
+      "title": "API",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 56
+      },
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "id": 21,
+      "title": "Requests by status",
+      "description": "HTTP requests per second through the API, by status code. Routes are labelled by template, never by value, so no plate or id appears here.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "contrail-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 57
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "contrail-prometheus"
+          },
+          "expr": "sum by (status) (rate(contrail_http_requests_total[$__rate_interval]))",
+          "legendFormat": "{{status}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "id": 22,
+      "title": "p95 latency, slowest routes",
+      "description": "95th percentile request time for the eight slowest route templates over 5 minutes.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "contrail-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 57
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "contrail-prometheus"
+          },
+          "expr": "topk(8, histogram_quantile(0.95, sum by (le, route) (rate(contrail_http_request_duration_seconds_bucket[5m]))))",
+          "legendFormat": "{{route}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "type": "row",
+      "id": 23,
+      "title": "Stream gateway (MediaMTX)",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 65
+      },
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "id": 24,
+      "title": "Gateway paths and readers",
+      "description": "Paths ready on MediaMTX (cameras published or being pulled), and readers by type: the AI workers read over RTSP, operators over WebRTC or HLS.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "contrail-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 66
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "contrail-prometheus"
+          },
+          "expr": "sum(paths{state=\"ready\"})",
+          "legendFormat": "paths ready",
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "contrail-prometheus"
+          },
+          "expr": "sum by (readerType) (paths_readers)",
+          "legendFormat": "readers: {{readerType}}",
+          "refId": "B"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "id": 25,
+      "title": "Video sent by the gateway",
+      "description": "Bits per second MediaMTX sends to every reader together — workers and operators.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "contrail-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 66
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "contrail-prometheus"
+          },
+          "expr": "sum(rate(paths_bytes_sent[$__rate_interval])) * 8",
+          "legendFormat": "sent",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bps",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    }
+  ]
+}

@@ -1,12 +1,28 @@
-> # ⚠️ SUPERSEDED
+> # ⚠️ SUPERSEDED — historical record only
 >
-> Written **25 August 2026, after Phase 4**, for the old *statewide Gujarat* brief. Much of it is no
-> longer true: the AI pipeline, watchlist alerts, the correlator, the operator screens and the scale
-> proof all landed after it was written, and the project has since been re-aimed at **SIH26127**.
+> Written **25 August 2026, after Phase 4**. Much of it is no longer true. Everything below was
+> built after it:
 >
-> For current state read **[PROGRESS.md](PROGRESS.md)**; for what to build next read
-> **[docs/ROADMAP.md](ROADMAP.md)**. This file is kept only as a record of where the build stood at
-> Phase 4. Refreshing or retiring it is P12.
+> - the AI pipeline;
+> - watchlist alerts;
+> - the correlator;
+> - the operator workspaces;
+> - the scale proof;
+> - grid federation.
+>
+> The product is now **Contrail**, competing in the Gujarat Police CCTV Hackathon "Sentinel"
+> (sandbox round 12–13 Oct 2026). The project was briefly re-aimed at SIH26127 and then came back
+> to Sentinel. The names below (NagarNetra, 250 cameras, "Event is 10–11 September") are from
+> before both moves.
+>
+> **For the current state, read:**
+>
+> - [README.md](../README.md) — status table
+> - [HLD.md](HLD.md) — architecture
+> - [REQUIREMENTS.md](REQUIREMENTS.md) — requirement map
+> - [INFRASTRUCTURE.md](INFRASTRUCTURE.md) — sizing
+>
+> Kept unedited below as a record of where the build stood at Phase 4.
 
 ---
 

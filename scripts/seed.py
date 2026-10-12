@@ -18,7 +18,7 @@ import asyncio
 import csv
 import os
 import sys
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 
 # The script runs from /app inside the container; make the API package importable.
@@ -30,6 +30,12 @@ from app.core.config import settings  # noqa: E402
 from app.core.security import hash_password  # noqa: E402
 from app.db.session import SessionLocal, dispose_engine  # noqa: E402
 from app.models.enums import AdapterType, CameraStatus, Role, VmsVendor  # noqa: E402
+from app.models.external_registry import (  # noqa: E402
+    ReferenceAfisRecord,
+    ReferenceFir,
+    ReferenceLicence,
+    ReferenceVehicle,
+)
 from app.models.intelligence import Alert, Detection, Watchlist  # noqa: E402
 from app.models.registry import (  # noqa: E402
     Camera,
@@ -45,9 +51,23 @@ if not SEED_DIR.exists():  # running outside the container
     SEED_DIR = Path(__file__).resolve().parent.parent / "data" / "seed"
 
 # ── Departments ───────────────────────────────────────────────────────
-# The five departments whose live feeds the challenge sandbox exposes, plus
-# SCRB which operates the state aggregation tier.
-DEPARTMENTS: list[dict[str, str]] = [
+# The government departments that own CCTV in Gujarat. The brief speaks of
+# about 26; the first six below are the original set (the five whose feeds
+# the challenge sandbox exposes, plus SCRB, which runs the state aggregation
+# tier) and the rest complete it: who runs cameras at highways and toll
+# plazas, ports and RTO check posts, sanctuaries, exam centres, collectorates,
+# dams, substations, stadiums, heritage sites, godowns, fishing harbours,
+# mining check posts, and the railway and airport liaison points.
+#
+# Seeding is insert-if-missing: a department already present is left exactly
+# as it is, and no camera's department is touched — owners come from
+# cameras.csv and the grid sync, never from this list.
+#
+# The added departments carry no contact address. The original six were
+# given invented ones; a mailbox at a real government domain that nobody
+# confirmed exists is not one to put in a registry, so these stay blank until
+# a department gives one.
+DEPARTMENTS: list[dict[str, str | None]] = [
     {
         "code": "POLICE",
         "name": "Gujarat Police",
@@ -77,6 +97,62 @@ DEPARTMENTS: list[dict[str, str]] = [
         "code": "SCRB",
         "name": "State Crime Records Bureau",
         "contact_email": "scrb@gujarat.gov.in",
+    },
+    {"code": "HOME", "name": "Home Department (Prisons, Home Guards & Civil Defence)"},
+    {
+        "code": "RNB",
+        "name": "Roads & Buildings Department (highways, bridges, toll plazas)",
+    },
+    {
+        "code": "TRANSPORT",
+        "name": "Ports & Transport Department (Commissionerate of Transport, RTO check posts)",
+    },
+    {"code": "GMB", "name": "Gujarat Maritime Board (ports and jetties)"},
+    {"code": "FOREST", "name": "Forests & Environment Department (sanctuaries, Gir)"},
+    {
+        "code": "EDUCATION",
+        "name": "Education Department (schools, examination centres)",
+    },
+    {
+        "code": "REVENUE",
+        "name": "Revenue Department (collectorates, mamlatdar offices)",
+    },
+    {
+        "code": "SMARTCITY",
+        "name": "Smart City SPVs (Ahmedabad, Surat, Vadodara, Rajkot, Gandhinagar, Dahod)",
+    },
+    {
+        "code": "RAILWAYS",
+        "name": "Railways liaison (Western Railway stations in Gujarat)",
+    },
+    {"code": "AIRPORTS", "name": "Airports liaison (airport operators in Gujarat)"},
+    {"code": "GIDC", "name": "Industries & Mines Department (GIDC industrial estates)"},
+    {
+        "code": "MINES",
+        "name": "Commissionerate of Geology & Mining (mining check posts)",
+    },
+    {"code": "TOURISM", "name": "Tourism Corporation of Gujarat (tourist sites)"},
+    {
+        "code": "WATER",
+        "name": "Narmada, Water Resources, Water Supply & Kalpsar Department (dams, canals)",
+    },
+    {
+        "code": "ENERGY",
+        "name": "Energy & Petrochemicals Department (GUVNL substations)",
+    },
+    {
+        "code": "SPORTS",
+        "name": "Sports, Youth & Cultural Activities Department (stadiums)",
+    },
+    {
+        "code": "HERITAGE",
+        "name": "Directorate of Archaeology & Museums (heritage sites)",
+    },
+    {"code": "WCD", "name": "Women & Child Development Department (shelter homes)"},
+    {"code": "FISHERIES", "name": "Commissionerate of Fisheries (fishing harbours)"},
+    {
+        "code": "FOODCS",
+        "name": "Food, Civil Supplies & Consumer Affairs Department (godowns)",
     },
 ]
 
@@ -186,21 +262,22 @@ async def seed_departments() -> dict[str, object]:
 
     async with SessionLocal() as session:
         for spec in DEPARTMENTS:
+            code = str(spec["code"])
             existing = await session.scalar(
-                select(Department).where(Department.code == spec["code"])
+                select(Department).where(Department.code == code)
             )
             if existing is None:
                 dept = Department(
-                    code=spec["code"],
-                    name=spec["name"],
-                    contact_email=spec["contact_email"],
+                    code=code,
+                    name=str(spec["name"]),
+                    contact_email=spec.get("contact_email"),
                 )
                 session.add(dept)
                 await session.flush()
-                ids[spec["code"]] = dept.id
+                ids[code] = dept.id
                 created += 1
             else:
-                ids[spec["code"]] = existing.id
+                ids[code] = existing.id
         await session.commit()
 
     print(
@@ -613,6 +690,136 @@ def _timestamp(value: str | None) -> datetime | None:
     return datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
 
 
+REGISTRY_DIR = SEED_DIR / "registries"
+
+
+def _day(value: str) -> date | None:
+    return date.fromisoformat(value) if value.strip() else None
+
+
+def _text(value: str) -> str | None:
+    return value.strip() or None
+
+
+def _registry_rows(name: str) -> list[dict[str, str]]:
+    with (REGISTRY_DIR / name).open(newline="", encoding="utf-8") as handle:
+        return list(csv.DictReader(handle))
+
+
+async def seed_registry_reference() -> None:
+    """Load the VAHAN / SARTHI / eGujCop / AFIS reference dataset.
+
+    The platform has no access to the real registries; the adapters in
+    `app/adapters/registries/` answer from these four tables instead, and
+    label every answer `source: "reference"`. The data is fictional and says
+    so ("Reference Owner 017", `DEMO/` and `REF/` case numbers, district-level
+    addresses), and its plates are at least three characters from every plate
+    the cameras had read when it was generated —
+    `scripts/generate_registry_reference.py` writes it and explains how.
+
+    Each table is **replaced** with its CSV, in one transaction: this is
+    reference data the seed owns outright, nothing else writes to it and
+    nothing references its rows, so the database matching the file exactly is
+    the whole requirement — a record dropped from the CSV must not linger.
+    """
+    if not REGISTRY_DIR.exists():
+        print(f"  registries: SKIPPED — {REGISTRY_DIR} not found")
+        return
+
+    vehicles = [
+        ReferenceVehicle(
+            plate_normalised=normalise_plate(row["plate"]),
+            owner_name=row["owner_name"],
+            owner_district=row["owner_district"],
+            owner_state=row["owner_state"],
+            registering_authority=row["registering_authority"],
+            registration_status=row["registration_status"],
+            vehicle_class=row["vehicle_class"],
+            vehicle_category=row["vehicle_category"],
+            maker=row["maker"],
+            model=row["model"],
+            colour=row["colour"],
+            fuel=row["fuel"],
+            manufacture_year=int(row["manufacture_year"])
+            if row["manufacture_year"]
+            else None,
+            registered_on=date.fromisoformat(row["registered_on"]),
+            registration_valid_until=date.fromisoformat(
+                row["registration_valid_until"]
+            ),
+            fitness_valid_until=_day(row["fitness_valid_until"]),
+            insurance_valid_until=_day(row["insurance_valid_until"]),
+            puc_valid_until=_day(row["puc_valid_until"]),
+            permit_valid_until=_day(row["permit_valid_until"]),
+            hypothecated=row["hypothecated"] == "true",
+            financier=_text(row["financier"]),
+            blacklisted=row["blacklisted"] == "true",
+            blacklist_reason=_text(row["blacklist_reason"]),
+        )
+        for row in _registry_rows("vahan.csv")
+    ]
+    firs = [
+        ReferenceFir(
+            fir_number=row["fir_number"].strip().upper(),
+            police_station=row["police_station"],
+            district=row["district"],
+            state=row["state"],
+            registered_on=date.fromisoformat(row["registered_on"]),
+            sections=[s for s in row["sections"].split("|") if s],
+            status=row["status"],
+            linked_plate=normalise_plate(row["linked_plate"]),
+            vehicle_role=row["vehicle_role"],
+            summary=row["summary"],
+        )
+        for row in _registry_rows("egujcop_firs.csv")
+    ]
+    licences = [
+        ReferenceLicence(
+            licence_number="".join(
+                ch for ch in row["licence_number"].upper() if ch.isalnum()
+            ),
+            holder_name=row["holder_name"],
+            holder_district=row["holder_district"],
+            holder_state=row["holder_state"],
+            issuing_authority=row["issuing_authority"],
+            issued_on=date.fromisoformat(row["issued_on"]),
+            non_transport_valid_until=_day(row["non_transport_valid_until"]),
+            transport_valid_until=_day(row["transport_valid_until"]),
+            classes=[c for c in row["classes"].split("|") if c],
+            status=row["status"],
+            status_reason=_text(row["status_reason"]),
+        )
+        for row in _registry_rows("sarthi.csv")
+    ]
+    afis = [
+        ReferenceAfisRecord(
+            reference=" ".join(row["reference"].upper().split()),
+            afis_reference=row["afis_reference"],
+            nafis_reference=_text(row["nafis_reference"]),
+            linked_fir_number=_text(row["linked_fir_number"].upper()),
+            district=row["district"],
+            recorded_on=date.fromisoformat(row["recorded_on"]),
+        )
+        for row in _registry_rows("afis.csv")
+    ]
+
+    async with SessionLocal() as session:
+        for model in (
+            ReferenceVehicle,
+            ReferenceFir,
+            ReferenceLicence,
+            ReferenceAfisRecord,
+        ):
+            await session.execute(delete(model))
+        session.add_all([*vehicles, *firs, *licences, *afis])
+        await session.commit()
+
+    print(
+        f"  registries (reference data): {len(vehicles)} VAHAN, {len(firs)} eGujCop FIRs, "
+        f"{len(licences)} SARTHI, {len(afis)} AFIS"
+    )
+
+
 async def main() -> int:
     parser = argparse.ArgumentParser(description="Seed NagarNetra demo data")
     parser.add_argument(
@@ -624,6 +831,7 @@ async def main() -> int:
             "demo-camera",
             "fleet",
             "watchlist",
+            "registries",
             "all",
         ],
         default="all",
@@ -652,6 +860,17 @@ async def main() -> int:
             await seed_watchlist()
         elif args.only == "all":
             print("  watchlist: skipped — SEED_WATCHLIST is off")
+        # The registry reference dataset: fictional, labelled, and what the
+        # VAHAN/SARTHI/eGujCop/AFIS lookups answer from. On by default for
+        # the same reason as the watchlist; `SEED_REGISTRIES=false` skips it.
+        if args.only == "registries" or (
+            args.only == "all"
+            and os.environ.get("SEED_REGISTRIES", "true").lower()
+            not in ("0", "false", "no")
+        ):
+            await seed_registry_reference()
+        elif args.only == "all":
+            print("  registries: skipped — SEED_REGISTRIES is off")
     finally:
         await dispose_engine()
 

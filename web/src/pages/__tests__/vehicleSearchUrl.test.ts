@@ -10,8 +10,15 @@
 import { describe, expect, it } from 'vitest'
 
 import {
+  decide,
+  decideCandidate,
+  decisionsFromParams,
+  NO_DECISIONS,
   paramsFor,
+  paramsWithDecisions,
   plateFromParams,
+  recalledDecisions,
+  rememberDecisions,
   toSearchPlate,
   windowFromParams,
 } from '@/pages/vehicleSearchUrl'
@@ -74,5 +81,71 @@ describe('paramsFor', () => {
     })
     expect(next.get('since')).toBe('2026-10-11T00:00:00.000Z')
     expect(next.has('until')).toBe(false)
+  })
+})
+
+// ── Candidate decisions, carried in the address ──────────────────────
+
+const A = '0b6d6f4e-3c1a-4f7e-9a51-aaaaaaaaaaaa'
+const B = '0b6d6f4e-3c1a-4f7e-9a51-bbbbbbbbbbbb'
+
+describe('decisionsFromParams', () => {
+  it('reads included and dismissed detection ids', () => {
+    expect(decisionsFromParams(new URLSearchParams(`include=${A}&dismiss=${B}`))).toEqual({
+      include: [A],
+      dismiss: [B],
+    })
+  })
+
+  it('ignores anything that is not a detection id, and repeats', () => {
+    expect(
+      decisionsFromParams(new URLSearchParams(`include=${A},${A},drop-table,123`)).include,
+    ).toEqual([A])
+  })
+
+  it('treats a read both included and dismissed as included — the reversible reading', () => {
+    expect(decisionsFromParams(new URLSearchParams(`include=${A}&dismiss=${A}`))).toEqual({
+      include: [A],
+      dismiss: [],
+    })
+  })
+})
+
+describe('writing decisions', () => {
+  it('writes the lists and leaves no empty parameter behind', () => {
+    const next = paramsWithDecisions(new URLSearchParams(`plate=X&dismiss=${B}`), {
+      include: [A, B],
+      dismiss: [],
+    })
+    expect(next.get('include')).toBe(`${A},${B}`)
+    expect(next.has('dismiss')).toBe(false)
+    expect(next.get('plate')).toBe('X')
+  })
+
+  it('makes include and dismiss replace each other, and undo clear both', () => {
+    const included = decide(NO_DECISIONS, A, 'include')
+    expect(included).toEqual({ include: [A], dismiss: [] })
+    expect(decide(included, A, 'dismiss')).toEqual({ include: [], dismiss: [A] })
+    expect(decide(included, A, 'undo')).toEqual(NO_DECISIONS)
+  })
+
+  it('finds a candidate by any of its reads', () => {
+    // Included under one read; undone from the visit, whose best read is another.
+    const decisions = { include: [B], dismiss: [] }
+    expect(decideCandidate(decisions, [A, B], 'undo')).toEqual(NO_DECISIONS)
+  })
+
+  it('belongs to one plate: opening another drops them, the same one keeps them', () => {
+    const current = new URLSearchParams(`plate=GJ03AB1234&include=${A}`)
+    expect(paramsFor(current, 'MH12DE1433', null).has('include')).toBe(false)
+    expect(paramsFor(current, 'GJ03AB1234', null).get('include')).toBe(A)
+  })
+
+  it('remembers them for this tab, per plate', () => {
+    window.sessionStorage.clear()
+    expect(recalledDecisions('GJ03AB1234')).toEqual(NO_DECISIONS)
+    rememberDecisions('GJ03AB1234', { include: [A], dismiss: [B] })
+    expect(recalledDecisions('GJ03AB1234')).toEqual({ include: [A], dismiss: [B] })
+    expect(recalledDecisions('MH12DE1433')).toEqual(NO_DECISIONS)
   })
 })

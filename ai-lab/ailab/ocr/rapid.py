@@ -61,7 +61,15 @@ class RapidOcrEngine(OcrEngine):
         #
         # RapidOCR propagates these two Global keys down to all three stages.
         threads = runtime.threads_per_model()
-        self._engine = RapidOCR(intra_op_num_threads=threads, inter_op_num_threads=1)
+        # The detection stage only ever runs as the fallback below, on a crop
+        # the plate detector already cut to the plate, so it is sized for that
+        # rather than for a document page (see `OcrConfig`).
+        self._engine = RapidOCR(
+            intra_op_num_threads=threads,
+            inter_op_num_threads=1,
+            det_limit_side_len=config.detection_fallback_limit_side_len,
+            det_limit_type=config.detection_fallback_limit_type,
+        )
         self._threads = threads
         self._allow = re.compile(f"[^{re.escape(config.allowlist)}]")
 
@@ -125,7 +133,7 @@ class RapidOcrEngine(OcrEngine):
         """Full PP-OCR: locate text lines, then read each one."""
         started = time.perf_counter()
         try:
-            raw, _elapse = self._engine(image)
+            raw, _elapse = self._engine(image, use_cls=self.config.detection_fallback_use_cls)
         except (ValueError, RuntimeError, IndexError) as exc:
             # Degenerate crops (1-pixel dimensions, all-black) make the
             # detector's post-processing throw. That is a skipped read, not a
@@ -197,6 +205,12 @@ class RapidOcrEngine(OcrEngine):
             "char_level_confidence": False,
             "allowlist": self.config.allowlist,
             "intra_op_threads": self._threads,
+            "detection_fallback": {
+                "enabled": self.config.detection_fallback,
+                "limit_side_len": self.config.detection_fallback_limit_side_len,
+                "limit_type": self.config.detection_fallback_limit_type,
+                "angle_classifier": self.config.detection_fallback_use_cls,
+            },
             "strategy": (
                 "recognition-first; text detection only as a fallback "
                 "(detection measured at 18x the cost for the same result)"

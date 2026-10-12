@@ -15,11 +15,17 @@ itself ends.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import os
+import resource
+import sys
 import threading
 import time
+from collections.abc import Awaitable
 from dataclasses import dataclass, field
-from typing import Any
+from pathlib import Path
+from typing import Any, cast
 
 import redis.asyncio as aioredis
 from ailab import runtime
@@ -27,10 +33,13 @@ from ailab.config import RunConfig
 from redis.exceptions import RedisError
 from ailab.stream import SourceIdentity, StreamRunner, StreamUnavailable
 from ailab.stream.reader import redact
+from ailab.face.stage import FaceStage
 
 from ai_worker.backoff import ACCOUNT_REASONS, Backoff, host_of
 from ai_worker.config import WorkerSettings
 from ai_worker.crops import MinioCropStore
+from ai_worker.face_pool import FaceModelsPool
+from ai_worker.gallery import GalleryCache
 from ai_worker.discovery import (
     CameraStream,
     discover,
@@ -56,6 +65,58 @@ REASON_ADVICE = {
 #: How long shutdown waits for every camera thread together. Each one checks
 #: its stop flag at least every two seconds, then closes its capture.
 STOP_WAIT_S = 8.0
+
+#: The stats hash expires this long after the last report from any worker, so
+#: a fleet shut down overnight does not come back reporting yesterday. Longer
+#: than the exporter's own 300 s cut-off, so that when every worker dies at
+#: once the "worker stale" alert still sees their ages climb, and fires.
+STATS_TTL_S = 600
+
+
+def process_usage() -> dict[str, int | float]:
+    """CPU time, OS threads and resident memory of this process.
+
+    OS threads rather than Python's: ONNX Runtime's intra-op pools and the
+    decoders are native threads, and they are what the thread budget governs.
+    Linux figures come from /proc; elsewhere (a native macOS worker) the thread
+    count falls back to Python's and memory to the peak.
+    """
+    usage = resource.getrusage(resource.RUSAGE_SELF)
+    threads = threading.active_count()
+    rss = usage.ru_maxrss * (1 if sys.platform == "darwin" else 1024)
+    try:
+        for line in Path("/proc/self/status").read_text().splitlines():
+            if line.startswith("Threads:"):
+                threads = int(line.split()[1])
+        pages = int(Path("/proc/self/statm").read_text().split()[1])
+        rss = pages * os.sysconf("SC_PAGE_SIZE")
+    except (OSError, ValueError, IndexError):
+        pass
+    return {
+        "cpu_seconds": round(usage.ru_utime + usage.ru_stime, 2),
+        "threads": threads,
+        "rss_bytes": rss,
+    }
+
+
+def _spool_dir(settings: WorkerSettings) -> Path | None:
+    """This worker's own disk spool, or None to hold events in memory only.
+
+    A subdirectory per worker index, so the three workers of `make ai-multi`
+    can share one volume without replaying each other's events. A directory
+    that cannot be created costs the disk tier, not the worker.
+    """
+    if not settings.ai_worker_spool_dir:
+        return None
+    path = Path(settings.ai_worker_spool_dir) / f"worker-{settings.ai_worker_index}"
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        log.error(
+            "disk spool %s unusable (%s); holding events in memory only", path, exc
+        )
+        return None
+    return path
 
 
 @dataclass
@@ -110,9 +171,18 @@ class AiWorker:
         log.info(
             "inference threading: %s (opencv=%d)", runtime.describe(), opencv_threads
         )
+        # Every event goes through a bounded local spool, so a bus outage holds
+        # sightings for replay instead of losing them. See ai_worker.publisher.
         self.sink = RedisEventSink(
-            settings.redis_url, settings.event_stream_key, settings.event_stream_maxlen
+            settings.redis_url,
+            settings.event_stream_key,
+            settings.event_stream_maxlen,
+            spool_max_events=settings.ai_worker_spool_max_events,
+            spool_max_bytes=settings.ai_worker_spool_max_bytes,
+            spool_dir=_spool_dir(settings),
+            spool_disk_max_bytes=settings.ai_worker_spool_disk_max_bytes,
         )
+        self._stats_due = 0.0
         #: Every camera this worker owns, whether or not its stream is open.
         self._assigned: dict[str, CameraStream] = {}
         #: Opened and analysed whenever owned; empty means every owned camera.
@@ -150,6 +220,13 @@ class AiWorker:
         self._crops = MinioCropStore()
         # Models outlive the cameras that borrow them; see PipelinePool.
         self._pipelines = PipelinePool()
+        # The persons watchlist. Face models are loaded only if a camera this
+        # worker owns is tagged `analytics:faces`, and lent one camera at a
+        # time; the gallery they match against is read from the platform.
+        self._faces = FaceModelsPool(factory=self._load_face_models)
+        self._gallery = GalleryCache(
+            settings.persons_gallery_key, settings.persons_gallery_refresh_s
+        )
         self._transport: str | None = None
         # Whether RTSP works to a given host, probed once. Which transport a
         # federated grid accepts is a property of this worker's network.
@@ -172,10 +249,14 @@ class AiWorker:
                 # once, so a camera someone opens is analysed in seconds rather
                 # than at the next full pass.
                 focus = await self._read_focus()
+                await self._refresh_gallery()
+                await self._publish_stats()
                 # So is a stream that has just opened: a camera opened because
                 # someone is watching it should start analysing now, not at
                 # the next full pass twenty seconds away.
-                newly_open = any(t.opened and not t.open_seen for t in self.tasks.values())
+                newly_open = any(
+                    t.opened and not t.open_seen for t in self.tasks.values()
+                )
                 if time.monotonic() >= next_pass or focus != self._focus or newly_open:
                     self._focus = focus
                     await self._reconcile()
@@ -217,6 +298,80 @@ class AiWorker:
             log.debug("could not read focus: %s", exc)
             return self._focus
         return frozenset(code for code in codes if code in self._assigned)
+
+    async def _publish_stats(self) -> None:
+        """Report this worker's counters for the platform's exporter.
+
+        One hash field per worker, rewritten every few seconds; the reader
+        judges staleness from `reported_at`. Losing a report — the bus is
+        down, which is exactly when the spool counters matter — costs nothing:
+        the next one carries the totals.
+        """
+        now = time.monotonic()
+        if now < self._stats_due or self._focus_redis is None:
+            return
+        self._stats_due = now + self.settings.ai_worker_stats_every_s
+        report = self.stats_report()
+        try:
+            # redis-py types HSET for its sync and async clients at once.
+            await cast(
+                Awaitable[int],
+                self._focus_redis.hset(
+                    self.settings.ai_worker_stats_key,
+                    str(report["worker"]),
+                    json.dumps(report),
+                ),
+            )
+            await self._focus_redis.expire(
+                self.settings.ai_worker_stats_key, STATS_TTL_S
+            )
+        except (RedisError, OSError) as exc:
+            log.debug("could not publish worker stats: %s", exc)
+
+    def stats_report(self) -> dict[str, Any]:
+        """Counts only — camera codes, never plates or faces."""
+        open_streams = sorted(c for c, t in self.tasks.items() if t.opened and t.alive)
+        return {
+            "worker": f"{self.settings.ai_worker_index}/{self.settings.ai_worker_count}",
+            "reported_at": time.time(),
+            "assigned": len(self._assigned),
+            "open": len(open_streams),
+            "analysing": len(self.rotation.started_at),
+            "open_cameras": open_streams,
+            "analysing_cameras": sorted(self.rotation.started_at),
+            "slots": self.rotation.slots,
+            "sweep_seconds": round(self.rotation.sweep_seconds, 1),
+            "by_kind": dict(self.sink.by_kind),
+            "spool": self.sink.stats(),
+            "inference_budget_threads": runtime.total_budget(),
+            "threads_per_model": runtime.threads_per_model(),
+            **process_usage(),
+        }
+
+    async def _refresh_gallery(self) -> None:
+        """Re-read the persons gallery when it is due, if any camera this
+        worker owns looks for faces. A worker with none never reads it."""
+        if not any(stream.faces for stream in self._assigned.values()):
+            return
+        if not self._gallery.due() or self._focus_redis is None:
+            return
+        await self._gallery.refresh(self._focus_redis)
+
+    def _load_face_models(self) -> Any:
+        """Build one set of face models, inside the thread budget.
+
+        Imported here so a worker that never meets a faces camera never loads
+        OpenCV's DNN networks at all. `FaceModels` applies
+        `ailab.runtime.apply_opencv_threads()` before creating either network.
+        """
+        from ailab.face.models import FaceModels
+
+        faces = self.config.faces
+        return FaceModels(
+            faces.models_dir,
+            score_threshold=faces.detect_score,
+            detect_max_side=faces.detect_max_side,
+        )
 
     def _wanted(self, now: float) -> tuple[set[str], set[str]]:
         """Which owned cameras should have a stream open, and which be analysed.
@@ -263,6 +418,10 @@ class AiWorker:
                 self.settings.ai_worker_count,
                 rtsp_probe=self._rtsp_probe,
                 only=explicit,
+                gateway=(
+                    self.settings.roster_gateway_host,
+                    self.settings.mediamtx_host,
+                ),
             )
 
         if explicit:
@@ -384,7 +543,9 @@ class AiWorker:
         )
         opened_now = 0
         for stream in unopened:
-            if not self._backoff.admit(stream.camera_code, host_of(stream.rtsp_url), now):
+            if not self._backoff.admit(
+                stream.camera_code, host_of(stream.rtsp_url), now
+            ):
                 continue
             if opened_now and self.settings.start_stagger_s > 0:
                 try:
@@ -416,7 +577,9 @@ class AiWorker:
         for code, task in self.tasks.items():
             if task.analyse.is_set() and code not in self.rotation.started_at:
                 task.analyse.clear()
-                log.info("pausing analysis of %s; it is no longer on anyone's screen", code)
+                log.info(
+                    "pausing analysis of %s; it is no longer on anyone's screen", code
+                )
 
         self._log_coverage()
 
@@ -432,7 +595,9 @@ class AiWorker:
             code,
             "while it is on screen"
             if code in self._focus
-            else f"for {turn:.0f}s" if turn else "continuously",
+            else f"for {turn:.0f}s"
+            if turn
+            else "continuously",
         )
 
     def _pause(self, code: str) -> None:
@@ -478,6 +643,13 @@ class AiWorker:
         waiting = self._backoff.waiting(now)
         if waiting:
             coverage += f"; {waiting} camera(s) backing off"
+        faces = sorted(code for code, s in self._assigned.items() if s.faces)
+        if faces:
+            entries = len(self._gallery.current())
+            coverage += (
+                f"; faces looked for on {', '.join(faces)} against {entries} "
+                f"approved entr{'y' if entries == 1 else 'ies'}"
+            )
         pool = self._pipelines.stats()
         log.info(
             "analysing %d of %d camera(s): %s · %d events published%s · "
@@ -541,11 +713,20 @@ class AiWorker:
         # models and leaks their native thread pools on every rotation — see
         # PipelinePool.
         pipeline = self._pipelines.acquire(config)
+        face_models, face_stage = self._face_stage_for(stream, source)
         # Passing a run_dir is what makes crops exist at all: without one the
         # runner substitutes _NullRunDir and silently discards every crop, which
         # is why Detection.crop_key was NULL for the life of the project.
         runner = StreamRunner(
-            config, source, self.sink, run_dir=self._crops, pipeline=pipeline
+            config,
+            source,
+            self.sink,
+            run_dir=self._crops,
+            pipeline=pipeline,
+            face_stage=face_stage,
+            # A camera tagged for faces and not for ANPR runs the face stage
+            # alone: no vehicle detection, no plates, no vehicle events.
+            vehicles=stream.vehicles,
         )
 
         def mark_open() -> None:
@@ -597,7 +778,52 @@ class AiWorker:
             # pipeline that is not given back is one the next camera has to
             # rebuild, which is the leak this pool exists to close.
             self._pipelines.release(config, pipeline)
+            if face_models is not None:
+                if face_stage is not None:
+                    # Releases any crop still held for a face that never got
+                    # enough frames to agree. It is never uploaded.
+                    face_stage.reset()
+                self._faces.release(face_models)
             stop.set()
+
+    def _face_stage_for(
+        self, stream: CameraStream, source: SourceIdentity
+    ) -> tuple[Any, FaceStage | None]:
+        """The persons watchlist's face stage, for a camera tagged for it.
+
+        Only a camera the registry tags `analytics:faces` gets one: faces at a
+        junction are a few pixels across and its CPU is wanted for plates. If
+        the face models cannot be loaded, the camera runs without the stage and
+        says why, rather than failing and being retried every 30 s.
+        """
+        if not stream.faces:
+            return None, None
+        try:
+            models = self._faces.acquire()
+        except (FileNotFoundError, RuntimeError) as exc:
+            log.warning(
+                "%s is tagged analytics:faces but the face stage cannot run: %s",
+                stream.camera_code,
+                exc,
+            )
+            return None, None
+        stage = FaceStage(
+            models,
+            self._gallery.current,
+            self.sink,
+            source,
+            config=self.config.faces,
+            crop_store=self._crops,
+            run_id=f"{stream.camera_code}.faces",
+        )
+        log.info(
+            "%s: face stage on (%s; gallery %d entr%s)",
+            stream.camera_code,
+            "faces only" if not stream.vehicles else "with ANPR",
+            len(self._gallery.current()),
+            "y" if len(self._gallery.current()) == 1 else "ies",
+        )
+        return models, stage
 
     def _own_task(self, code: str, stop: threading.Event) -> CameraTask | None:
         """The calling thread's task — never a newer one that took the camera
@@ -642,7 +868,9 @@ class AiWorker:
         return {
             "worker": f"{self.settings.ai_worker_index}/{self.settings.ai_worker_count}",
             "assigned": sorted(self._assigned),
-            "streams_open": sorted(c for c, t in self.tasks.items() if t.opened and t.alive),
+            "streams_open": sorted(
+                c for c, t in self.tasks.items() if t.opened and t.alive
+            ),
             "analysing": sorted(self.rotation.started_at),
             "slots": self.rotation.slots,
             # How long before every assigned camera has had a turn. The number
@@ -657,4 +885,14 @@ class AiWorker:
             "events_published": self.sink.written,
             "publish_failures": self.sink.publish_failures,
             "by_kind": dict(self.sink.by_kind),
+            # Store and forward: what is held for a bus outage, what has been
+            # replayed, and what the bounds have cost. See ai_worker.publisher.
+            "spool": self.sink.stats(),
+            # The persons watchlist: which owned cameras look for faces, and
+            # what they match against. No entry ids — counts and versions only.
+            "faces": {
+                "cameras": sorted(c for c, s in self._assigned.items() if s.faces),
+                "gallery": self._gallery.describe(),
+                "models": self._faces.stats(),
+            },
         }

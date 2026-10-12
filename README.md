@@ -2,13 +2,12 @@
 
 # Contrail
 
-**City-wide vehicle intelligence platform**
+**Statewide CCTV federation and vehicle intelligence**
 
-Multi-camera ANPR trajectory tracking and urban traffic analytics.
-Turns the disconnected observations of hundreds of city cameras into
-searchable vehicle journeys, traffic intelligence, and real-time alerts.
+One registry, one map and one alert queue over the CCTV that Gujarat's departments
+already own. No department replaces its cameras or its video management system.
 
-<sub>SIH26127</sub>
+<sub>Gujarat Police CCTV Hackathon "Sentinel" · sandbox round 12–13 Oct 2026</sub>
 
 </div>
 
@@ -16,492 +15,308 @@ searchable vehicle journeys, traffic intelligence, and real-time alerts.
 
 ## The idea
 
-Cameras tell us what they see. Contrail connects those observations to
-understand how vehicles move across the entire city.
+Gujarat's departments run CCTV on different vendors' systems, analog and IP, up to
+about 1,000 km apart. Each recorder knows what its own cameras saw. Nobody can ask
+**"where has this vehicle been today?"** across all of them.
 
-A city can run hundreds of ANPR cameras, and normally each one works alone:
+Contrail answers that without centralising video:
+
+> **The central tier carries events, not video.**
+
+| Model | What Contrail does |
+|---|---|
+| **Model 1: registry + GIS** (compulsory) | Every camera, its owner, position and health, on one map |
+| **Model 3: federation** | Departmental VMS stay authoritative. Adapters read their catalogues and stream URLs |
+| **Selective Model 2: direct viewing** | Pulled on demand, only for the feed an operator is watching |
+| **Edge AI** | ANPR runs next to the video, and only ~2 KB events cross the WAN |
+
+**Why not one central VMS (Model 4).** For 80,000 cameras, computed by
+`scripts/capacity_model.py`:
+
+| | Centralise the video | Centralise the events (Contrail) |
+|---|---|---|
+| Bandwidth into the centre | **320 Gbps** | **43.7 Mbps** (7,324× less) |
+| Central video storage, 7 / 15 days | 24.2 / 51.8 PB | none: video stays in the departments' recorders |
+
+These are **arithmetic** from declared inputs: 4 Mbps per camera, and one ~2 KB event
+per camera every 30 s. The full argument is in [docs/HLD.md](docs/HLD.md).
+
+---
+
+## Status
+
+As of 12 Oct 2026. ✅ works and is tested · 🟡 partial · 🔧 being built · ❌ not built.
+
+| Capability | State |
+|---|---|
+| Camera registry + GIS map with layered filters | ✅ |
+| Onboarding: form, bulk CSV with dry run, API client, federated VMS sync | ✅ |
+| Fleet health, `camera_down` alerts auto-closed on recovery, gap analysis | ✅ killed stream → offline in **19 s** (measured) |
+| Federation with the organisers' grid | ✅ 30 cameras onboarded through `HostedGridAdapter` |
+| ONVIF and vendor-VMS adapters (Milestone / Genetec / CP Plus / Hikvision mapping) | 🟡 unit-tested on fixture payloads, never run against a live VMS |
+| Live video: WebRTC with HLS fallback, on demand, camera-scoped tokens | ✅ |
+| ANPR at the edge: detect → track → plate → OCR → consensus | ✅ runs live on the grid; accuracy unproven (see [Accuracy](#accuracy)) |
+| Track a plate across cameras: timestamped route, CSV, printable report | ✅ legs that fail plausibility are flagged, never dropped |
+| Watchlist → alert → every operator's screen | ✅ **24 ms** detection-to-WebSocket (measured) |
+| Trajectory anomalies with stated reasons | ✅ |
+| Traffic insights: counts, flow, congestion, short-horizon forecast | ✅ gaps in the data are labelled, not filled |
+| Audit of every search, stream open and watchlist change | ✅ tested |
+| Persons watchlist (YuNet + SFace), with supervisor approval and four-eyes | 🔧 backend and edge in the working tree, operator screen not finished |
+| Central ingest at 80,000 camera identities | ✅ **2,774 events/s**, 0 failed; ❌ p95 5.7 s against a 3 s target |
+| Redpanda bus, Prometheus/Grafana, DB replicas, backups, TLS | ❌ designed, not built ([HLD §18](docs/HLD.md#18-what-is-not-built)) |
+
+---
+
+## The command centre
+
+Seven workspaces sit across the top bar. A role sees only the workspaces it can use.
+
+| Workspace | Screens | For |
+|---|---|---|
+| **Command** | `/dashboard` | The state at a glance: towns, open alarms, plates arriving now |
+| **Live** | `/anpr` | One camera on the stage with its plate boxes, the rest in a rail |
+| **Investigate** | `/vehicles` | A plate in, its timestamped location-wise route out; CSV and printable report |
+| **Alarms** | `/alerts`, `/watchlist` | The triage queue (severity first, then exact hits before near matches) and the watchlist |
+| **Network** | `/map`, `/cameras`, `/health` | GIS map, the camera registry and onboarding, fleet health and gaps |
+| **Insights** | `/traffic` | Counts, flow, congestion, forecast |
+| **Admin** | `/users`, `/audit` | Accounts, and an audit trail whose own reading is audited |
+
+**⌘K** (or Ctrl K, or `/`) opens search from anywhere:
+
+- type a plate to open its journey;
+- type a camera code or a place (`cam10`, `Paldi`) to open that camera;
+- type a word to find a screen.
+
+---
+
+## The pipeline
 
 ```
-Camera 1  → GJ03AB1234 at 10:31
-Camera 7  → GJ03AB1234 at 10:38
-Camera 15 → GJ03AB1234 at 10:47
+departmental cameras / VMS / the organisers' grid
+        │ RTSP · ONVIF · vendor REST
+        ├──────────────▶ registry + GIS (Model 1) ◀── health monitor
+        │
+        ├──▶ MediaMTX gateway ── on demand ──▶ operator (WebRTC / HLS)        (Model 2)
+        │
+        └──▶ edge ai-worker
+               read (drop-to-latest) → YOLOv8n vehicles → ByteTrack
+               → YOLO11n plate (only when the view changed) → PP-OCRv4
+               → multi-frame consensus → one event per vehicle (+ crop to MinIO)
+                        │  ~2 KB
+                        ▼
+               Redis Stream ──▶ EventConsumer (exactly once) ──▶ PostgreSQL/PostGIS/Timescale
+                        │                     └─ watchlist match ─▶ alert ─▶ pub/sub
+                        └──▶ EventTailer (every API replica) ──▶ /ws/events ──▶ operators
+                                         correlator ─▶ routes · anomalies · analytics
 ```
 
-Three rows in three databases. The vehicle travelled a route, took a time, and
-covered a distance — and none of that is recorded anywhere. Contrail links
-them.
+**What each part runs on**
 
-So the question this platform answers is not *"which vehicle did this camera
-see?"* but:
-
-> *"Where has this vehicle been, where did it travel, how long did it take, what
-> is happening on the roads, and is anything unusual happening?"*
-
-**ANPR is one capability inside the platform, not the product.** A basic build is
-`Camera → YOLO → OCR → Dashboard`. The value is everything after identification:
-
-```
-OBSERVE → IDENTIFY → LINK → UNDERSTAND → PREDICT → ALERT
-                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-                     this is the project
-```
+- **Runtime.** ONNX Runtime and OpenCV. The worker image has no PyTorch.
+- **CPU.** One ONNX thread budget is divided across cameras
+  ([docs/PERFORMANCE.md](docs/PERFORMANCE.md)). Inside Docker on Apple Silicon there
+  is no GPU, and no setting creates one ([docs/GPU.md](docs/GPU.md)).
+- **Split.** The worker publishes events and nothing else. Matching, alerts and
+  storage belong to the platform.
 
 ---
 
 ## Run it
 
+Requirements:
+
+- Docker with **≥ 8 GB** allocated (`make preflight` checks this);
+- `make`;
+- Node 20, only for the browser tests.
+
 ```bash
-git clone <this-repo> && cd SIH-ANPR-Vehicle-Tracking
-make demo
+make models     # once: fetch the detector and OCR weights (ANPR needs them)
+make videos     # once: fetch the recorded demonstration clip
+make demo       # build, start, migrate, seed, onboard the grid, start one AI worker, verify, open the browser
 ```
 
-That is the whole setup. `make demo` brings the platform up, seeds it, and opens
-the command centre at **http://localhost:8080**.
+The command centre is at **http://localhost:8080**.
 
-> **First run** downloads roughly 2 GB of container images and takes a few
-> minutes. Every run after that reaches a working demo in well under a minute.
-> Requires Docker with **≥ 8 GB** allocated. `make preflight` checks this for you.
+- **Admin.** Sign in as `admin` with `BOOTSTRAP_ADMIN_PASSWORD` from your `.env`. The
+  file is created from `.env.example` and is never committed.
+- **Other roles.** `supervisor`, `operator`, `analyst` and `auditor` use the demo
+  password that `make seed` prints.
 
 | Command | What it does |
 |---|---|
-| `make up` | Build and start the platform, wait for every container to be healthy |
-| `make demo` | `up` + seed data + open the browser |
-| `make ai` | Start the AI worker (the `ai` compose profile — **required** for ANPR) |
-| `make scale` | Bring up the horizontally-scaled ingest profile |
-| `make load` | Run the k6 load test against it |
-| `make down` | Stop (data volumes are preserved) |
-| `make status` | Show which dependencies are up, degraded, or down |
-| `make help` | Everything else |
+| `make up` | Build and start the base platform, then wait until every container is healthy |
+| `make demo` | `up`, plus migrate, seed, grid sync (`SANDBOX_SYNC=0` to skip), simulator and one AI worker, then checks |
+| `make ai` | Start **one** AI worker (`ai` profile). Lowest latency for the camera on screen |
+| `make ai-multi` | Start **three** AI workers, each owning a hash shard of the camera list (`AI_WORKER_COUNT=3`, `AILAB_INFERENCE_BUDGET=2`) |
+| `make scale` | Scale overlay: the API stops ingesting and **three consumer replicas** share the stream. (Its help text also names Redpanda and Grafana. Neither exists yet.) |
+| `make status` | Which dependencies are up, degraded or down (`/ready`) |
+| `make logs S=api` | Tail one service |
+| `make down` / `make clean` | Stop and keep data / stop and **delete** data volumes |
+
+API docs are at http://localhost:8000/docs. The simulator's control page is at
+http://localhost:9100/streams.
+
+> **During a live session:**
+>
+> - **Do not restart the AI workers.** The organisers' grid answers repeated logins
+>   by refusing ours for 2–15 minutes.
+> - **Do not run `make test` or the browser flows while anyone is watching.** They
+>   raise a real alarm on the live screens, and close it when done.
+>
+> See [docs/DEMO_SCRIPT.md](docs/DEMO_SCRIPT.md) and [docs/PANIC.md](docs/PANIC.md).
 
 ---
 
-## Architecture
-
-```
-MULTIPLE CITY CAMERAS (multi-vendor)
-        │
-   Integration Layer  ── adapters: RTSP / ONVIF / Vendor VMS API / Simulated
-        │
-   Stream Gateway     ── RTSP → WebRTC/HLS for browsers
-        │
-   ┌────┴────┐
- Video     Events
-   │          │
-AI Pipeline   Event Engine
-   │  (vehicle detect → track → plate detect → OCR → consensus → event)
-   └────┬─────┘
-        │
- Trajectory Engine ── multi-camera linking, journey reconstruction, re-identification
-        │
-   ┌────┼────────────────┬─────────────────┐
-   ▼    ▼                ▼                 ▼
-Vehicle  Traffic      Alerts &         Attribute
-Search   Analytics    Anomalies        Search
-   └────┴────────────────┴─────────────────┘
-        │
- GIS + City Intelligence Dashboard
-```
-
-### The design decision
-
-City cameras are multi-vendor and already deployed. We **federate** rather than
-replace: existing recorders stay authoritative for their own video, we ingest
-metadata centrally, pull streams on demand, and run AI **at the edge** — so that
-
-> **the central tier carries events, not video.**
-
-That is also the scaling argument, and it is arithmetic rather than optimism.
-For a city of ~1,000 cameras:
-
-| Approach | Central bandwidth |
-|---|---|
-| Centralise video | 1,000 × 4 Mbps ≈ **4 Gbps** |
-| Centralise metadata (this design) | ~35 events/s × ~2 KB ≈ **0.6 Mbps** |
-
-A **~7,000× reduction**, plus on-demand pull for the handful of feeds an
-operator is actually watching. It is what lets a city deployment run on
-commodity hardware and a metro deployment run at all. Full derivation is in
-[docs/HLD.md](docs/HLD.md).
-
----
-
-## Scaling
-
-Scale here is three separate problems, solved in three separate places. Every
-number below was printed by a run on the development host (macOS arm64, 10 cores
-/ 16 GB). Nothing in this section is extrapolated, and where a figure *is* a
-projection it says so.
-
-### 1. The event tier scales sideways
-
-The AI workers publish detections to a Redis Stream. Two different consumers read
-it, and keeping them separate is what makes replication correct:
-
-| Class | Delivery | Why |
-|---|---|---|
-| `EventTailer` | **Every replica** sees every event | The live operator picture must be identical on every API process |
-| `EventConsumer` | **Exactly one** replica per event (consumer group) | Durable persistence must happen once, not once per replica |
-
-One consumer group cannot do both, and until they were split the platform was
-correct only while exactly one API process ran. With them split, adding a
-consumer replica adds throughput — with no configuration naming which cameras
-belong to which worker, and no coordination between workers.
+## Test and lint
 
 ```bash
-make scale    # api stops persisting; 3 consumer replicas share the stream
-make load     # k6 against it
+make test        # pytest: API, AI worker, simulator, end-to-end against the live stack; then vitest
+make lint        # ruff + format check + mypy (API, simulator, ai-lab, AI worker) + tsc --noEmit
 ```
 
-**Measured** (`docs/BUILD_STATE.md` § Phase 10):
-
-| Metric | Result |
-|---|---|
-| Sustained ingest | **2,774 events/s** (median) |
-| Distinct vehicle identities | 80,000 |
-| Failed requests | **0** |
-| p95 capture-to-persisted | 5.7 s — **missed its 3 s gate** |
-
-That last row stays in the table. The throughput gate passed and the latency gate
-did not; the cause is queue wait rather than processing time. It is reported
-rather than tuned away — and the load test found three real bugs on the way.
-
-### 2. The inference tier scales by thread budget
-
-See [Model optimization](#model-optimization). The short version: one process-wide
-thread budget divided across concurrent cameras, because the worker runs one
-pipeline **per camera** and each pipeline builds five ONNX sessions.
-
-### 3. Fleet sizing is computed, not tabulated
-
-A static sizing table answers one fleet size and drifts out of date. This is a
-script instead:
+**Browser flows.** These use real Chromium through `playwright-core`, against the
+running stack:
 
 ```bash
-python3 scripts/capacity_model.py --cameras 100000 --provenance
+cd tests/browser && npm install
+node flows.mjs                       # sign-in, command, ⌘K plate, investigate + CSV, report,
+                                     # live demo camera, watchlist → alarm, network, insights,
+                                     # audit, sign-out
+node flows.mjs --only palette-plate,report --headed
+CHROME_PATH=/path/to/chrome node flows.mjs   # if Chrome is not found automatically
 ```
 
-Every figure derives from a declared constant, and every constant carries its
-provenance — **MEASURED** ones name the run that produced them, **ASSUMED** ones
-name the reasoning. `docs/INFRASTRUCTURE.md` §2 carries an older sizing table
-known to be **~4× optimistic** (it treats a 4-thread worker as one core); the
-script supersedes it.
+**Load tests.**
 
-### What is *not* built
-
-Honest seams, so nobody is surprised at a demo:
-
-| Item | State |
+| Command | What it runs |
 |---|---|
-| **Kafka / Redpanda backend** | `Settings.event_bus_backend` accepts `"kafka"`, and `kafka_bootstrap_servers` / `kafka_topic_detections` are defined — but **only the Redis implementation exists**. Selecting `kafka` today does nothing. The interface seam is real; the driver behind it is not written. |
-| **Kubernetes** | **Nothing.** Orchestration is Docker Compose profiles (`base`, `ai`, `scale`). Horizontal scale is proven with compose `replicas`, not with a scheduler. |
-| **Multi-node** | Every measurement above is single-host. Cross-node behaviour is unproven. |
+| `make load` | 80,000 camera identities at 2,667 events/s |
+| `make load-quick` | A 30 s sanity run |
+| `make load-operators` | k6: can operators still work while ingest runs at full rate? |
+
+**The last full recorded run** (12 Oct, [docs/BUILD_STATE.md](docs/BUILD_STATE.md)):
+
+| Suite | Result |
+|---|---|
+| API | 639 passed, 16 skipped |
+| AI worker | 116 |
+| Simulator | 22 |
+| Web | 332 tests, 34 files |
+| End-to-end | 34 |
+
+CI (`.github/workflows/ci.yml`) also runs the ai-lab suite, which `make test` does
+not, and builds the web bundle.
 
 ---
 
-## Model optimization
+## Scale
 
-The pipeline was, at one point, the reason the demo did not work — and the fix was
-not a smaller model. It was arithmetic about threads.
+Scale is three separate problems, solved in three places.
 
-### The bug
+**1. The event tier: measured.**
 
-Every inference session sized its own thread pool as if it owned the machine, and
-nothing divided that by the number of cameras. One `Pipeline` runs per camera on
-its own thread; each builds **five** ONNX sessions (vehicle detector, plate
-detector, and OCR's detect/classify/recognise trio). On a 10-core host at three
-cameras:
-
-```
-3 cameras × 3 OCR sessions × 10 threads  = 90
-3 cameras × 2 YOLO sessions ×  4 threads = 24
-OpenCV's own pool, per camera thread     = 10
-                                          ---
-                                          124+ threads on 10 cores
+```bash
+make scale && make load
 ```
 
-**Measured: 168 OS threads, 866% CPU, load average 18.8.** The AI worker alone took
-~8.7 of 10 cores, starving MediaMTX, the browser and the compositor. The symptom
-presented as "camera tiles won't load".
+| Measured on one laptop, 80,000 camera identities, 3 consumer replicas, 150 s | |
+|---|---|
+| Ingest sustained (median) | **2,774 events/s** (offered 2,664) |
+| Failed | **0**. 388,713 detections written, 397 alerts raised |
+| p95 capture → persisted | **5.7 s. Missed the 3 s target.** The backlog grew to 10,237 during the run and cleared afterwards: queue wait, not processing |
 
-### Why oversubscription was not even a trade
+The run also found three bugs that 443 tests had not. They are in
+[docs/HLD.md §15](docs/HLD.md#15-scale-evidence).
 
-It was not latency-for-throughput. Measured on this host, OCR recognition on one
-plate crop:
+**2. The inference tier: measured per frame, divided by a thread budget.**
 
-| Threads | Wall/call | CPU/call | Cores used |
-|---|---|---|---|
-| `intra_op=2` | 11.8 ms | 23.6 ms | 2.0× |
-| `intra_op=4` | **8.0 ms** | 32.0 ms | 4.0× |
-| ONNX Runtime default (all cores) | 14.3 ms | 132.6 ms | 9.3× |
+- On the development Mac, one analysed 1080p frame costs **0.30–0.80 core-seconds in
+  Docker** and **0.10 natively with CoreML**
+  ([research](docs/research/ANPR_ACCURACY_LATENCY.md)).
+- No x86 server or GPU has run this code.
 
-The default burns **5.6× the CPU of two threads to return a slower answer**. These
-are small models — past a handful of threads the convolutions spend longer
-synchronising than computing. The detector shows the same shape: YOLOv8n at 640px
-runs 275 ms at 1 thread, **126 ms at 4**, 194 ms at 6, 331 ms at 8.
+**3. Fleet sizing: computed, never tabulated.**
 
-### The rule
-
-`ai-lab/ailab/runtime.py` owns one budget for the whole process and divides it by
-the number of pipelines sharing it:
-
-```
-budget       = cores(affinity-aware) − 2 reserved
-per-pipeline = clamp(budget ÷ concurrent_pipelines, 1, 4)
+```bash
+python3 scripts/capacity_model.py --cameras 80000
+python3 scripts/capacity_model.py --compare --provenance
 ```
 
-- **Affinity-aware.** `sched_getaffinity`, not `cpu_count` — a container pinned to
-  a CPU subset still reports the host's total, and sizing a pool to cores you may
-  not use is how oversubscription starts.
-- **Two threads reserved** for RTSP decode, the media gateway, the event sink and
-  the browser. Inference that consumes every core makes the product it serves
-  unusable.
-- **Capped at 4 per model** regardless of free budget, per the table above.
-- **The divisor is the camera count, not the session count** — the five sessions in
-  one pipeline run *sequentially* on that camera's thread, so they never contend
-  with each other. Contention is strictly between cameras.
+80,000 cameras, CPU only:
 
-### Result
+| | |
+|---|---|
+| Edge compute | ~36,000 cores, **911 nodes** |
+| Capex | **₹39.31 crore** |
+| Opex | **₹8.78 crore / year** |
 
-| | Before | After |
-|---|---|---|
-| Worker CPU | 866% | **~570%** |
-| Detections/min | 79 | **~150** |
-| Camera slots | 3 (CPU-bound) | **4** (now memory-bound, ~1.4 GB/slot) |
+GPU scenarios are extrapolated and need hardware decode, which isn't built. Every
+assumption is printed with its source.
 
-**Never construct an inference session outside `ailab.runtime`,** and never set
-`AILAB_ORT_THREADS` in compose — it bypasses the division. See
-[docs/PERFORMANCE.md](docs/PERFORMANCE.md).
+An earlier sizing in the docs was about **4× too optimistic**. It treated a 4-thread
+worker as one core. [docs/INFRASTRUCTURE.md](docs/INFRASTRUCTURE.md) replaces it.
 
-### Runtime footprint
+---
 
-Ultralytics (AGPL-3.0) + PyTorch is ~2.5 GB and is used **only at build time**, in a
-throwaway tools image, to export ONNX. The shipped `ai-worker` carries
-`onnxruntime` + OpenCV only — **~400 MB**. This protects the 5-minute demo
-constraint and keeps AGPL code out of the deployed artifact.
+## Accuracy
 
-**On GPUs:** both CUDA and CoreML paths are wired (`device: auto|cpu|cuda|coreml`)
-and **neither is measured here**. There is no accelerator of any kind inside Docker
-on Apple Silicon — onnxruntime reports exactly
-`['AzureExecutionProvider', 'CPUExecutionProvider']`, verified. Any GPU figure in
-these docs is labelled *extrapolated*. See [docs/GPU.md](docs/GPU.md).
+**We do not claim a system accuracy figure.** What has been measured
+([research, 12 Oct](docs/research/ANPR_ACCURACY_LATENCY.md)):
+
+**Single-crop exact match.** On 60 legible grid crops, labelled by an AI rather than
+two humans, so ±10–12 points:
+
+| Configuration | Exact match |
+|---|---|
+| As shipped | 61.7% |
+| Raw crops fed to the recogniser | 83.3% |
+
+**Plate yield on the grid at night.** The share of completed vehicles that produced a
+grammar-valid plate:
+
+| Vehicle class | Yield |
+|---|---|
+| Cars | 11.3% |
+| Trucks | 19.7% |
+| Buses | 14.8% |
+| Two-wheelers | 0% |
+
+Overview cameras at night mostly cannot read two-wheelers, and we say so.
+
+**What claiming >90% would take:** a two-person, human-labelled set of about 400
+vehicles scoring ≥93%. That set does not exist yet.
+
+**Errors are kept visible.**
+
+- Near matches are capped at medium priority and labelled "verify before acting".
+- Route legs that fail plausibility are flagged, never dropped.
+- The system reports a **trajectory anomaly**, never a "suspicious" vehicle.
 
 ---
 
 ## Security
 
-This platform tracks the movement of private vehicles. That makes the security
-posture part of the product, not paperwork around it.
-
-### Authentication
+This platform tracks people's movements. The controls that matter make misuse
+visible, as well as keeping attackers out.
 
 | Control | Implementation |
 |---|---|
-| Password hashing | **argon2id**, OWASP-recommended parameters (19 MiB, 2 iterations) — not bcrypt, because it resists GPU cracking far better |
-| Access token | JWT, **15 minutes** |
-| Refresh token | JWT, **7 days**, revocable — every token carries a `jti`, and logout adds it to a denylist |
-| Issuer / audience | Asserted on decode, so a token minted by another system or for another audience cannot be replayed against this API |
-| Stream token | **Separate token type, ~2 minute life, scoped to one camera.** A viewing URL that leaks from browser history is useless within minutes and cannot be replayed against a different camera |
+| Passwords and tokens | argon2id. JWT access tokens of 15 min. Refresh tokens of 7 days, rotated, with a denylist checked on HTTP and WebSocket |
+| Roles | Six roles, enforced server-side on every request. Operators acknowledge; supervisors dispatch. **An auditor cannot run a vehicle search** |
+| Audit | Every plate search, stream open and watchlist change. Denied attempts too. Reading the audit trail is itself audited |
+| Stream tokens | Their own token type: ~2 min, scoped to one camera. Camera credentials never reach the browser and are redacted from every log |
+| Rate limiting | Redis-backed, so per deployment rather than per replica. Auth counts **failures**, not attempts |
+| Secrets | Secrets live in `.env` (gitignored). `credentials_ref` is a pointer. `enc://` values are sealed with AES-256-GCM |
 
-`app/core/security.py` is pure crypto — no database, no network. Anything needing
-storage (denylists, attempt counters) lives in `app/services/`, which keeps the
-security-critical logic in one readable, trivially testable place.
+**Not yet:**
 
-### Authorization and audit
+- TLS (the `deploy/nginx` edge config is plain HTTP);
+- volume and object encryption at rest;
+- backups;
+- a penetration test;
+- replacing the AGPL-3.0 detector weights.
 
-RBAC in `app/core/rbac.py`. Above it, an **audit trail that is enforced and
-tested**: every plate search, every camera stream open, and every
-watchlist/blacklist mutation writes an `audit_log` row. Middleware covers all
-mutating requests; the three named actions also get explicit calls. There is a test
-asserting the rows appear.
-
-Traceability of *who looked at what* is both a feature to point at and the right
-thing to build into a system like this.
-
-### Rate limiting
-
-`app/core/ratelimit.py` — a fixed-window counter in **Redis**, not in-process.
-
-- **Why Redis:** the scale profile runs multiple API replicas. A per-process counter
-  gives each replica its own allowance, so the real limit becomes
-  `configured × replicas` and moves whenever you scale. A limit that changes when
-  you add capacity is not a limit.
-- **Why fixed-window:** a sliding-window log costs a sorted set and a trim per
-  request. Against credential guessing and runaway client loops, a fixed window is
-  sufficient, and its worst case (2× allowance across a boundary) is not a
-  meaningful weakness at these thresholds.
-
-| Scope | Budget |
-|---|---|
-| General API | **300 requests / 60 s** |
-| `/auth/login`, `/auth/refresh`, `/auth/password` | **10 / 300 s** |
-| `/health`, `/ready`, `/metrics` | Exempt |
-
-Two decisions worth knowing:
-
-- **On auth paths, only failures are counted.** Counting every attempt looked right
-  and was wrong: a control room sits behind one NAT, so ten operators signing in at
-  shift change would lock each other out. A successful login is not an attack. What
-  is limited is *guessing*, and guessing is failure by definition.
-- **It fails open.** If Redis is unreachable the request is allowed, and the failure
-  is logged. An operator locked out of the alert screen during an incident because a
-  cache is down is a worse outcome than an unthrottled minute.
-
-Health paths are exempt because a throttled container probe reports the service
-unhealthy and restarts it — turning a rate limit into an outage.
-
-### Middleware ordering
-
-Starlette runs middleware in reverse registration order. The intended order,
-outermost first:
-
-```
-CORS  →  rate limit  →  audit  →  route
-```
-
-CORS outermost, so a 429 still carries the headers a browser needs to read it. The
-rate limiter **outside** the audit middleware, so a flood is rejected before it can
-write a row per request — an attacker who can make the platform fill its own audit
-table has found a way to destroy the record of what they did.
-
-### Secrets
-
-`vms_instances.credentials_ref` stores a **pointer, never a secret**:
-
-```
-vault://nagarnetra/vms/rajkot-milestone
-env://RAJKOT_VMS_USERNAME:RAJKOT_VMS_PASSWORD
-file:///run/secrets/rajkot_vms
-```
-
-The registry is the most valuable table in the system — it lists every camera and
-how to reach it. Putting VMS passwords in it would mean one SQL injection
-compromises live video across every department. A pointer means an attacker who
-reads the whole table still has to separately compromise the secret store.
-
-`.env.example` is committed, `.env` is not. Secrets have **no in-code defaults** —
-the API refuses to start rather than sign tokens with a key readable in this
-repository.
-
-### Encryption at rest
-
-`app/core/crypto.py` — **AES-256-GCM** envelope encryption for values that must
-survive in a row while staying unreadable to anyone who obtains that row without
-the key.
-
-| Property | Choice |
-|---|---|
-| Cipher | AES-256-GCM (authenticated — decryption returns the sealed bytes or raises) |
-| Key size | 256-bit, **rejected at load** if any other length, so a 16-byte key cannot silently downgrade to AES-128 |
-| Nonce | 96-bit, fresh from `os.urandom` per message, never derived or counted |
-| Associated data | **Mandatory.** A ciphertext is bound to its context, so it cannot be lifted from one column and opened in another |
-| Rotation | A key ring, and every token names the key that sealed it — add a key, move the active id, re-encrypt at leisure, drop the old key |
-| Token | `v1.<key_id>.<nonce>.<ciphertext‖tag>`, base64url, safe in a URL, header or CSV cell |
-
-The first caller is the `enc://` credential pointer:
-
-```bash
-python3 scripts/generate_encryption_key.py --key-id 2025a --seal vmsuser:s3cr3t
-```
-
-This is the case where there is no Vault to point at — an air-gapped pilot, or a
-single-node install — and the honest alternative is a plaintext column, not a
-secret store. The pointer discipline above is otherwise unchanged.
-
-**With no keys configured, `encrypt` raises rather than storing plaintext.** A
-function named `encrypt` that silently degrades is the failure the module exists
-to prevent, so the demo path (which uses `env://`) simply needs no key.
-
-**Scope, stated plainly:** this is application-level encryption of specific
-values. The database volume and MinIO objects are still unencrypted at rest —
-that is deployment configuration (Postgres TDE, encrypted volumes, MinIO SSE),
-not something application code can provide, and `docs/SECURITY.md` §8 still
-lists it as a gap.
-
-Covered by 44 tests in `services/api/tests/test_crypto.py`, most of which assert
-*refusal*: wrong key, wrong context, flipped bit, spliced nonce, retired key,
-malformed token, short key. A suite that only proves round-tripping proves the
-encryption runs and says nothing about whether it protects anything.
-
-### Transport
-
-TLS terminates at the edge (`deploy/nginx/`). `X-Forwarded-For` is trusted for
-rate-limit keying **only because nginx sets it and nothing else can reach the
-service**; exposed directly to the internet that header is caller-controlled and
-this would need revisiting. That caveat lives in the code, at the line that trusts
-it.
-
-Full model, including retention and lawful-use safeguards:
-[docs/SECURITY.md](docs/SECURITY.md).
-
----
-
-## What it does
-
-The PS defines eight things a city command centre must do. This is where each one
-honestly stands — status is per-item, because the interesting part of a hackathon
-README is the part that says what is *not* finished.
-
-| # | Capability | State |
-|---|---|---|
-| 1 | **Live multi-camera detection** | ✅ **51 cameras live** on 12 real Ahmedabad corridors |
-| 2 | **ANPR** — plate, confidence, camera, timestamp | ✅ 9 fps, p90 266 ms, 0.70–0.94 confidence |
-| 3 | **Multi-camera linking** | 🟡 engine linking real sightings; hop timing not yet plausible |
-| 4 | **Vehicle journey** — distance, duration, animated route | ✅ profile + timeline playback on the map |
-| 5 | **Vehicle search** | 🟡 fuzzy search code complete (P8), gate not yet run |
-| 6 | **Blacklist alerts** — with plate crop | ✅ fires by itself, with the crop |
-| 7 | **Trajectory anomalies** — flagged *with reasons* | 🟡 code complete (P5), gate not yet run |
-| 8 | **City traffic analytics** | ✅ Traffic Intelligence dashboard, corridor traffic on the map, `/analytics/traffic` + history |
-
-Beyond the eight: **predictive traffic** (P10) is code-complete and ungated;
-**attribute search** (P9) and **re-identification** (P11) are half built — both need
-a vision pipeline for their remaining half. Direction of travel is now emitted by
-the pipeline and tallied per corridor, so `detections.direction` has a producer.
-
-**[docs/ROADMAP.md](docs/ROADMAP.md) is the plan of record**;
-[PROGRESS.md](docs/PROGRESS.md) is the one-page current state. Nothing in this README
-describes a screen that does not exist.
-
-### Accuracy — the claim we do not yet make
-
-The PS sets a hard target of **>90% plate recognition under real-world conditions** —
-motion blur, night, angle, occlusion, damaged plates.
-
-**We cannot make that claim yet, and we do not.** Accuracy has been measured only on
-*synthetic* footage: **62.5–87.5% end to end**, with 100% exact-match on plates the
-pipeline chooses to attempt and a character error rate of 0.000. Those numbers are
-optimistic by construction — the plates are rendered from a clean font, with no
-embossing, dirt or real motion blur.
-
-The interesting part is *where* it falls short. When the pipeline commits to a read
-it is almost always right; it declines to read roughly a third of plates. **The
-bottleneck is recall, not recognition** — which means a better recogniser is the
-wrong fix.
-
-Measurement lives in [`ai-lab/`](ai-lab/), a harness with hard-case mining and a
-labelling loop. The figure we publish will be the figure the harness printed, with
-its conditions attached.
-
-### Language discipline
-
-The system reports a **trajectory anomaly** — never a "suspicious", "criminal" or
-"wanted" vehicle, plate or driver. It reports movement that differs from the norm; a
-human decides what that means. An operator shown "SUSPECT" for a lane change stops
-trusting the tool.
-
----
-
-## Design constraints
-
-| Constraint | How it is honoured |
-|---|---|
-| **One laptop** | `docker compose up`. No cluster, no cloud account, no manual data entry. |
-| **Fully offline** | Local models, local database, local map data. No Google Maps, no hosted inference, no paid API anywhere. |
-| **CPU must work** | GPU is an accelerator, never a requirement. Device auto-detected, clean CPU fallback. |
-| **Degrades, never dies** | Lose WebRTC and video falls back to HLS. Lose a dependency and the readiness endpoint names it rather than failing opaquely. |
-| **Computed, never invented** | Every congestion figure, delay and score derives from observed data. Where there is not enough data to compute one, the UI says so rather than showing a plausible number. |
-| **Explainable** | Intended: an alert carries the factors that raised it, because `Risk: 87%` alone is a bug. *(P5 adds the `reasons` column — code complete, gate not yet run.)* |
-| **Auditable** | Enforced and tested — see [Security](#security). |
-| **No secrets in git** | `.env.example` committed, `.env` not. No in-code secret defaults. |
+Full model: [docs/SECURITY.md](docs/SECURITY.md).
 
 ---
 
@@ -510,73 +325,65 @@ trusting the tool.
 | Layer | Choice |
 |---|---|
 | API | FastAPI (Python 3.11), SQLAlchemy 2.0 async, Alembic, Pydantic v2 |
-| Database | PostgreSQL 16 + PostGIS 3.4 + TimescaleDB |
-| Search | OpenSearch 2.19 (Apache-2.0), Postgres `pg_trgm` fallback |
-| Event bus | **Redis 7 Streams with consumer groups.** A `kafka` backend is declared in config but not implemented |
-| Object store | MinIO (S3 API) |
-| Media gateway | MediaMTX — RTSP in, WebRTC/HLS out |
-| AI | YOLO → ONNX (vehicle + plate), ByteTrack, ONNX CRNN OCR, ONNX Runtime |
-| Auth | JWT access + refresh, argon2id, RBAC |
-| Encryption | AES-256-GCM at rest (`cryptography`), TLS at the edge |
-| Orchestration | **Docker Compose profiles** (`base`, `ai`, `scale`) + Makefile. No Kubernetes |
-| Frontend | React 18 + Vite + TypeScript + Tailwind + shadcn/ui |
-| Map | MapLibre GL, offline GeoJSON basemap — no tile server, no downloads |
-| Tests | pytest + httpx, vitest + RTL, k6 — **546 tests** |
+| Database | PostgreSQL 16 + PostGIS + TimescaleDB (`timescale/timescaledb-ha`, one arm64/amd64 image) |
+| Bus | Redis 7 Streams with consumer groups. A Redpanda backend is a config seam only |
+| Media | MediaMTX 1.20.1: RTSP in, WebRTC (WHEP) / LL-HLS out, on demand |
+| AI | YOLOv8n (vehicles), YOLO11n (plates), ByteTrack, PP-OCRv4 via RapidOCR, ONNX Runtime 1.29. Faces: YuNet + SFace (🔧) |
+| Objects | MinIO (crops; a private bucket for persons media) |
+| Search | Postgres `pg_trgm`. OpenSearch runs but indexes nothing yet |
+| Frontend | React 18, Vite, TypeScript, Tailwind, MapLibre GL (offline GeoJSON basemap, optional satellite), Recharts, bundled fonts (no CDN) |
+| Orchestration | Docker Compose profiles (`base`, `ai`, `ai-multi`) plus the scale overlay. No Kubernetes |
+| Tests | pytest, vitest, Playwright (browser flows), k6 |
 
-Everything is pinned to an exact version, and every image runs natively on both
-`linux/amd64` and `linux/arm64`.
+---
+
+## Repository layout
+
+```
+services/api/          FastAPI: registry, adapters, health monitor, ingest, watchlist, alerts,
+                       correlator, anomaly, analytics, persons (in progress), audit
+services/ai-worker/    the edge worker: roster, sharding, rotation, back-off, publisher
+ai-lab/                the vision pipeline the worker imports, and its accuracy harness
+services/simulator/    replays recorded footage as RTSP; load generator
+web/                   the command centre
+scripts/               capacity_model.py, seed.py, sync_sandbox.py, demo_up.sh, …
+tests/                 e2e (pytest), browser (Playwright), load (generator + k6)
+docs/                  design, infrastructure, security, requirements, runbooks
+deploy/                single-host EC2 staging/main (not on the demo path)
+```
 
 ---
 
 ## Documentation
 
-**Start here, in this order:**
-
 | Document | Contents |
 |---|---|
-| [PROGRESS.md](docs/PROGRESS.md) | One page: what works, what doesn't, **the next task** |
-| [docs/ROADMAP.md](docs/ROADMAP.md) | **The plan of record** — phases P1–P12, each with its gate |
-| [CLAUDE.md](CLAUDE.md) | The contract: conventions, the rules, the migration ledger |
-| [BUILD_STATE.md](docs/BUILD_STATE.md) | Build history, gate evidence, and the audited gap list |
-
-**Reference:**
-
-| Document | Contents |
-|---|---|
-| [ai-lab/README.md](ai-lab/README.md) | The accuracy harness — how the >90% claim gets measured |
-| [docs/PERFORMANCE.md](docs/PERFORMANCE.md) | Thread budget, slot sizing, the CPU-starvation fix |
-| [docs/GPU.md](docs/GPU.md) | Why there is no accelerator in Docker on Apple Silicon |
-| [docs/SECURITY.md](docs/SECURITY.md) | RBAC, encryption, audit, retention, lawful-use safeguards |
+| [docs/HLD.md](docs/HLD.md) | **The architecture.** Model choice, data flows, database, matching, alerting, tiers, HA/DR, rollout |
+| [docs/INFRASTRUCTURE.md](docs/INFRASTRUCTURE.md) | Compute, bandwidth, storage, hardware and costs, from `capacity_model.py` |
+| [docs/REQUIREMENTS.md](docs/REQUIREMENTS.md) | Every Sentinel requirement mapped to code, or to a marked gap |
+| [docs/SECURITY.md](docs/SECURITY.md) | Controls, retention, lawful use, what is not implemented |
+| [docs/DEMO_SCRIPT.md](docs/DEMO_SCRIPT.md) · [docs/PANIC.md](docs/PANIC.md) | The live test, step by step, and what to do when something breaks |
+| [docs/research/ANPR_ACCURACY_LATENCY.md](docs/research/ANPR_ACCURACY_LATENCY.md) | Where ANPR time and accuracy go, measured |
+| [docs/PERFORMANCE.md](docs/PERFORMANCE.md) · [docs/GPU.md](docs/GPU.md) | The worker's CPU budget; why there is no GPU in Docker on a Mac |
 | [docs/API.md](docs/API.md) | Every endpoint, generated from the live OpenAPI document |
-| [docs/HLD.md](docs/HLD.md) | High-level design, scaling, measured performance |
-| [docs/INFRASTRUCTURE.md](docs/INFRASTRUCTURE.md) | Bandwidth, storage tiering, DR *(sizing ~4× optimistic — use `scripts/capacity_model.py`)* |
-| [docs/DEMO_SCRIPT.md](docs/DEMO_SCRIPT.md) | Minute-by-minute walkthrough, with fallbacks |
+| [docs/BUILD_STATE.md](docs/BUILD_STATE.md) | Build history and the evidence behind every number |
 
-> **Note:** this codebase was renamed and re-aimed from an earlier *statewide* CCTV
-> project. `docs/HLD.md`, `docs/INFRASTRUCTURE.md`, `docs/BRIEFING.md`,
-> `docs/REQUIREMENTS.md`, `docs/STATUS.md`, `docs/submission/*` and the build history
-> in `docs/BUILD_STATE.md` still argue that older brief in places.
-> [CLAUDE.md §10](CLAUDE.md#10-migration-ledger) tracks every site; fixing them is P12.
+**Lineage.** This codebase began as *Sentinel-GJ* for this challenge. It was briefly
+re-aimed at SIH26127 (a city-wide brief) under the name *NagarNetra*, and is now back
+on Sentinel as **Contrail**. Some identifiers, Redis keys and older documents still
+carry the earlier names.
 
----
+Superseded status documents are marked at the top:
 
-## Development
-
-```bash
-make up          # start the platform
-make ai          # start the AI worker (required for ANPR)
-make test        # backend (pytest) + frontend (vitest)
-make lint        # ruff + format check + tsc
-make logs S=api  # tail one service
-make status      # dependency readiness
-make clean       # stop and delete all data volumes
-```
-
-**Known:** `mypy` does not currently pass (17 errors across 8 files) and `make lint`
-does not run it. P12.
+- `docs/STATUS.md`
+- `docs/PROGRESS.md`
+- `docs/ROADMAP.md`
+- `docs/BRIEFING.md`
+- `COMPLETE_PROJECT_KNOWLEDGE.md`
+- `docs/submission/DECK.md`
 
 ---
 
 <div align="center">
-<sub>Apache-2.0 · SIH26127 — City-Wide AI Engine for Multi-Camera ANPR Trajectory Tracking and Urban Traffic Analytics</sub>
+<sub>Contrail · Gujarat Police CCTV Hackathon "Sentinel" · no LICENSE file is committed yet; the detector weights are AGPL-3.0 (see docs/SECURITY.md §8)</sub>
 </div>

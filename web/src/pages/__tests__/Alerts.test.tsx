@@ -527,3 +527,128 @@ describe('the queue', () => {
     expect(reconcileSelection({ selectedId: 'b', visibleIds: [], seenId: 'b', advance: null })).toBeNull()
   })
 })
+
+describe('a possible person match', () => {
+  const MATCH = alarm('alarm-person', {
+    alert_type: 'person_match',
+    priority: 'high',
+    plate_normalised: null,
+    confidence: null,
+    camera_id: 'cam-1',
+    detection_id: null,
+    watchlist_id: null,
+    similarity: 0.73,
+    notes: 'The captured face scored 0.73 against the enrolled reference photo',
+    reasons: [
+      {
+        factor: 'face_similarity',
+        detail:
+          "The captured face scored 0.73 against the enrolled reference photo (cosine similarity). This deployment requires 0.45; the model's published threshold is 0.363.",
+      },
+      { factor: 'frames_agreed', detail: '3 analysed frames of the same face agreed on this entry over 1.0 s (2 required).' },
+      {
+        factor: 'watchlist_entry',
+        detail: 'The entry is a demonstration entry with a fictional case, under case DEMO/PERSONS/001 (fictional), approved by admin.',
+      },
+    ],
+  })
+
+  const EVIDENCE = {
+    alert_id: 'alarm-person',
+    person: {
+      id: 'person-1',
+      display_name: 'Demo subject — stock footage',
+      category: 'demo',
+      case_ref: 'DEMO/PERSONS/001 (fictional)',
+      purpose: 'Demonstration of the persons watchlist.',
+      notes: null,
+      status: 'active' as const,
+      valid_until: '2026-10-19T00:00:00Z',
+      matchable: true,
+      photo_url: 'http://localhost:9000/nagarnetra-persons/persons/p/reference.jpg?X-Amz-Signature=a',
+      photo_purged: false,
+      enrol_quality: { face_px: 110 },
+      embedding_model: 'sface_2021dec',
+      enrolled_by: 'u-sup',
+      enrolled_by_username: 'supervisor',
+      enrolled_at: '2026-10-12T01:00:00Z',
+      approved_by_username: 'admin',
+      approved_at: '2026-10-12T01:01:00Z',
+      rejected_by_username: null,
+      rejected_at: null,
+      rejection_reason: null,
+      retired_by_username: null,
+      retired_at: null,
+      retired_reason: null,
+      can_review: false,
+    },
+    face_url: 'http://localhost:9000/nagarnetra-persons/faces/2026/10/12/CAM-DEMO-02/x.jpg?X-Amz-Signature=b',
+    face_purged: false,
+    similarity: 0.73,
+    threshold: 0.45,
+    model_threshold: 0.363,
+    frames_agreed: 3,
+    frames_required: 2,
+    captured_at: '2026-10-12T01:31:05Z',
+    camera_id: 'cam-1',
+    notice: 'A possible match, not an identification. A person must compare the two faces before anyone acts.',
+  }
+
+  beforeEach(() => {
+    auth.permissions = new Set([...EVERYTHING, PERMISSIONS.personRead])
+    stream.alerts = []
+    vi.spyOn(api, 'getAlerts').mockResolvedValue(page([MATCH]))
+    vi.spyOn(api, 'getCameras').mockResolvedValue({
+      items: [camera('cam-1', 'CAM-DEMO-02')],
+      total: 1,
+      limit: 500,
+      offset: 0,
+    } as CameraPage)
+    vi.spyOn(api, 'getWatchlist').mockResolvedValue([])
+    vi.spyOn(api, 'getAlert').mockRejectedValue(new Error('No such alert'))
+    vi.spyOn(api, 'getPersonMatch').mockResolvedValue(EVIDENCE)
+  })
+
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  it('is called a possible person match and counts with the watchlist alarms', () => {
+    expect(alarmTitle({ alert_type: 'person_match', camera_id: 'cam-1' })).toBe('Possible person match')
+    expect(alarmKind('person_match')).toBe('watchlist')
+  })
+
+  it('shows the enrolled face and the captured face side by side, with the rule above them', async () => {
+    renderAt('/alerts?alert=alarm-person')
+    await waitFor(async () => expect((await shownTitle()).textContent).toBe('Possible person match'))
+    expect(screen.getByRole('note').textContent).toContain(
+      'A person must confirm this match before anyone acts.',
+    )
+    const reference = (await screen.findByAltText('Enrolled reference')) as HTMLImageElement
+    const captured = screen.getByAltText('Captured by the camera') as HTMLImageElement
+    expect(reference.src).toContain('reference.jpg')
+    expect(captured.src).toContain('/faces/')
+    expect(api.getPersonMatch).toHaveBeenCalledWith('alarm-person')
+    // The score is a similarity against a threshold, never a percentage.
+    expect(screen.getAllByText('0.73').length).toBeGreaterThan(0)
+    expect(screen.queryByText(/73%/)).toBeNull()
+    expect(screen.getByText('Demo subject — stock footage')).toBeTruthy()
+    expect(screen.getByText('Face similarity', { selector: 'span' })).toBeTruthy()
+    expect(screen.getByText(/Compare the two faces yourself/)).toBeTruthy()
+  })
+
+  it('reads the evidence once per alarm opened, not on every refresh', async () => {
+    renderAt('/alerts?alert=alarm-person')
+    await screen.findByAltText('Enrolled reference')
+    expect(api.getPersonMatch).toHaveBeenCalledTimes(1)
+  })
+
+  it('shows a role without person.read the alarm but never the faces', async () => {
+    auth.permissions = new Set(EVERYTHING)
+    renderAt('/alerts?alert=alarm-person')
+    await waitFor(async () => expect((await shownTitle()).textContent).toBe('Possible person match'))
+    expect(screen.getAllByText(/person\.read/).length).toBeGreaterThan(0)
+    expect(screen.queryByAltText('Enrolled reference')).toBeNull()
+    expect(api.getPersonMatch).not.toHaveBeenCalled()
+  })
+})

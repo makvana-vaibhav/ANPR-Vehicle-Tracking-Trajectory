@@ -24,6 +24,7 @@ from typing import Any
 
 from fastapi import APIRouter, Query, WebSocket, WebSocketDisconnect, status
 
+from app.core import public_origin
 from app.core.logging import get_logger
 from app.core.security import TokenError, TokenPayload, decode_token
 from app.services.event_bus import broadcaster
@@ -96,6 +97,10 @@ async def event_feed(websocket: WebSocket, token: str | None = Query(default=Non
         return
 
     await websocket.accept()
+    # Crop URLs in this feed follow the scheme the socket came in on, as they
+    # do for HTTP requests (app/core/public_origin.py). Bound for the life of
+    # this handler, which is the life of the socket.
+    public_origin.bind(websocket.url.scheme, websocket.headers.get("host"))
     queue = await broadcaster.subscribe()
     subject = claims.username or claims.subject
     log.info("events.connected", user=subject, subscribers=broadcaster.subscriber_count)

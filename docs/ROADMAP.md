@@ -1,3 +1,20 @@
+> # ⚠️ SUPERSEDED — the plan for a different brief
+>
+> This roadmap (P1–P12, written 9 Sep 2026) planned the work for **SIH26127**, a city-wide brief.
+> The project is now back on the Gujarat Police CCTV Hackathon **"Sentinel"** as **Contrail**, and
+> the acceptance test is Sentinel's live test, not the "8 PS demo steps" below.
+>
+> **Where to look instead:**
+>
+> | For | Read |
+> |---|---|
+> | Sentinel requirements, each mapped to code or a marked gap | [REQUIREMENTS.md](REQUIREMENTS.md) |
+> | The rollout plan for 80,000 cameras, with measured gates | [HLD.md §17](HLD.md#17-rollout-plan) |
+> | What is not built | [HLD.md §18](HLD.md#18-what-is-not-built) |
+>
+> Kept as a record of that plan. Much of its P4–P11 work did land, and is in
+> [BUILD_STATE.md](BUILD_STATE.md).
+
 # ROADMAP — SIH26127
 
 The plan of record. **Phase definitions and gates live here.** Per-phase build history and the

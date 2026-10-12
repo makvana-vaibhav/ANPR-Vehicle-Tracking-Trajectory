@@ -1,3 +1,21 @@
+> # ⚠️ Corrections before this deck is built
+>
+> **Brand.** The product is **Contrail**, not NagarNetra.
+>
+> **Model naming.** The site's "Model 5 (Hybrid)" is presented in [HLD.md §2](../HLD.md#2-the-architecture-choice)
+> as Model 1 + Model 3 + selective Model 2, with edge AI.
+>
+> **Numbers that changed:**
+>
+> | Slide | Change |
+> |---|---|
+> | 11 | The backlog did **not** stay near zero. It grew to 10,237 during the 150 s run and cleared after the generator stopped. Draw it that way, and keep "p95 5.7 s — missed the 3 s target" |
+> | 15 | "~250 × 40-core" is about **4× too optimistic**. Use [INFRASTRUCTURE.md](../INFRASTRUCTURE.md) §3: 911 nodes on CPU at 80,000 cameras. GPU is 91–228 nodes, EXTRAPOLATED and needing hardware decode. Capex ₹39.31 crore, opex ₹8.78 crore/yr on CPU |
+> | 14 | Re-check against [SECURITY.md §8](../SECURITY.md#8-what-is-not-implemented) for current gaps |
+>
+> **Accuracy.** Quote [the research numbers](../research/ANPR_ACCURACY_LATENCY.md), never the
+> synthetic 100%.
+
 # NagarNetra — Solution Presentation
 
 **How to use this file.** Every slide below gives you: a title, the exact text

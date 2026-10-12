@@ -317,6 +317,9 @@ export interface Alert {
    *  watchlist hit or camera-down alert (the match/notes already say why);
    *  populated for `anomaly`. */
   reasons: AlertReason[] | null
+  /** A `person_match`'s cosine similarity: a score against a threshold, never
+   *  a percentage. Absent from APIs that predate it. */
+  similarity?: number | null
 }
 
 export interface AlertPage {
@@ -436,6 +439,14 @@ export interface LiveAlertEvent {
     case_ref: string | null
     exact: boolean
   }
+  /** A `person_match`: the entry matched and the face's similarity. Never a
+   *  name or a photograph — those come from the audited evidence endpoint. */
+  person?: {
+    id: string
+    category: string
+    case_ref: string
+  }
+  similarity?: number | null
 }
 
 /**
@@ -554,6 +565,15 @@ export interface RouteHop {
   plausible: boolean
   /** The visit's clearest read: the evidence a report shows for it. */
   best_detection_id: string | null
+  /**
+   * A visit an analyst included although the camera read a different plate
+   * (`read_as`): never a confirmed sighting, and drawn and listed as one
+   * everywhere. Absent on a route from before candidates existed.
+   */
+  candidate?: boolean
+  read_as?: string | null
+  /** How `read_as` differs from the plate, in words. */
+  candidate_note?: string | null
 }
 
 /**
@@ -569,6 +589,9 @@ export interface UnplacedSighting {
   district: string | null
   seen_at: string
   plate_confidence: number
+  /** An included candidate read at a camera with no position. */
+  candidate?: boolean
+  read_as?: string | null
 }
 
 export interface VehicleRoute {
@@ -598,6 +621,11 @@ export interface VehicleRoute {
   unplaced_sightings: UnplacedSighting[]
   geometry_note: string
   unplaced_note: string
+  /** Included candidate visits on this route, placed or not. */
+  candidate_hop_count?: number
+  /** Included candidates that are not in this window — reported, never dropped. */
+  candidates_missing?: string[]
+  candidate_note?: string | null
 }
 
 export type RouteGeoJSON = GeoJSON.FeatureCollection
@@ -1072,4 +1100,308 @@ export interface ReidMatchResponse {
   embedding_available: boolean
   candidates: ReidCandidate[]
   note: string
+}
+
+// ── The persons watchlist ─────────────────────────────────────────────
+
+export type PersonCategory = 'missing' | 'wanted' | 'demo'
+
+export type PersonStatus = 'pending_approval' | 'active' | 'rejected' | 'retired'
+
+/** One entry, as a role with `person.read` sees it. No embedding, ever; the
+ *  photograph only as a two-minute signed link, each one audited. */
+export interface PersonEntry {
+  id: string
+  display_name: string
+  category: PersonCategory | string
+  case_ref: string
+  purpose: string
+  notes: string | null
+  status: PersonStatus
+  valid_until: string
+  /** Would be matched right now: active, approved, unexpired. */
+  matchable: boolean
+  photo_url: string | null
+  /** Retention has removed the photograph. */
+  photo_purged: boolean
+  enrol_quality: {
+    detector_score?: number
+    face_px?: number
+    sharpness?: number
+    bbox?: number[]
+    photo_width?: number
+    photo_height?: number
+  } | null
+  embedding_model: string
+  enrolled_by: string
+  enrolled_by_username: string
+  enrolled_at: string
+  approved_by_username: string | null
+  approved_at: string | null
+  rejected_by_username: string | null
+  rejected_at: string | null
+  rejection_reason: string | null
+  retired_by_username: string | null
+  retired_at: string | null
+  retired_reason: string | null
+  /** The caller may approve or reject it: pending, `person.approve`, and not
+   *  the account that enrolled it (four-eyes). */
+  can_review: boolean
+}
+
+export interface PersonPage {
+  items: PersonEntry[]
+  total: number
+  limit: number
+  offset: number
+  pending: number
+}
+
+/** The two faces behind a `person_match` alarm, and the numbers behind it. */
+export interface PersonMatchEvidence {
+  alert_id: string
+  person: PersonEntry | null
+  face_url: string | null
+  face_purged: boolean
+  similarity: number | null
+  threshold: number
+  model_threshold: number
+  frames_agreed: number | null
+  frames_required: number | null
+  captured_at: string | null
+  camera_id: string | null
+  notice: string
+}
+
+/** What the cameras are matching against right now. */
+export interface PersonGalleryStatus {
+  active_entries: number
+  pending_entries: number
+  version: string
+  published_at: string | null
+  publish_error: string | null
+  threshold: number
+  min_frames: number
+  min_margin: number
+  model: string
+  model_threshold: number
+  cameras: string[]
+  default_valid_days: number
+  max_valid_days: number
+  min_face_px: number
+}
+
+// ── Candidate sightings: reads that may be this vehicle, misread ─────────
+
+export interface CandidateEdit {
+  kind: 'substitution' | 'missing' | 'extra'
+  position: number
+  expected: string | null
+  read: string | null
+  /** A common misreading: 0/O/D/Q, 1/I/L, 2/Z, 5/S, 6/G, 8/B, 4/A. */
+  confusion: boolean
+  text: string
+}
+
+export interface CandidateReason {
+  factor: string
+  detail: string
+  /** Whether this reason makes it likelier (`for`) or less likely to be the vehicle. */
+  tone: 'for' | 'against' | 'neutral'
+}
+
+export type CandidateFit = 'fits' | 'unknown' | 'conflicts' | 'same_visit'
+
+export interface CandidateSighting {
+  /** The visit's clearest read: what an include or a dismiss names. */
+  detection_id: string
+  detection_ts: string
+  /** Every read in the visit, so a decision on any of them finds it. */
+  detection_ids: string[]
+  read_as: string
+  camera_id: string
+  camera_code: string
+  camera_name: string
+  city: string | null
+  district: string | null
+  placed: boolean
+  town_level: boolean
+  lat: number | null
+  lon: number | null
+  arrived_at: string
+  departed_at: string
+  sightings: number
+  plate_confidence: number
+  vehicle_type: string | null
+  edits: CandidateEdit[]
+  edit_count: number
+  confusions: number
+  distance: number
+  difference: string
+  fit: { status: CandidateFit; detail: string }
+  strength: 'strong' | 'possible' | 'weak'
+  reasons: CandidateReason[]
+  recurrence: number
+  crop_url: string | null
+}
+
+export interface CandidateReport {
+  plate: string
+  window: { from: string; to: string | null }
+  total: number
+  counts: Record<CandidateFit, number>
+  candidates: CandidateSighting[]
+  target_vehicle_type: string | null
+  confirmed_visits: number
+  criteria: {
+    max_distance: number
+    max_edits: number
+    confusion_cost: number
+    confusions: string[]
+    dwell_window_s: number
+    max_plausible_kmph: number
+  }
+  note: string
+}
+
+export type CandidateDecisionKind = 'include' | 'dismiss' | 'undo'
+
+export interface CandidateDecisionRecord {
+  plate: string
+  detection_id: string
+  detection_ts: string
+  decision: CandidateDecisionKind
+  read_as: string
+  camera_code: string | null
+  difference: string
+  decided_by: string
+  decided_at: string
+}
+
+// ── Pursuit: the cameras a vehicle can reach next, kept under analysis ───
+
+export type PursuitWindow = 'open' | 'soon' | 'town' | 'passed' | 'later'
+
+export type PursuitPinState =
+  | 'pinned'
+  | 'would_pin'
+  | 'always_on'
+  | 'waiting'
+  | 'held'
+  | 'ranked_lower'
+  | 'outside_window'
+  | 'reads_no_plates'
+  | 'recorded'
+  | 'not_in_fleet'
+
+export interface PursuitPrediction {
+  rank: number
+  camera_id: string
+  camera_code: string
+  camera_name: string
+  city: string | null
+  lat: number | null
+  lon: number | null
+  grid: boolean
+  always_on: boolean
+  /** Straight line from where it was last seen; null between two cameras at one town centre. */
+  distance_km: number | null
+  approximate: boolean
+  eta_from: string | null
+  eta_to: string | null
+  window: PursuitWindow
+  basis: 'observed_pair' | 'observed_network' | 'default' | 'town'
+  reasons: string[]
+  plates_7d: number
+  vehicles_7d: number
+  pin_state: PursuitPinState
+  pin_note: string
+}
+
+export interface PursuitAnchor {
+  camera_id: string
+  camera_code: string
+  camera_name: string
+  lat: number
+  lon: number
+  town_level: boolean
+  /** The camera replays a recorded clip: not a vehicle on the road now. */
+  recorded: boolean
+  seen_at: string
+  detection_id: string
+}
+
+export interface PursuitPin {
+  camera_code: string
+  camera_id: string
+  pinned_at: string
+  grid: boolean
+  /** When a detection there first proved the workers were let in. */
+  proven_at: string | null
+}
+
+export interface PursuitSighting {
+  kind: 'confirmed' | 'possible'
+  plate: string
+  detection_id: string
+  detection_ts: string
+  camera_code: string | null
+  camera_name: string | null
+  seen_at: string
+  confidence: number
+  placed: boolean
+  difference: string | null
+  /** This read moved the pursuit on. */
+  advanced: boolean
+}
+
+export interface PursuitGrid {
+  held: boolean
+  reason: string | null
+  hold_until: string | null
+  last_grid_detection: string | null
+  silent: boolean
+  /** What the platform can and cannot see of the workers' login state. */
+  visibility: string
+}
+
+export interface Pursuit {
+  plate: string
+  status: 'active' | 'expired' | 'preview'
+  started_at: string
+  started_by: string
+  renewed_at: string | null
+  expires_at: string
+  remaining_s: number
+  pins_wanted: number
+  anchor: PursuitAnchor | null
+  basis: { kind: string; low_kmph: number; high_kmph: number; samples: number; note: string; short: string }
+  predictions: PursuitPrediction[]
+  excluded_unplaced: number
+  pins: PursuitPin[]
+  released: { camera_code: string; released_at: string; closes_at: string }[]
+  sightings: PursuitSighting[]
+  events: { at: string; text: string }[]
+  grid: PursuitGrid
+  policy: {
+    duration_s: number
+    min_pin_s: number
+    linger_s: number
+    horizon_s: number
+    focus_capacity: number
+    grid_silence_s: number
+    pin_proof_s: number
+  }
+  notes: string[]
+  /** On a preview only: what starting it would pin. */
+  would_pin?: string[]
+}
+
+export interface PursuitSummary {
+  plate: string
+  started_at: string
+  started_by: string
+  expires_at: string
+  remaining_s: number
+  pins: string[]
 }

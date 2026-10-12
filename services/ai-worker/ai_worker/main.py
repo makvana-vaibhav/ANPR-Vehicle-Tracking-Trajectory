@@ -42,6 +42,9 @@ def _load_config() -> RunConfig:
     config.plate.weights = (
         f"{settings.ai_models_dir}/{config.plate.weights.split('/')[-1]}"
     )
+    # YuNet and SFace sit beside them; only loaded for a camera tagged
+    # `analytics:faces`.
+    config.faces.models_dir = settings.ai_models_dir
     return config
 
 

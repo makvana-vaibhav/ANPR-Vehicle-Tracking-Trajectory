@@ -145,3 +145,31 @@ def test_detect_condition_read_consensus(ocr_engine) -> None:
     outcome = consensus(reads, ConsensusConfig())
     assert outcome.text == truth, f"consensus produced {outcome.text!r} from {[r.text for r in reads]}"
     assert outcome.grammar_valid
+
+
+def render_two_row_plate(top: str, bottom: str, width: int, height: int) -> np.ndarray:
+    """A two-row plate (state + district over series + number), as on goods vehicles."""
+    image = np.full((height, width, 3), 245, dtype=np.uint8)
+    cv2.rectangle(image, (2, 2), (width - 3, height - 3), (20, 20, 20), 2)
+    for text, baseline in ((top, int(height * 0.44)), (bottom, int(height * 0.88))):
+        (tw, th), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_DUPLEX, 1.0, 2)
+        scale = min((width * 0.8) / tw, (height * 0.34) / th)
+        (tw, th), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_DUPLEX, scale, 2)
+        cv2.putText(image, text, ((width - tw) // 2, baseline), cv2.FONT_HERSHEY_DUPLEX,
+                    scale, (10, 10, 10), 2, cv2.LINE_AA)
+    return image
+
+
+@pytest.mark.parametrize(
+    "top,bottom,size",
+    [("GJ02", "ZZ7828", (160, 110)), ("GJ18", "Z7967", (120, 80)), ("MH12", "DE1433", (90, 60))],
+)
+def test_the_capped_detection_fallback_still_reads_two_rows(
+    ocr_engine, top: str, bottom: str, size: tuple[int, int]
+) -> None:
+    """The fallback exists for two-row plates. Sized for a plate (128 px on the
+    short side, no angle classifier) rather than a page (736 px), it must still
+    find both rows — in reading order."""
+    assert ocr_engine.config.detection_fallback_limit_side_len == 128
+    result = ocr_engine.read(render_two_row_plate(top, bottom, *size))
+    assert normalise(result.text) == top + bottom

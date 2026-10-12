@@ -921,6 +921,14 @@ function AlarmCard({ alarm, camera, now }: { alarm: Alert; camera: Camera | unde
         </span>
       )}
       {detail && <span className="mt-1.5 line-clamp-2 block text-xs text-muted-foreground">{detail}</span>}
+      {alarm.alert_type === 'person_match' && (
+        // A face match is a lead, never an identification; the dock says so
+        // before anyone opens it.
+        <span className="mt-1.5 flex items-center gap-1.5 text-[11px] font-medium text-priority-high">
+          <Icon name="shield" size={12} />
+          A person must confirm before anyone acts
+        </span>
+      )}
       {where && <span className="mt-1.5 block truncate font-mono text-[11px] text-faint">{where}</span>}
     </Link>
   )

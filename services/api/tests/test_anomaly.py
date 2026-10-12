@@ -179,10 +179,10 @@ async def _cleanup() -> None:
 @pytest.fixture(autouse=True)
 async def _clean_synthetic_rows():
     await _cleanup()
-    alerts_service.deduper.clear()
+    await alerts_service.deduper.clear()
     yield
     await _cleanup()
-    alerts_service.deduper.clear()
+    await alerts_service.deduper.clear()
 
 
 @pytest.fixture
@@ -760,7 +760,9 @@ class TestSnapshotWiring:
 
         async with SessionLocal() as session:
             await route_history.snapshot(session)
-        alerts_service.deduper.clear()  # isolate the second call from the first's dedup memory
+        await (
+            alerts_service.deduper.clear()
+        )  # isolate the second call from the first's dedup memory
 
         async with SessionLocal() as session:
             second = await route_history.snapshot(session)

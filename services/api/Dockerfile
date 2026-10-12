@@ -64,6 +64,14 @@ COPY --chown=nagarnetra:nagarnetra services/api /app/services/api
 COPY --chown=nagarnetra:nagarnetra packages/contracts /app/packages/contracts
 # Seed and maintenance scripts run inside this image (`make seed`).
 COPY --chown=nagarnetra:nagarnetra scripts /app/scripts
+# The persons watchlist enrols a reference photo with the lab's own face module
+# (`ailab.face`), so a reference and a camera's view are embedded by one
+# implementation. A .pth file rather than PYTHONPATH, so it is importable
+# however the interpreter is started — `make test` sets PYTHONPATH itself.
+# The weights are mounted at /models, never copied in.
+COPY --chown=nagarnetra:nagarnetra ai-lab/ailab /app/ai-lab/ailab
+RUN echo /app/ai-lab > "$(python -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')/ailab-source.pth" \
+    && python -c "import cv2, ailab.face.gallery; print('cv2', cv2.__version__, 'ailab.face ok')"
 
 USER nagarnetra
 

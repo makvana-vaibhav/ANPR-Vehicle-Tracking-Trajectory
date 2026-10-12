@@ -1,0 +1,18 @@
+# Contrail — Grafana datasource, provisioned at start-up.
+# Mounted at /etc/grafana/provisioning. The uid is what every panel in
+# infra/grafana/dashboards/*.json references; do not change one without the other.
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    uid: contrail-prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    editable: false
+    jsonData:
+      # Matches the global scrape_interval in infra/prometheus/prometheus.yml, so
+      # $__rate_interval never shrinks below four scrapes.
+      timeInterval: 15s
+      httpMethod: POST

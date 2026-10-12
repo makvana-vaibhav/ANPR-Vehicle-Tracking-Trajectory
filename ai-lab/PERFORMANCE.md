@@ -396,3 +396,93 @@ ailab compare <run-a> <run-b>
 differing from `default` only in the six things that were changed — so the
 comparison isolates their effect instead of measuring an accumulation of
 unrelated differences.
+
+---
+
+## 12. Third pass, 12 Oct 2026: real plates, and what the fixes cost
+
+Measured, in throwaway containers of the worker image (`contrail/ai-worker:dev`,
+`--cpus 2 --network none`, one ONNX thread per model as the workers run) unless
+it says *native*. The live stack shared the machine, so absolute Docker CPU
+moves ±30% between runs; ratios inside one run are the reliable part, and the
+quieter run is quoted. Accuracy for these changes is in `FINDINGS.md` §9.
+
+### OCR: raw crop, capped fallback
+
+| Per crop, 160 grid crops (`scripts/ocr_bench.py`) | OCR CPU, mean | Fallback firings |
+|---|---|---|
+| As shipped (two padded+CLAHE variants; fallback at 736 px + angle classifier) | 64.0 ms | 8 |
+| Deployed (raw crop; fallback at 128 px short side, no classifier) | 25.0 ms (−61%) | 2 |
+
+A busier rerun gave 137 → 40 ms (−71%). The variants were also why OCR ran
+twice per look: when no plate border was found, `rectified_fallback` and
+`upscaled` were the same pixels.
+
+One fallback firing (`scripts/bench_fallback.py`: every crop tall and square
+enough to qualify, plus three rendered two-row plates, three runs each):
+
+| Fallback sizing | CPU per firing | Rendered two-row plates read |
+|---|---|---|
+| Shipped: 736 px short side + angle classifier | 246 ms | 3/3 |
+| **128 px short side, no classifier (deployed)** | **56 ms (−77%)** | 3/3 |
+| 192 px long side, no classifier | 51 ms | 3/3 |
+
+### Whole pipeline, demo clip (`scripts/profile_clip.py`, stride 6, 38 frames)
+
+| CPU per analysed frame | Decode | Detect | Plate search | OCR | Total |
+|---|---|---|---|---|---|
+| As shipped, Docker | 29 ms | 105–108 ms | 125–130 ms (5.4 calls) | 81–85 ms (2.32 calls) | **0.346–0.358 core-s** |
+| Deployed, Docker | 30 ms | 107 ms | 128 ms (5.4 calls) | 28 ms (1.16 calls) | **0.296–0.297 core-s** |
+| Deployed, **native, CoreML** (fp32 detector, static plate model) | 45–53 ms | 7.7–9.5 ms | 13.6–16.9 ms (5.5 calls) | 27–33 ms | **0.103–0.126 core-s** |
+
+Identical plates in all deployed runs (11 valid, 10 in the labelled set, 0
+wrong). Natively, decode is the largest stage left.
+
+### Decoding only what is analysed (`StreamReader`, `scripts/bench_reader.py`)
+
+Every frame is still decoded (a decoder cannot skip one), but only the frames a
+consumer will take are converted to BGR — just in time, from the consumer's own
+pace, so the frame analysed is as fresh as before. One open 1080p25 stream, one
+decode thread, 15 s, before (git `HEAD`) and after:
+
+| Cores per open stream | Consumer analysing 3 fps | Paused (open, not analysed) |
+|---|---|---|
+| H.264 (`rajkot-bus-stand.mp4`, a grid recording) | 0.140 → **0.070** | 0.103 → **0.063** |
+| H.265 (the same, re-encoded) | 0.154 → **0.121** | 0.161 → **0.115** |
+
+With the grid's streams held open on three workers, that is several tenths of a
+core back (estimated from the per-stream figures).
+
+### int8 plate detector: built, measured, not deployed
+
+`scripts/derive_models.py` produces it reproducibly (static QDQ, per-channel
+S8/S8, percentile calibration on 64 real vehicle crops, head decode in float;
+SHA-256 pinned in `scripts/fetch_models.sh`, identical across two derivations).
+
+| | fp32 (deployed) | int8 |
+|---|---|---|
+| Plate search, CPU per vehicle (Docker) | 24.2 ms | **8.6 ms (−64%)** |
+| fp32 plates ≥ 40 px found, held-out crops, threshold 0.25 | — | **33/35** |
+| … on the calibration half | — | 34/38 |
+| … at threshold 0.23 (held-out / calibration half) | — | 35/35 / 35/38, +2 boxes fp32 lacks |
+
+The plates it loses are borderline (fp32 0.27–0.31, int8 0.24–0.25). Keeping
+the attention block (`/model.10/`) in float changed nothing. A recall loss on
+the step that already limits grid yield is not "measures better", so it is
+**opt-in** (`configs/stream_int8.yaml`) for a CPU-starved Docker host, not the
+default. Deriving it peaks at **4.4 GB** in the worker image (ORT's histogram
+calibrator); do it when the demo is not running.
+
+### Reproducing
+
+```bash
+# accuracy + OCR cost (needs datasets/grid_ocr_v1, see FINDINGS.md §9)
+python scripts/ocr_bench.py --dataset datasets/grid_ocr_v1 --config stream \
+  --variant 'shipped=preprocess.variants=[rectified,upscaled];ocr.detection_fallback_limit_side_len=736;ocr.detection_fallback_use_cls=true;consensus.drop_leading_junk=false' \
+  --variant 'deployed='
+python scripts/bench_fallback.py datasets/grid_ocr_v1 datasets/demo_ocr_v1
+python scripts/profile_clip.py /data/videos/anpr_demo.mp4 --config stream_demo --stride 6 \
+  --ground-truth datasets/demo_ocr_v1/clip_plates.csv
+python scripts/bench_reader.py /data/videos/rajkot-bus-stand.mp4 --consume-fps 3
+python scripts/derive_models.py --verify          # int8 agreement gate (exit 1 = loses plates)
+```

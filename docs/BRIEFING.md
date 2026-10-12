@@ -1,3 +1,18 @@
+> # ⚠️ PARTLY SUPERSEDED — check numbers before quoting them
+>
+> This briefing predates the rename to **Contrail** and several measurements. **Do not quote
+> these sections:**
+>
+> | Section | Problem | Use instead |
+> |---|---|---|
+> | §13 sizing ("one core ≈ 8 cameras", ~10,000 cores, ~250 nodes) | About **4× too optimistic** | [INFRASTRUCTURE.md](INFRASTRUCTURE.md): ~36,000 cores, 911 nodes at 80,000 cameras on CPU |
+> | §13 "the Phase 10 load test has not been run" | **Wrong** — it ran | 2,774 events/s, 0 failed, p95 5.7 s ([HLD.md §15](HLD.md#15-scale-evidence)) |
+> | §14 costs (capex ₹3.6–5.2 crore) | Rest on the optimistic sizing | `scripts/capacity_model.py`: ₹39.31 crore CPU-only. GPU scenarios ₹9.7–19.9 crore, EXTRAPOLATED |
+> | §11 fleet (281 cameras) | Out of date | The 250 registry-only cameras were removed. The fleet is the organisers' 30-camera grid plus a recorded clip |
+>
+> The Model 5 / federation reasoning in §1–2 still stands. It is restated with current numbers in
+> [HLD.md §2](HLD.md#2-the-architecture-choice).
+
 # NagarNetra — your briefing
 
 Everything you need to answer any question a judge asks. Written for you, not

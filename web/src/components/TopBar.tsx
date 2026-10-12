@@ -14,6 +14,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { Link, NavLink, useLocation } from 'react-router-dom'
 
+import PursuitPill from '@/components/PursuitPill'
 import { BrandMark, Icon } from '@/components/ui'
 import { useAuth } from '@/hooks/useAuth'
 import { useEventStream } from '@/hooks/useEventStream'
@@ -102,6 +103,7 @@ export default function TopBar({ onOpenSearch }: { onOpenSearch: () => void }) {
         </button>
 
         <div className="ml-auto flex shrink-0 items-center gap-3">
+          <PursuitPill />
           <FeedPill />
           <AccountMenu />
         </div>

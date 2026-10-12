@@ -2,6 +2,32 @@
 
 Read this before writing any code in this repository. It is the contract between sessions.
 
+> ## On branch `sentinel-gj` — read this box first
+>
+> This branch is **Contrail**, the entry for the Gujarat Police CCTV Hackathon **Sentinel**
+> (sandbox round 12–13 Oct 2026). Here the **statewide** framing is correct, not residue: ~26
+> departments, ~80,000 cameras, architecture Models 1–4, Gujarat Police as the client, and the
+> organisers' hosted grid (`HOSTED_GRID` adapter, cameras `SBX-*`) is the scored live test — it is
+> core, not a removal candidate. The SIH26127/NagarNetra city-wide framing below describes `main`.
+>
+> Where things stand: `docs/BUILD_STATE.md` (latest sections), `docs/HLD.md`,
+> `docs/REQUIREMENTS.md` (Sentinel requirements → code), runbooks `docs/DEMO_SCRIPT.md` and
+> `docs/PANIC.md`. Browser end-to-end flows: `tests/browser` (`node flows.mjs`).
+>
+> Rules specific to this branch:
+> - **The grid has a per-IP watch-time quota and locks out on session churn.** Never open an `SBX-*`
+>   stream from a script or test (`tests/browser` blocks the grid's hosts), and restart the AI
+>   workers only when needed — each restart re-logs every always-on grid camera. They bind-mount
+>   `ai-lab/ailab`, `ai-lab/configs`, `ai-lab/models` and `ai_worker`, so a restart loads whatever
+>   is on disk.
+> - **The persons watchlist (faces) is purpose-limited:** four-eyes enrolment, every view audited,
+>   expiry, no storage of non-matching faces, a human confirms every match
+>   (`docs/SECURITY.md` §7.1). Never label a real person "wanted" in demo data.
+> - Commits carry the owner's name and email only — no AI co-author trailer.
+> - The YOLO detector weights come from Ultralytics, whose terms put trained weights under AGPL-3.0
+>   as well as the code (see `docs/research/ANPR_ACCURACY_LATENCY.md`); §6's "AGPL never ships" holds
+>   for code, not for those weights. Treat replacing them as an open licensing decision for the owner.
+
 > ## Start here
 >
 > **You are working on SIH26127 — a city-wide vehicle intelligence platform.**
@@ -184,9 +210,9 @@ Scale numbers must be labelled. Anything not produced by a load test we actually
 | Bus (scale profile) | Redpanda (Kafka API) behind the same `EventBus` interface |
 | Object store | MinIO (S3 API) — plate crops, snapshots, clips |
 | Media gateway | MediaMTX — RTSP in → WebRTC (WHEP) / HLS out |
-| AI | YOLO (vehicle + plate) exported to ONNX, ByteTrack (pure NumPy), ONNX CRNN OCR |
+| AI | YOLO (vehicle + plate) exported to ONNX, ByteTrack (pure NumPy), OCR via RapidOCR (PP-OCR, ONNX) by default with CRNN/EasyOCR behind the same `OcrEngine` interface; faces (`sentinel-gj`): OpenCV YuNet + SFace |
 | Inference runtime | ONNX Runtime, GPU optional |
-| Frontend | React 18 + Vite + TypeScript + TailwindCSS + shadcn/ui |
+| Frontend | React 18 + Vite + TypeScript + TailwindCSS, own component kit in `web/src/components/ui` |
 | Map | MapLibre GL JS, **no tile server** — local GeoJSON basemap (see §6) |
 | Charts | Recharts |
 | Realtime | WebSocket `/ws/events`, SSE fallback |
@@ -272,8 +298,9 @@ they are constraints discovered by probing:
   machine. Slot count is capped by **memory** (~1.4 GB per slot), not CPU.
 - **`postgis/postgis` has no arm64 build.** We use `timescale/timescaledb-ha:*-all`, which ships
   PostGIS **and** TimescaleDB in one arm64 image. Migration 0001 asserts both extensions exist.
-- **PaddlePaddle publishes no aarch64 Linux wheel.** OCR is ONNX CRNN behind an `OcrEngine`
-  interface; a `PaddleOcrEngine` is selectable by env var for amd64 deployments.
+- **PaddlePaddle publishes no aarch64 Linux wheel.** OCR runs PaddleOCR's models through RapidOCR
+  (ONNX Runtime, no Paddle) behind an `OcrEngine` interface (`ocr.engine`, default `rapidocr`);
+  CRNN and EasyOCR engines are selectable the same way.
 - **Runtime images are torch-free.** Ultralytics (AGPL-3.0) + PyTorch is ~2.5 GB and is used *only*
   at model-fetch time in a throwaway tools image to export ONNX. The shipped `ai-worker` carries
   `onnxruntime` + OpenCV only. AGPL code never ships in the deployed artifact.

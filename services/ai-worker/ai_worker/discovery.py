@@ -19,7 +19,7 @@ import hashlib
 import json
 import logging
 from dataclasses import dataclass
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlunparse
 
 import httpx
 
@@ -37,6 +37,18 @@ class CameraStream:
     #: accepting a format a camera never sees invites the repair step to
     #: invent one.
     plate_regions: tuple[str, ...] = ("IN",)
+    #: Which stages run on this camera: `anpr`, and `faces` only where the
+    #: registry tags the camera `analytics:faces`. A roster written before the
+    #: field existed means ANPR alone, which is what every camera then was.
+    analytics: tuple[str, ...] = ("anpr",)
+
+    @property
+    def faces(self) -> bool:
+        return "faces" in self.analytics
+
+    @property
+    def vehicles(self) -> bool:
+        return "anpr" in self.analytics
 
 
 def shard_of(camera_code: str, shards: int) -> int:
@@ -247,6 +259,24 @@ async def discover_sandbox(
 ROSTER_KEY = "nagarnetra:fleet:anpr"
 
 
+def via_local_gateway(url: str, gateway: tuple[str, str] | None) -> str:
+    """A roster URL on our own gateway, as this worker can reach it.
+
+    Only the host changes, and only when it is the gateway's roster name and
+    this worker knows the gateway by another one; inside compose the two are
+    the same and every URL passes through untouched. Federated cameras, whose
+    URLs name somebody else's host, are never touched.
+    """
+    if not url or gateway is None:
+        return url
+    roster_host, local_host = gateway
+    parsed = urlparse(url)
+    if parsed.hostname != roster_host or not local_host or local_host == roster_host:
+        return url
+    netloc = local_host + (f":{parsed.port}" if parsed.port else "")
+    return urlunparse(parsed._replace(netloc=netloc))
+
+
 async def rtsp_reachable(host: str, port: int = 8554, timeout: float = 4.0) -> bool:
     """Can this worker open RTSP to that host at all?
 
@@ -273,8 +303,15 @@ async def discover_registry(
     timeout: float = 5.0,
     rtsp_probe: dict[str, bool] | None = None,
     only: frozenset[str] = frozenset(),
+    gateway: tuple[str, str] | None = None,
 ) -> list[CameraStream]:
     """Every ANPR camera this worker owns, from the registry roster.
+
+    `gateway` is `(roster_host, local_host)`: the roster names our own media
+    gateway as the compose network knows it, and a worker running outside
+    that network (the native macOS worker, docs/GPU.md) reaches it at another
+    address. Rewritten before the reachability probe, or the probe fails on
+    the unresolvable name and the camera silently drops to HLS.
 
     `only`, when non-empty, is an explicit allow-list of camera codes and
     replaces the hash shard as the ownership test. It narrows the roster; it
@@ -335,7 +372,7 @@ async def discover_registry(
         elif not owns(code, index, count):
             continue
 
-        rtsp = str(entry.get("rtsp_url") or "")
+        rtsp = via_local_gateway(str(entry.get("rtsp_url") or ""), gateway)
         hls = str(entry.get("hls_url") or "")
 
         url, transport = "", "none"
@@ -361,6 +398,7 @@ async def discover_registry(
             continue
 
         regions = entry.get("plate_regions") or ["IN"]
+        stages = entry.get("analytics")
         streams.append(
             CameraStream(
                 camera_code=code,
@@ -368,6 +406,11 @@ async def discover_registry(
                 transport=transport,
                 label=str(entry.get("label") or code),
                 plate_regions=tuple(str(r) for r in regions),
+                analytics=(
+                    tuple(str(s) for s in stages)
+                    if isinstance(stages, list)
+                    else ("anpr",)
+                ),
             )
         )
 

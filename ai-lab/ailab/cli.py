@@ -395,13 +395,7 @@ def cmd_report(args: argparse.Namespace) -> int:
     run = LoadedRun(_resolve_run(args.run))
     evaluation_path = run.path / "evaluation.json"
     evaluation = json.loads(evaluation_path.read_text()) if evaluation_path.exists() else None
-    hard = run.hard_case_index()
-    # KNOWN BUG, kept as-is for now: the index on disk is {"summary", "cases"},
-    # but hard_case_index() wraps it in list() and so returns its two keys. This
-    # dict branch never runs and html.render() gets ["summary", "cases"]. mypy
-    # flags the dead branch; fixing it changes behaviour, so it is left to the
-    # ANPR work rather than slipped in with type annotations.
-    cases = hard.get("cases", []) if isinstance(hard, dict) else hard  # type: ignore[attr-defined]
+    cases = run.hard_case_index()
 
     html.render(
         run.path, run.summary, run.manifest, run.tracks,
@@ -569,10 +563,7 @@ def cmd_mine(args: argparse.Namespace) -> int:
 
     for value in args.runs:
         run = LoadedRun(_resolve_run(value))
-        hard = run.hard_case_index()
-        # Same KNOWN BUG as cmd_report: `cases` is the index's keys, so no hard
-        # case is ever harvested. Left for the ANPR work; see cmd_report.
-        cases = hard.get("cases", []) if isinstance(hard, dict) else hard  # type: ignore[attr-defined]
+        cases = run.hard_case_index()
         hard_ids = {c["track_id"] for c in cases if "track_id" in c}
         exporter.add_run(run.path, run.tracks, hard_ids)
         console.print(f"  harvested {run.name}: {len(run.tracks)} tracks, {len(cases)} hard cases")

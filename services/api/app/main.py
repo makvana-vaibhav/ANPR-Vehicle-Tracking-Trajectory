@@ -18,11 +18,13 @@ from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
+from app.core import public_origin
 from app.core.config import settings
 from app.core.logging import configure_logging, get_logger, request_id_var
 from app.core.ratelimit import RateLimitMiddleware
 from app.db.session import dispose_engine
 from app.middleware.audit import AuditMiddleware
+from app.middleware.metrics import MetricsMiddleware
 from app.routers import (
     alerts,
     analytics,
@@ -32,9 +34,13 @@ from app.routers import (
     detections,
     events,
     fleet,
+    gap_report,
     grid_media,
     health,
+    persons,
     predictions,
+    pursuits,
+    registries,
     reid,
     reports,
     streams,
@@ -50,9 +56,11 @@ from app.services import (
     focus,
     gateway,
     grid_session,
+    pursuit,
     retention,
     token_store,
 )
+from app.services import persons as persons_service
 
 configure_logging(service="api")
 log = get_logger("api")
@@ -109,10 +117,18 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     # somebody happened to edit it, with nothing reporting a fault.
     await gateway.reconcile()
     retention.enforcer.start()
+    # Persons watchlist: expiry each minute, the active gallery republished
+    # for the cameras, and media retention for faces. See services/persons.py.
+    persons_service.sweeper.start()
+    # Pursuit: keeps the cameras a pursued vehicle can reach next pinned for
+    # the workers, and advances when the plate is read. See services/pursuit.py.
+    pursuit.keeper.start()
 
     yield
 
     log.info("api.stopping")
+    await pursuit.keeper.stop()
+    await persons_service.sweeper.stop()
     await retention.enforcer.stop()
     await fleet_roster.publisher.stop()
     await event_consumer.consumer.stop()
@@ -159,8 +175,20 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
-    expose_headers=["X-Request-ID", "X-RateLimit-Limit", "X-RateLimit-Remaining"],
+    # Content-Disposition, or every CSV export saves as "export.csv": the web
+    # app calls the API cross-origin, and a header not exposed is invisible.
+    expose_headers=[
+        "X-Request-ID",
+        "X-RateLimit-Limit",
+        "X-RateLimit-Remaining",
+        "Content-Disposition",
+    ],
 )
+
+# Request count and latency per route template, for Prometheus. Outside CORS,
+# rate limiting and audit, so it times what the client experienced — a 429
+# included. See app/middleware/metrics.py.
+app.add_middleware(MetricsMiddleware)
 
 
 @app.middleware("http")
@@ -178,6 +206,9 @@ async def request_context(
     """
     request_id = request.headers.get("X-Request-ID") or str(uuid.uuid4())
     token = request_id_var.set(request_id)
+    # Media URLs answer to the scheme the browser used: over HTTPS they point
+    # at the web tier's own proxies, over HTTP at the services directly.
+    origin_token = public_origin.bind(request.url.scheme, request.headers.get("host"))
 
     try:
         response = await call_next(request)
@@ -193,6 +224,7 @@ async def request_context(
             exc_info=True,
         )
         request_id_var.reset(token)
+        public_origin.reset(origin_token)
         return JSONResponse(
             status_code=500,
             content={
@@ -205,7 +237,7 @@ async def request_context(
     response.headers["X-Request-ID"] = request_id
 
     # Health probes fire every few seconds; logging them buries real traffic.
-    if request.url.path not in ("/health", "/ready", "/metrics"):
+    if request.url.path not in ("/health", "/ready", "/metrics", "/metrics/prometheus"):
         log.info(
             "request.completed",
             method=request.method,
@@ -215,6 +247,7 @@ async def request_context(
         )
 
     request_id_var.reset(token)
+    public_origin.reset(origin_token)
     return response
 
 
@@ -232,11 +265,15 @@ app.include_router(users.router)
 app.include_router(audit.router)
 app.include_router(vehicles.router)
 app.include_router(reports.router)
+app.include_router(gap_report.router)
+app.include_router(registries.router)
 app.include_router(watchlist.router)
+app.include_router(persons.router)
 app.include_router(alerts.router)
 app.include_router(analytics.router)
 app.include_router(predictions.router)
 app.include_router(reid.router)
+app.include_router(pursuits.router)
 
 
 @app.get("/", tags=["meta"], summary="Service banner")

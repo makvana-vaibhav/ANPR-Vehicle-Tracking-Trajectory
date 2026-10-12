@@ -12,7 +12,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { ToastProvider } from '@/components/Toast'
 import * as api from '@/lib/api'
-import type { CameraPage, DetectionPage, RouteHop, VehicleRoute } from '@/lib/types'
+import type {
+  CameraPage,
+  CandidateReport,
+  DetectionPage,
+  RouteHop,
+  VehicleRoute,
+} from '@/lib/types'
 import VehicleReport, { spacedPlate } from '@/pages/VehicleReport'
 
 vi.mock('@/hooks/useAuth', () => ({
@@ -89,10 +95,10 @@ const ROUTE: VehicleRoute = {
   unplaced_note: 'Sightings at cameras whose position is not known are listed separately.',
 }
 
-function renderReport() {
+function renderReport(search = '?since=2026-10-11T00:00:00Z') {
   return render(
     <ToastProvider>
-      <MemoryRouter initialEntries={['/reports/vehicle/GJ03AB1234?since=2026-10-11T00:00:00Z']}>
+      <MemoryRouter initialEntries={[`/reports/vehicle/GJ03AB1234${search}`]}>
         <Routes>
           <Route path="/reports/vehicle/:plate" element={<VehicleReport />} />
         </Routes>
@@ -210,6 +216,55 @@ describe('VehicleReport', () => {
     expect(asked).toHaveLength(1)
     expect(asked[0]).toMatchObject({ plate: 'GJ03AB1234', limit: 200 })
     expect(asked[0]!.min_confidence).toBeCloseTo(0.899, 6)
+  })
+})
+
+describe('VehicleReport, with candidates an analyst included', () => {
+  const INCLUDED = '0b6d6f4e-3c1a-4f7e-9a51-111111111111'
+
+  beforeEach(() => {
+    vi.spyOn(api, 'getVehicleRoute').mockResolvedValue({
+      ...ROUTE,
+      hops: [
+        ROUTE.hops[0]!,
+        hop('SBX-cam13', '2026-10-11T04:10:00Z', {
+          candidate: true,
+          read_as: 'GJ03A81234',
+          candidate_note: '1 character differs: B read as 8 at position 6 (a common misreading)',
+          best_detection_id: INCLUDED,
+        }),
+        ROUTE.hops[1]!,
+      ],
+      candidate_hop_count: 1,
+      candidates_missing: [],
+    })
+    vi.spyOn(api, 'getDetections').mockResolvedValue({ items: [], total: 0, limit: 200, offset: 0 } as DetectionPage)
+    vi.spyOn(api, 'getCameras').mockResolvedValue({ items: [], total: 0 } as unknown as CameraPage)
+    vi.spyOn(api, 'getCandidates').mockResolvedValue({
+      candidates: [{ detection_id: INCLUDED, detection_ids: [INCLUDED], crop_url: '/crops/candidate.jpg' }],
+    } as unknown as CandidateReport)
+  })
+
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  it('builds the journey the screen showed and marks the candidate as one', async () => {
+    renderReport(`?since=2026-10-11T00:00:00Z&include=${INCLUDED}`)
+    expect(await screen.findByText(/included by an analyst; not a confirmed read/)).toBeTruthy()
+    expect(api.getVehicleRoute).toHaveBeenCalledWith(
+      'GJ03AB1234',
+      expect.objectContaining({ include: [INCLUDED] }),
+    )
+    expect(screen.getByText('Candidate visits included').nextElementSibling?.textContent).toBe(
+      '1 — not confirmed',
+    )
+    expect(screen.getByText(/Visits marked/)).toBeTruthy()
+    // Its crop is a read of the other plate, fetched with the candidates.
+    expect(await screen.findByAltText('Plate read at SBX-cam13')).toHaveProperty(
+      'src',
+      expect.stringContaining('/crops/candidate.jpg'),
+    )
   })
 })
 

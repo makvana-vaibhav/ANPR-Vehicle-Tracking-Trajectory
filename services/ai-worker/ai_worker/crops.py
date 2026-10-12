@@ -105,6 +105,30 @@ def object_key(kind: str, name: str, now: datetime | None = None) -> str:
     return f"crops/{kind}/{day}/{name}.jpg"
 
 
+#: Face crops live under this prefix, and only in the private persons bucket.
+FACES_PREFIX = "faces/"
+
+
+def face_key(name: str, now: datetime | None = None) -> str:
+    """Where a matched face's crop lives: `faces/YYYY/MM/DD/<camera>/<random>.jpg`.
+
+    Day-partitioned for retention like every other crop. The name the face
+    stage passes is the camera and a random token — nothing in the key says
+    which watchlist entry the face matched.
+    """
+    day = (now or datetime.now(UTC)).strftime("%Y/%m/%d")
+    return f"{FACES_PREFIX}{day}/{name}.jpg"
+
+
+def bucket_for(key: str) -> str:
+    """The key's namespace decides its bucket, so a face can never be written
+    into the media bucket — which the demo stack exposes for anonymous read —
+    by a caller that forgot which store it was using."""
+    if key.startswith(FACES_PREFIX):
+        return settings.minio_persons_bucket
+    return settings.minio_bucket
+
+
 class MinioCropStore:
     """A `run_dir` that uploads crops instead of writing them to disk."""
 
@@ -125,6 +149,9 @@ class MinioCropStore:
         )
         self._client: Any = None
         self._client_lock = threading.Lock()
+        #: Buckets confirmed to exist. The persons bucket is created on first
+        #: use if the platform has not made it yet — never with a policy.
+        self._buckets_ready: set[str] = set()
         self._dropped = 0
         self._uploaded = 0
 
@@ -144,6 +171,16 @@ class MinioCropStore:
     def save_vehicle_crop(self, image: np.ndarray, name: str) -> str | None:
         return self._enqueue(image, "vehicles", name)
 
+    # ── the interface the face stage calls (ailab.face.stage) ─────────────
+    def save_face_crop(self, image: np.ndarray, name: str) -> str | None:
+        """Queue a matched face's crop for the private persons bucket.
+
+        Called only for a face that several frames agreed on with an approved
+        entry (`ailab.face.matching`). Nothing calls this for a face that
+        matched nothing, so no crop of one ever leaves the edge.
+        """
+        return self._enqueue_key(image, face_key(name))
+
     @property
     def path(self) -> Path:
         """Present only because the runner's protocol has it."""
@@ -155,10 +192,11 @@ class MinioCropStore:
 
     # ── internals ───────────────────────────────────────────────────────
     def _enqueue(self, image: np.ndarray, kind: str, name: str) -> str | None:
+        return self._enqueue_key(image, object_key(kind, name))
+
+    def _enqueue_key(self, image: np.ndarray, key: str) -> str | None:
         if image is None or getattr(image, "size", 0) == 0:
             return None
-
-        key = object_key(kind, name)
 
         payload = self._encode(image)
         if payload is None:
@@ -203,10 +241,20 @@ class MinioCropStore:
                 self._queue.task_done()
                 return
             key, payload = item
+            bucket = bucket_for(key)
             try:
                 client = self._ensure_client()
+                if (
+                    bucket != settings.minio_bucket
+                    and bucket not in self._buckets_ready
+                ):
+                    # Created private (MinIO's default) if missing; a policy is
+                    # never set from here.
+                    if not client.bucket_exists(bucket):
+                        client.make_bucket(bucket)
+                    self._buckets_ready.add(bucket)
                 client.put_object(
-                    settings.minio_bucket,
+                    bucket,
                     key,
                     io.BytesIO(payload),
                     length=len(payload),

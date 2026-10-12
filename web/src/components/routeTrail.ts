@@ -16,6 +16,10 @@
  * (transparent) and drawn on its own as a red dashed line. A trail running
  * through an impossible leg would draw the one thing on the page the platform
  * does not believe in the colour of the things it does.
+ *
+ * A leg to or from a **candidate** visit — a read of a different plate an
+ * analyst included — is cut out the same way and drawn dashed in the trail's
+ * colour: possibly this vehicle's, never drawn as though it were confirmed.
  */
 
 import type { RouteHop } from '@/lib/types'
@@ -36,6 +40,14 @@ export interface StopGroup {
   role: 'start' | 'end' | 'via'
   /** At least one visit here was reached by a leg nobody could drive. */
   impossible: boolean
+  /** Every visit here is a candidate: a different plate, included by an analyst. */
+  candidate: boolean
+}
+
+/** Whether the leg into `hops[k]` touches a candidate visit at either end. */
+export function isCandidateLeg(hops: RouteHop[], k: number): boolean {
+  if (k < 1 || k >= hops.length) return false
+  return Boolean(hops[k]!.candidate || hops[k - 1]!.candidate)
 }
 
 /**
@@ -64,6 +76,7 @@ export function groupStops(hops: RouteHop[]): StopGroup[] {
         hops: [],
         role: 'via',
         impossible: false,
+        candidate: true,
       }
       byPlace.set(place, group)
       groups.push(group)
@@ -71,6 +84,7 @@ export function groupStops(hops: RouteHop[]): StopGroup[] {
     if (!group.camera_codes.includes(hop.camera_code)) group.camera_codes.push(hop.camera_code)
     group.hops.push(index)
     if (!hop.plausible) group.impossible = true
+    if (!hop.candidate) group.candidate = false
     if (index === last) group.role = 'end'
     else if (index === 0 && group.role !== 'end') group.role = 'start'
   })
@@ -220,7 +234,7 @@ export function journeyTrail(
 ): { vertices: TrailVertex[]; believed: boolean[] } {
   return {
     vertices: hops.map((hop, i) => ({ lon: hop.lon, lat: hop.lat, t: timeline[i] ?? 0 })),
-    believed: hops.map((hop) => hop.plausible),
+    believed: hops.map((hop, i) => hop.plausible && !isCandidateLeg(hops, i)),
   }
 }
 
@@ -241,12 +255,12 @@ export function travelledTrail(
   for (let i = 0; i < hops.length; i += 1) {
     if ((timeline[i] ?? Infinity) > seconds) break
     vertices.push({ lon: hops[i]!.lon, lat: hops[i]!.lat, t: timeline[i]! })
-    believed.push(hops[i]!.plausible)
+    believed.push(hops[i]!.plausible && !isCandidateLeg(hops, i))
     reached = i + 1
   }
   if (reached === 0) return { vertices: [], believed: [] }
   vertices.push({ lon: here[0], lat: here[1], t: seconds })
-  believed.push(hops[reached]?.plausible ?? true)
+  believed.push((hops[reached]?.plausible ?? true) && !isCandidateLeg(hops, reached))
   return { vertices, believed }
 }
 
@@ -273,14 +287,16 @@ export function formatKm(km: number): string {
  * (straight line, not road) and says so with `≥`. Null for the first visit,
  * which has no leg, and for a leg of no length, which has nothing to say.
  */
-export function legSummary(hop: RouteHop): string | null {
+export function legSummary(hop: RouteHop, candidate = Boolean(hop.candidate)): string | null {
   if (hop.distance_km === null || hop.elapsed_s === null) return null
   if (hop.distance_km <= 0) return null
   const km = `≥ ${formatKm(hop.distance_km)} km`
   const time = formatDuration(hop.elapsed_s)
-  if (!hop.plausible) return `${km} in ${time} · impossible`
+  // A leg to or from a candidate says so first: it may not be this vehicle's.
+  const kind = candidate ? 'candidate · ' : ''
+  if (!hop.plausible) return `${kind}${km} in ${time} · impossible`
   const speed = hop.implied_kmph !== null ? ` · ≥ ${Math.round(hop.implied_kmph)} km/h` : ''
-  return `${km} · ${time}${speed}`
+  return `${kind}${km} · ${time}${speed}`
 }
 
 // ── The timeline axis ────────────────────────────────────────────────

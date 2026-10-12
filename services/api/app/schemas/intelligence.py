@@ -111,6 +111,10 @@ class AlertOut(BaseModel):
     #: reasons. Null for a watchlist hit or a camera-down alert — the match
     #: itself, and the notes field, already say why. Populated for `anomaly`.
     reasons: list[AlertReason] | None = None
+    #: A `person_match`'s cosine similarity — a score, not a probability, so
+    #: never shown as a percentage. Who the entry is and both faces come only
+    #: from the audited `GET /persons/matches/{alert_id}`.
+    similarity: float | None = None
 
 
 class AlertTransition(BaseModel):

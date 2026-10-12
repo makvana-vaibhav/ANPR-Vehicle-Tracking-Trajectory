@@ -53,49 +53,114 @@ wrong by an order of magnitude that reports nothing.
 
 ---
 
-## Path 2 — CoreML, by running the worker on the host
+## Path 2 — CoreML, by running the worker on the host ("Native worker")
 
 The Apple GPU and Neural Engine are reachable from macOS, just not from a
-container. So the worker runs on the host and talks to the containerised stack
-over published ports. Everything else — Postgres, Redis, MediaMTX, the API —
-stays in Docker.
+container — and inside the Linux VM ONNX Runtime cannot use the CPU's SME units
+either. So one worker runs on the host and talks to the containerised stack over
+published ports. Everything else stays in Docker.
 
 ```bash
-make up                      # the platform, without the AI profile
-
-python3 -m venv .venv-worker && source .venv-worker/bin/activate
-pip install -r services/ai-worker/requirements.txt
-pip install -e ai-lab
-
-python3 -c "import onnxruntime as ort; print(ort.get_available_providers())"
-# expect CoreMLExecutionProvider in the list
+make worker-native      # opt-in; Ctrl-C stops it cleanly
 ```
 
-Point it at the published ports rather than the compose hostnames:
+`scripts/worker_native.sh` builds a Python 3.11 venv at
+`services/ai-worker/.venv` with the worker's own pins, derives the two model
+copies CoreML needs (`make models-derived`: an fp32 copy of the detector —
+CoreML takes only part of the fp16 export, for no speed-up — and a
+static-shape plate model; both pinned by SHA-256, bit-identical natively and in
+the worker image) and runs `python -m ai_worker` with `AI_CONFIG=stream_native`
+(`detector.device: coreml`, which fails loudly where CoreML is absent).
 
-```bash
-REDIS_URL=redis://localhost:6379/0 \
-MEDIAMTX_HOST=localhost \
-MEDIAMTX_API_URL=http://localhost:9997 \
-MINIO_ENDPOINT=localhost:9000 \
-AI_MODELS_DIR=./ai-lab/models \
-AI_WORKER_MAX_CAMERAS=6 \
-PYTHONPATH=services/ai-worker \
-python3 -m ai_worker
-```
+**It is a trial by default, and fenced:**
 
-**Two cautions before trusting the result.**
+* cameras: `CAM-DEMO-01` only (`NATIVE_CAMERAS`); a grid camera is refused
+  without `NATIVE_ALLOW_GRID=1`, because the grid's watch quota applies to this
+  process too and no camera may be opened by two workers at once;
+* events go to `nagarnetra:events:native-trial`, which nothing consumes, so it
+  cannot double-report a vehicle the Docker worker also reports;
+* crops go to a private bucket, `nagarnetra-native-trial`;
+* two inference threads in all (`AILAB_INFERENCE_BUDGET=2`).
 
-CoreML is not automatically faster. It compiles a subgraph to ANE/GPU and runs
-the rest on CPU, and for models this small the partition overhead can exceed
-the win — YOLOv8n at 640px is a few hundred milliseconds of CPU work, not
-seconds. Whether it pays has to be **measured on the actual models**, and
-that measurement has not been run here.
+The roster names our gateway `mediamtx`, which the host cannot resolve; the
+worker rewrites those URLs to `MEDIAMTX_HOST=localhost`
+(`ROSTER_GATEWAY_HOST`), so the camera keeps RTSP and its plate regions.
 
-And this path is not the demo path. It needs a Python environment on the host,
-which contradicts the "one laptop, `docker compose up`" constraint in
-CLAUDE.md §3. Treat it as a way to get more cameras out of this Mac during
-development, never as what a judge runs.
+### Measured, 12 Oct
+
+Same code, same config, same clip (`ai-lab/scripts/profile_clip.py`, demo clip,
+38 analysed frames):
+
+| | CPU per analysed frame | Detector | Plate search | Plates |
+|---|---|---|---|---|
+| Worker image (Docker, CPU) | 0.296–0.297 core-s | 107 ms | 128 ms / frame | 11 valid, 10 in labelled set, 0 wrong |
+| **Native, CoreML** | **0.103–0.126 core-s** | **7.7–9.5 ms** | **13.6–16.9 ms / frame** | the same 11 |
+
+CoreML took 230 of 233 detector nodes and 315 of 320 plate-model nodes.
+
+Live, `CAM-DEMO-01`, the same 27 minutes (09:10–09:37 IST), native beside the
+Docker worker — which was then still running the code from before the 12 Oct
+OCR fixes, so this compares the two *as they stood*, not the two platforms
+alone (`ai-lab/scripts/bus_window.py`):
+
+| | Native (new code, CoreML) | Docker (old code) |
+|---|---|---|
+| Frames analysed | ~14.9 fps of 15 (3% dropped) | a fraction (shares the CPU with the grid) |
+| Capture-to-event latency p50 / p90 | **28 / 49 ms** | 330 / 561 ms |
+| Valid plates / distinct strings | 1,186 / 19 | 987 / 86 |
+| Plates resting on a single OCR read | 9% | 24% |
+| OCR reads behind a plate (median) | 5 | 2 |
+
+The native worker read eight of the clip's labelled plates on every one of the
+108 loops. Three strings it read just as consistently are not in the labelled
+set: `LN13VCV` (the car the two labellers could not agree on: LM13VCV / LH13VCV),
+`HN14CDY` (also read by the Docker worker; a plate no sampled crop showed, so
+unscored) and `BW61USU` — which is **a misread of `BG65USJ`**: its saved crops
+are that plate, legibly. And it never resolved `NA54KGJ` live.
+
+Both workers on the new code, 11:07:30–11:14 IST (after the 11:02 restart):
+
+| | Native (CoreML) | Docker |
+|---|---|---|
+| Valid plates / in labelled set / not in it / disputed car | 281 / 204 / 51 / 26 | 249 / 196 / 32 / 21 |
+| Plates on a single read; reads per plate (median) | 9%; 5 | 9%; 4 |
+| Capture-to-event p50 / p90 | 25 / 38 ms | 241 / 337 ms |
+| Process CPU | **0.58 cores** at 14.9 analysed fps (0% dropped) — ≈0.039 core-s per analysed frame, every frame decoded | not separable: one process, several cameras |
+
+Plate by plate over those 16 loops: native read the eight on every loop and `BW61USU` on every loop;
+Docker read `NA54KGJ` on 10 loops and `BG65USJ` on 3 (and `NA13NRU` on 1 —
+native 16). Analysing every frame, where the Docker worker analyses a fraction of them,
+changes which looks the multi-frame vote sees, and the scheduler's intervals are counted in analysed frames, tuned
+at the slower rate. **The native worker is not uniformly better at reading**:
+before switching a camera over, make those intervals time-based and re-measure
+on this clip.
+
+### Switching over (not done)
+
+0. **First, fix the reading at 15 fps.** `plate.schedule` and the crop gate
+   count analysed frames; at several times the frame rate they look at a vehicle
+   several times as often, at near-identical frames. Make them time-based, then
+   re-run `profile_clip.py` and a live window on CAM-DEMO-01 until native reads
+   at least what Docker reads (`BG65USJ`, `NA54KGJ` above).
+1. **Decide per camera, never run both.** Take the camera off the Docker
+   workers first (`AI_WORKER_CAMERAS_<n>` narrows each; or drop it from their
+   shard), then start the native worker on it.
+2. **Publish for real:** `NATIVE_EVENT_STREAM_KEY=nagarnetra:events:detections`
+   and `NATIVE_MINIO_BUCKET=nagarnetra-media`, so its events and crops reach the
+   API like any worker's.
+3. **More cameras:** `NATIVE_CAMERAS=...` and `NATIVE_SLOTS=n`; grid cameras need
+   `NATIVE_ALLOW_GRID=1` *and* removing them from the Docker workers, because the
+   grid refuses a login when sessions churn.
+4. **Supervision:** it runs in a terminal. For a long demo, give it a launchd
+   agent or a `while` loop with backoff; nothing restarts it today.
+5. **Watch:** thermals over hours on a fanless Air, and CoreML compile time
+   (~1–2 s per model, once per process). Neither is measured.
+6. **Rollback:** stop it and give the camera back to the Docker workers — no
+   data migration, the events are the same shape.
+
+It breaks the "one `docker compose up`" rule (CLAUDE.md §3), so the Docker
+workers stay the default and the fallback; this is how to get far more out of
+this Mac when that rule can bend.
 
 ---
 

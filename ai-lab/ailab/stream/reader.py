@@ -297,6 +297,14 @@ class ReaderStats:
     reconnects: int = 0
     decode_failures: int = 0
     discontinuities: int = 0
+    #: Frames decoded but never converted to an image, because nobody was going
+    #: to look at them (`StreamReader._run`). Part of `frames_dropped`.
+    frames_skipped_unconverted: int = 0
+    #: Frames stamped off the stream's timeline and withheld (see `_read_pts`).
+    #: Part of `frames_dropped`.
+    frames_off_timeline: int = 0
+    #: Backward PTS steps that came back to the timeline: jitter, not a cut.
+    pts_excursions: int = 0
     pts_unavailable: bool = False
     started_at: float = field(default_factory=time.perf_counter)
 
@@ -315,9 +323,37 @@ class ReaderStats:
             "reconnects": self.reconnects,
             "decode_failures": self.decode_failures,
             "discontinuities": self.discontinuities,
+            "frames_skipped_unconverted": self.frames_skipped_unconverted,
+            "frames_off_timeline": self.frames_off_timeline,
+            "pts_excursions": self.pts_excursions,
             "pts_unavailable": self.pts_unavailable,
             "elapsed_s": round(self.elapsed_s, 2),
         }
+
+
+#: A backward PTS step up to this size is taken as ordinary timestamp noise and
+#: the frame is used as it is — the behaviour this reader always had.
+PTS_JITTER_S = 1.0
+
+#: A larger backward step is a loop or a restart only once the stream has
+#: *stayed* on the earlier timeline for this much of its own time. Measured on
+#: the organisers' grid, 11-12 Oct: cam21 and cam10 interleave frames stamped
+#: 1-4 s (at times up to 53 s) behind the live timeline, then return to it at
+#: once — `PTS 35.64 -> 34.36`, `35.72 -> 34.44`, `35.80 -> 34.56` in three
+#: consecutive steps. Taken as cuts, those rebuilt the tracker 1,453 times in a
+#: day and left two in three grid plates with a single read. A real loop does
+#: not come back; one second is ample to tell the two apart and short enough
+#: that a cut is still caught within a second of happening.
+PTS_CONFIRM_S = 1.0
+
+#: ...or for this many seconds' worth of frames, so a source whose clock stalls
+#: on the earlier timeline cannot have its frames withheld indefinitely.
+PTS_CONFIRM_MAX_S = 2.0
+
+#: A consumer that has not taken a frame for this long (or four of its own read
+#: intervals, if longer) has paused, and nothing is converted for it until it
+#: asks again.
+_CONSUMER_IDLE_S = 2.0
 
 
 class StreamReader:
@@ -347,9 +383,25 @@ class StreamReader:
 
         self.stats = ReaderStats()
         self._pts_s = 0.0
+        #: The furthest point the stream's own timeline has reached (raw PTS,
+        #: seconds), or None at the start of a connection.
         self._last_pts_s: float | None = None
         self._pts_offset_s = 0.0
         self._pts_available = True
+        #: Where a suspected backward step landed (raw PTS), and how many frames
+        #: have stayed on that earlier timeline since. None when not suspecting.
+        self._suspect_from_s: float | None = None
+        self._suspect_frames = 0
+        #: Set by a reconnect: the next frame starts a new clock.
+        self._reconnected = False
+        #: A cut detected on a frame that was not handed over; it travels with
+        #: the next frame that is, so the consumer always hears of it.
+        self._pending_cut = False
+        # Consumer pacing, for converting only the frames that will be taken.
+        self._waiting = 0
+        self._last_read_at: float | None = None
+        self._read_period_s = 0.0
+        self._grabbed = 0
         self._backoff_s = reconnect_delay_s
         self._latest: CapturedFrame | None = None
         self._lock = threading.Lock()
@@ -382,8 +434,9 @@ class StreamReader:
         self._capture = capture
         return True
 
-    def _read_pts(self, capture: cv2.VideoCapture) -> tuple[float, bool]:
-        """Presentation timestamp for the frame just read, and whether it jumped.
+    def _read_pts(self, capture: cv2.VideoCapture) -> tuple[float, bool, bool]:
+        """Presentation timestamp for the frame just read, whether the stream
+        was cut there, and whether the frame must be withheld.
 
         The NagarNetra integration guide is emphatic about this and it is not a
         style preference: when a client connects the gateway "replays its
@@ -400,6 +453,24 @@ class StreamReader:
         * **The recording loops.** PTS jumps backwards at the loop point. The
           offset is carried forward so `source_t_s` stays monotonic for event
           ordering, and the jump is flagged so tracker state can be rebuilt.
+        * **The timestamps jitter.** Some grid streams interleave frames stamped
+          seconds behind the live timeline and then carry straight on (see
+          `PTS_CONFIRM_S`). Treating every such step as a loop rebuilt the
+          tracker every minute and threw away each vehicle's multi-frame
+          evidence. So a step back further than `PTS_JITTER_S` is *suspected*,
+          and its frame withheld — whether its pixels are stale or only its
+          stamp, it is not evidence about where a vehicle is now, and a
+          drop-to-latest reader loses nothing by skipping one frame. If the
+          stream returns to its timeline the step was jitter and nothing is
+          rebuilt. If it stays on the earlier timeline for `PTS_CONFIRM_S` of
+          its own time, it was a loop: the cut is reported then, and because
+          the frames in between were withheld, no frame from after the cut ever
+          reaches a tracker that still holds the scene from before it.
+        * **The connection was re-established.** A reconnect replays a buffered
+          GOP on a fresh clock, so its first frame is a cut too, and the clock
+          is re-based to keep rising.
+
+        Returns `(source_t_s, cut, withhold)`.
         """
         raw_ms = capture.get(cv2.CAP_PROP_POS_MSEC)
         if raw_ms is None or raw_ms != raw_ms or raw_ms <= 0.0:  # NaN-safe
@@ -416,25 +487,60 @@ class StreamReader:
                         redact(self.source),
                     )
             self._pts_s += 1.0 / self._fps
-            return self._pts_s, False
+            return self._pts_s, False, False
 
         raw_s = raw_ms / 1000.0
-        discontinuity = False
-        if self._last_pts_s is not None and raw_s < self._last_pts_s - 1.0:
-            # Backwards jump: the loop point, or the camera restarted. Keep the
-            # emitted clock monotonic so events stay orderable, and flag it.
-            self._pts_offset_s += self._last_pts_s - raw_s + (1.0 / self._fps)
-            discontinuity = True
-            self.stats.discontinuities += 1
-            log.info(
-                "scene discontinuity on %s (PTS %.2fs -> %.2fs); "
-                "tracker state will be rebuilt",
-                redact(self.source), self._last_pts_s, raw_s,
-            )
+        high = self._last_pts_s
 
+        if high is None:
+            # The first frame of a connection.
+            cut = self._reconnected
+            if cut:
+                self._pts_offset_s = self._pts_s + 1.0 / self._fps - raw_s
+                self._report_cut("reconnected; the stream restarts on a new clock")
+            self._reconnected = False
+            self._last_pts_s = raw_s
+            self._pts_s = raw_s + self._pts_offset_s
+            return self._pts_s, cut, False
+
+        if raw_s >= high - PTS_JITTER_S:
+            # On the timeline, or within ordinary noise of it.
+            if self._suspect_from_s is not None:
+                # It came back: the step was jitter, not a loop.
+                self.stats.pts_excursions += 1
+                log.debug(
+                    "%s: PTS stepped back to %.2fs and returned to %.2fs; not a cut",
+                    redact(self.source), self._suspect_from_s, raw_s,
+                )
+                self._suspect_from_s, self._suspect_frames = None, 0
+            self._last_pts_s = max(high, raw_s)
+            self._pts_s = raw_s + self._pts_offset_s
+            return self._pts_s, False, False
+
+        # Off the timeline, backwards. Start (or continue) suspecting a cut.
+        if self._suspect_from_s is None or raw_s < self._suspect_from_s - PTS_JITTER_S:
+            self._suspect_from_s, self._suspect_frames = raw_s, 0
+        self._suspect_frames += 1
+        stayed_s = raw_s - self._suspect_from_s
+        if stayed_s < PTS_CONFIRM_S and self._suspect_frames < PTS_CONFIRM_MAX_S * self._fps:
+            return self._pts_s, False, True
+
+        # It stayed: a loop or a restart. Re-base so the emitted clock carries
+        # on rising from where it was, across the frames that were withheld.
+        landed = self._suspect_from_s
+        self._pts_offset_s += high - landed + 1.0 / self._fps
+        self._suspect_from_s, self._suspect_frames = None, 0
+        self._report_cut(f"PTS {high:.2f}s -> {landed:.2f}s and stayed")
         self._last_pts_s = raw_s
         self._pts_s = raw_s + self._pts_offset_s
-        return self._pts_s, discontinuity
+        return self._pts_s, True, False
+
+    def _report_cut(self, why: str) -> None:
+        self.stats.discontinuities += 1
+        log.info(
+            "scene discontinuity on %s (%s); tracker state will be rebuilt",
+            redact(self.source), why,
+        )
 
     def start(self) -> StreamReader:
         if not self._open():
@@ -447,7 +553,6 @@ class StreamReader:
         return self
 
     def _run(self) -> None:
-        index = 0
         frame_interval = 1.0 / self._fps
         next_due = time.perf_counter()
 
@@ -456,35 +561,62 @@ class StreamReader:
             if capture is None:
                 break
 
-            ok, image = capture.read()
-            if not ok:
+            # Decode every frame — a decoder cannot skip one without breaking
+            # the frames that reference it — but convert to BGR only the ones
+            # that will be looked at. Conversion and the copy out of FFmpeg are
+            # a quarter of the per-frame cost, and a camera thread analysing a
+            # few frames a second takes one in five to one in ten of what a
+            # 15-25 fps camera sends. Measured in the worker image at one
+            # thread: H.264 1080p25, 11.45 ms a frame with read() against
+            # 8.80 ms with grab(); H.265, 22.1 against 15.4 ms
+            # (docs/research/ANPR_ACCURACY_LATENCY.md §2.2).
+            grabbed_at = time.perf_counter()
+            if not capture.grab():
                 if not self._handle_read_failure():
                     break
                 continue
 
             self.stats.frames_decoded += 1
-            pts_s, discontinuity = self._read_pts(capture)
+            index = self._grabbed
+            self._grabbed += 1
+            pts_s, cut, withhold = self._read_pts(capture)
             # A frame arrived, so the connection is healthy: reset the backoff
             # so a later drop starts from a short delay rather than inheriting
             # the previous outage's.
             self._backoff_s = self.reconnect_delay_s
-            captured = CapturedFrame(
-                index=index,
-                image=image,
-                captured_at=time.perf_counter(),
-                wall_time=datetime.now(UTC),
-                source_t_s=pts_s,
-                discontinuity=discontinuity,
-            )
-            index += 1
 
             with self._new_frame:
-                # Replacing an unconsumed frame IS the drop. Counting it here is
-                # the only place the number is knowable.
-                if self._latest is not None:
+                if cut:
+                    self._pending_cut = True
+                    if self._latest is not None:
+                        # From before the cut. Handing it over after the cut
+                        # was reported would seed the rebuilt tracker with the
+                        # old scene.
+                        self._latest = None
+                        self.stats.frames_dropped += 1
+                wanted = not withhold and self._wants_frame(grabbed_at, frame_interval)
+                if withhold:
+                    self.stats.frames_off_timeline += 1
                     self.stats.frames_dropped += 1
-                self._latest = captured
-                self._new_frame.notify()
+                elif not wanted:
+                    self.stats.frames_skipped_unconverted += 1
+                    self.stats.frames_dropped += 1
+
+            if wanted:
+                ok, image = capture.retrieve()
+                if ok and image is not None:
+                    self._publish(
+                        CapturedFrame(
+                            index=index,
+                            image=image,
+                            captured_at=grabbed_at,
+                            wall_time=datetime.now(UTC),
+                            source_t_s=pts_s,
+                        )
+                    )
+                else:
+                    with self._new_frame:
+                        self.stats.frames_dropped += 1
 
             if self.realtime:
                 # Pace a file at its natural rate so it exercises the same
@@ -500,6 +632,41 @@ class StreamReader:
         with self._new_frame:
             self._finished = True
             self._new_frame.notify_all()
+
+    def _wants_frame(self, now: float, frame_interval: float) -> bool:
+        """Will anyone take the frame just grabbed? Called with the lock held.
+
+        Yes when a consumer is waiting for one. Otherwise only when the
+        consumer is due back within about a frame: its pace is learned from
+        its own reads, so the frame it takes is as fresh as it always was —
+        the newest one decoded — while the frames it would never have seen are
+        not converted at all. A consumer that has stopped reading (a camera
+        whose analysis slot has rotated away) gets nothing converted until it
+        asks again.
+        """
+        if self._waiting:
+            return True
+        last = self._last_read_at
+        if last is None:
+            return False
+        if now - last > max(_CONSUMER_IDLE_S, 4.0 * self._read_period_s):
+            return False
+        return now + frame_interval >= last + self._read_period_s
+
+    def _publish(self, captured: CapturedFrame) -> None:
+        with self._new_frame:
+            previous = self._latest
+            # Replacing an unconsumed frame IS the drop. Counting it here is
+            # the only place the number is knowable. A cut it carried is not
+            # dropped with it: the consumer must still hear of it.
+            if previous is not None:
+                self.stats.frames_dropped += 1
+            captured.discontinuity = self._pending_cut or bool(
+                previous is not None and previous.discontinuity
+            )
+            self._pending_cut = False
+            self._latest = captured
+            self._new_frame.notify()
 
     def _handle_read_failure(self) -> bool:
         """A read failure is end-of-file, or a camera that dropped out."""
@@ -538,20 +705,51 @@ class StreamReader:
             return True   # stay in the loop and back off again
 
         # A reconnect replays a buffered GOP, so the frames that follow are not
-        # continuous with the ones before it.
+        # continuous with the ones before it: the first of them is reported as
+        # a cut (`_read_pts`), with the clock re-based to keep rising. It used
+        # to be neither, so the tracker carried vehicles across the outage and
+        # the clock restarted near zero — and a vehicle last seen at t=600 s
+        # is not "stale" at t=3 s, so nothing in view was ever retired.
         self._last_pts_s = None
+        self._reconnected = self.stats.frames_decoded > 0
+        self._suspect_from_s, self._suspect_frames = None, 0
         return True
 
     # ── consumption ──
     def read(self, timeout: float = 1.0) -> CapturedFrame | None:
         """Take the most recent frame, or None when the stream has ended."""
         with self._new_frame:
+            held = self._latest
+            if (
+                held is not None
+                and self._grabbed > held.index + 1
+                and time.perf_counter() - held.captured_at > 2.0 / self._fps
+            ):
+                # Converted before the consumer paused, and frames have been
+                # decoded since: it is not the latest any more. Drop it and take
+                # the next, which arrives within a frame.
+                self._latest = None
+                self.stats.frames_dropped += 1
+                self._pending_cut = self._pending_cut or held.discontinuity
             if self._latest is None and not self._finished:
-                self._new_frame.wait(timeout)
+                self._waiting += 1
+                try:
+                    self._new_frame.wait(timeout)
+                finally:
+                    self._waiting -= 1
             frame = self._latest
             self._latest = None
-        if frame is not None:
-            self.stats.frames_delivered += 1
+            if frame is not None:
+                self.stats.frames_delivered += 1
+                now = time.perf_counter()
+                if self._last_read_at is not None:
+                    gap = now - self._last_read_at
+                    if gap < _CONSUMER_IDLE_S:
+                        self._read_period_s = (
+                            gap if self._read_period_s == 0.0
+                            else 0.7 * self._read_period_s + 0.3 * gap
+                        )
+                self._last_read_at = now
         return frame
 
     @property

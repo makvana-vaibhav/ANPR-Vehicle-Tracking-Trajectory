@@ -12,6 +12,8 @@ import { describe, expect, it } from 'vitest'
 import {
   formatDuration,
   groupStops,
+  isCandidateLeg,
+  journeyTrail,
   legSummary,
   sequenceLabel,
   stopCaption,
@@ -263,5 +265,33 @@ describe('timelineTicks', () => {
 
   it('has nothing to mark on a journey with no length', () => {
     expect(timelineTicks('2026-10-11T13:33:37Z', 0)).toEqual([])
+  })
+})
+
+describe('candidate visits', () => {
+  // A read of another plate an analyst included: SBX-cam13, between two
+  // confirmed visits. It must never be drawn as a believed leg.
+  const hops = [
+    hop('SBX-cam06', 72.0, 23.0, 0),
+    hop('SBX-cam13', 72.1, 23.0, 5, { candidate: true, read_as: 'GJ03A81234', distance_km: 10.2, elapsed_s: 300 }),
+    hop('SBX-cam04', 72.2, 23.0, 10, { distance_km: 10.2, elapsed_s: 300 }),
+  ]
+
+  it('marks both legs touching it as candidate legs', () => {
+    expect([0, 1, 2].map((k) => isCandidateLeg(hops, k))).toEqual([false, true, true])
+  })
+
+  it('leaves them out of the believed trail', () => {
+    expect(journeyTrail(hops, [0, 300, 600]).believed).toEqual([true, false, false])
+  })
+
+  it('makes a stop of candidates alone a candidate stop', () => {
+    expect(groupStops(hops).map((g) => g.candidate)).toEqual([false, true, false])
+  })
+
+  it('says "candidate" first on the leg, whichever end it is at', () => {
+    expect(legSummary(hops[1]!)).toBe('candidate · ≥ 10 km · 5 min')
+    expect(legSummary(hops[2]!, isCandidateLeg(hops, 2))).toBe('candidate · ≥ 10 km · 5 min')
+    expect(legSummary(hops[2]!)).toBe('≥ 10 km · 5 min')
   })
 })

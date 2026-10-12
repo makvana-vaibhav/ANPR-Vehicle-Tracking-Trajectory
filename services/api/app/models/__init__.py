@@ -13,6 +13,8 @@ from app.models.enums import (
     CameraStatus,
     CameraType,
     DepartmentCode,
+    PersonCategory,
+    PersonStatus,
     Priority,
     Protocol,
     Role,
@@ -20,7 +22,14 @@ from app.models.enums import (
     VmsVendor,
     WatchlistCategory,
 )
+from app.models.external_registry import (
+    ReferenceAfisRecord,
+    ReferenceFir,
+    ReferenceLicence,
+    ReferenceVehicle,
+)
 from app.models.intelligence import Alert, Detection, VehicleTrack, Watchlist
+from app.models.persons import PersonEntry
 from app.models.registry import Camera, CameraHealth, Department, VmsInstance
 from app.models.security import AuditLog, User
 
@@ -38,8 +47,15 @@ __all__ = [
     "Department",
     "DepartmentCode",
     "Detection",
+    "PersonCategory",
+    "PersonEntry",
+    "PersonStatus",
     "Priority",
     "Protocol",
+    "ReferenceAfisRecord",
+    "ReferenceFir",
+    "ReferenceLicence",
+    "ReferenceVehicle",
     "Role",
     "User",
     "VehicleTrack",

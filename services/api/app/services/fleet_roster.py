@@ -38,7 +38,7 @@ import json
 from typing import Any
 
 import redis.asyncio as aioredis
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.orm import selectinload
 
 from app.adapters import adapter_for
@@ -79,6 +79,20 @@ def plate_regions(camera: Camera) -> list[str]:
     return ["IN", *[r for r in extra if r != "IN"]]
 
 
+#: The registry tag that turns on the persons watchlist's face stage for a
+#: camera. Opt-in per camera, never fleet-wide: a junction camera's faces are a
+#: few pixels across, and its CPU is wanted for plates.
+FACES_TAG = "analytics:faces"
+
+
+def analytics(camera: Camera) -> list[str]:
+    """What the worker should run on this camera: `anpr`, `faces`, or both."""
+    wanted = ["anpr"] if camera.anpr_enabled else []
+    if FACES_TAG in (camera.tags or []):
+        wanted.append("faces")
+    return wanted
+
+
 async def _entry_for(camera: Camera) -> dict[str, Any] | None:
     """One camera as the worker needs it: where to pull, and how."""
     adapter = adapter_for(camera.vms)
@@ -99,6 +113,7 @@ async def _entry_for(camera: Camera) -> dict[str, Any] | None:
             "rtsp_url": "",
             "hls_url": "",
             "plate_regions": plate_regions(camera),
+            "analytics": analytics(camera),
             "federated": True,
             "detail": str(exc),
         }
@@ -115,6 +130,9 @@ async def _entry_for(camera: Camera) -> dict[str, Any] | None:
         "rtsp_url": endpoints.rtsp or "",
         "hls_url": endpoints.hls or "",
         "plate_regions": plate_regions(camera),
+        # Which stages to run. A worker that predates this field reads every
+        # entry as ANPR, which is what every entry was until faces existed.
+        "analytics": analytics(camera),
         # Whether the video comes from somebody else's gateway. The worker uses
         # this only for logging; it matters to an operator reading the logs.
         "federated": (camera.vms.adapter_type != "simulated") if camera.vms else False,
@@ -122,14 +140,15 @@ async def _entry_for(camera: Camera) -> dict[str, Any] | None:
 
 
 async def build_roster() -> list[dict[str, Any]]:
-    """Every ANPR-enabled camera, with a resolved stream URL where possible."""
+    """Every camera a worker analyses — ANPR-enabled, or tagged for faces —
+    with a resolved stream URL where possible."""
     async with SessionLocal() as session:
         cameras = (
             (
                 await session.execute(
                     select(Camera)
                     .options(selectinload(Camera.vms))
-                    .where(Camera.anpr_enabled.is_(True))
+                    .where(or_(Camera.anpr_enabled.is_(True), Camera.tags.contains([FACES_TAG])))
                     .order_by(Camera.camera_code)
                 )
             )

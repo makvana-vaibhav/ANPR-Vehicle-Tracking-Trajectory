@@ -1,0 +1,352 @@
+###############################################################################
+# Unit tests for rules/contrail.yml.
+#
+#   docker run --rm -v "$PWD/infra/prometheus:/etc/prometheus:ro" \
+#     --entrypoint promtool prom/prometheus:v3.5.5 \
+#     test rules /etc/prometheus/tests/rules_test.yml
+#
+# rule_files is relative to this file, so the same path works in the container
+# and from a host promtool. promtool compares annotations exactly: change an
+# annotation in the rules and you must change it here.
+#
+# Every series is sampled every 15 s ('a+bxN' = N+1 samples starting at a,
+# stepping by b). Each test proves an alert fires on a bad series AND stays
+# silent on a healthy one next to it.
+###############################################################################
+
+rule_files:
+  - ../rules/contrail.yml
+
+evaluation_interval: 15s
+
+tests:
+  # ── API scrape ───────────────────────────────────────────────────────────
+  - name: api down fires after 1m, only for the contrail-api job
+    interval: 15s
+    input_series:
+      # Up for 5m, then down from 5m15s.
+      - series: 'up{job="contrail-api",instance="api:8000"}'
+        values: '1x20 0x20'
+      # Another job being down is not this alert.
+      - series: 'up{job="mediamtx",instance="mediamtx:9998"}'
+        values: '0x40'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: ContrailApiDown
+        exp_alerts: []
+      # Pending since 5m15s, not yet 1m.
+      - eval_time: 6m
+        alertname: ContrailApiDown
+        exp_alerts: []
+      - eval_time: 7m
+        alertname: ContrailApiDown
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              job: contrail-api
+              instance: api:8000
+            exp_annotations:
+              summary: "Contrail API is not answering Prometheus on api:8000"
+              description: >-
+                The scrape of /metrics/prometheus has failed for over a minute. The API
+                serves the operators, the live WebSocket feed and this exporter, so while it
+                is down every contrail_* series vanishes and the other Contrail alerts
+                resolve instead of firing; this alert is the signal. Check
+                `docker compose ps api` and the api container logs for a crash loop or a
+                failing healthcheck.
+
+  # ── Always-on camera with no plate read ──────────────────────────────────
+  - name: no plate read fires only for always_on="true", only after 10m + 2m
+    interval: 15s
+    input_series:
+      # Age grows in real time: value == seconds since t=0.
+      - series: 'contrail_camera_last_plate_read_age_seconds{camera="CAM-01",always_on="true"}'
+        values: '0+15x100'
+      # Exactly the same age, but not an always-on camera: never alerts.
+      - series: 'contrail_camera_last_plate_read_age_seconds{camera="CAM-02",always_on="false"}'
+        values: '0+15x100'
+      # Always-on and reading plates: age stays at 2 minutes.
+      - series: 'contrail_camera_last_plate_read_age_seconds{camera="CAM-03",always_on="true"}'
+        values: '120x100'
+    alert_rule_test:
+      # 600 is not > 600.
+      - eval_time: 10m
+        alertname: ContrailAlwaysOnCameraNoPlateRead
+        exp_alerts: []
+      # Over 600 since 10m15s, but only pending for 1m45s.
+      - eval_time: 12m
+        alertname: ContrailAlwaysOnCameraNoPlateRead
+        exp_alerts: []
+      - eval_time: 12m30s
+        alertname: ContrailAlwaysOnCameraNoPlateRead
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              camera: CAM-01
+              always_on: "true"
+            exp_annotations:
+              summary: "Always-on camera CAM-01 has produced no plate read for 12m 30s"
+              description: >-
+                A camera the platform analyses continuously has gone over 10 minutes without
+                a plate read. It means "check the camera and the worker", not "the pipeline
+                is down": at night the grid's plate yield is low and a quiet camera can trip
+                this honestly. Open the camera's live view, confirm its worker is analysing it
+                (contrail_ai_worker_cameras), and compare with neighbouring cameras. The value
+                is capped at 86400 s when there has been no read in 24 h.
+
+  # ── Ingest failures ──────────────────────────────────────────────────────
+  - name: ingest failures fire on an increase, not on a flat or reset counter
+    interval: 15s
+    input_series:
+      # One failure at 5m15s.
+      - series: 'contrail_ingest_failed_total{worker="ingest-a"}'
+        values: '0x20 1x40'
+      # Failed in the past, flat now: healthy.
+      - series: 'contrail_ingest_failed_total{worker="ingest-b"}'
+        values: '7x60'
+      # The consumer restarted and its counter reset to 0: not a failure.
+      - series: 'contrail_ingest_failed_total{worker="ingest-c"}'
+        values: '5x20 0x40'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: ContrailIngestFailures
+        exp_alerts: []
+      - eval_time: 6m
+        alertname: ContrailIngestFailures
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              worker: ingest-a
+            exp_annotations:
+              summary: "Ingest worker ingest-a failed to persist events in the last 5m"
+              description: >-
+                The consumer could not write a sighting even after retrying it on its own,
+                or could not raise a person match. The entry is then acknowledged, so it is
+                not retried: this is a lost sighting, not a delayed one, and a journey that
+                passed that camera will be missing a hop. Check the ingest logs for
+                event_consumer.persist_failed; the usual causes are the database being
+                unreachable or a malformed event.
+      # Five minutes after the last failure the window is clean again.
+      - eval_time: 11m
+        alertname: ContrailIngestFailures
+        exp_alerts: []
+
+  # ── Consumer lag / pending ───────────────────────────────────────────────
+  - name: consumer lag fires on sustained lag or pending, not on a spike or below threshold
+    interval: 15s
+    input_series:
+      # g1: lag 5000 from 2m15s.
+      - series: 'contrail_ingest_consumer_lag{group="g1"}'
+        values: '0x8 5000x40'
+      - series: 'contrail_ingest_consumer_pending{group="g1"}'
+        values: '0x48'
+      # g2: no lag, but 2000 delivered and unacknowledged from 2m15s.
+      - series: 'contrail_ingest_consumer_lag{group="g2"}'
+        values: '0x48'
+      - series: 'contrail_ingest_consumer_pending{group="g2"}'
+        values: '0x8 2000x40'
+      # g3: busy but within threshold.
+      - series: 'contrail_ingest_consumer_lag{group="g3"}'
+        values: '900x48'
+      - series: 'contrail_ingest_consumer_pending{group="g3"}'
+        values: '1000x48'
+      # g4: a one-minute spike that clears before `for` elapses.
+      - series: 'contrail_ingest_consumer_lag{group="g4"}'
+        values: '0x8 5000x4 0x35'
+      - series: 'contrail_ingest_consumer_pending{group="g4"}'
+        values: '0x48'
+    alert_rule_test:
+      # Pending since 2m15s, not yet 2m.
+      - eval_time: 4m
+        alertname: ContrailConsumerLag
+        exp_alerts: []
+      - eval_time: 5m
+        alertname: ContrailConsumerLag
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              group: g1
+            exp_annotations:
+              summary: "Consumer group g1 is falling behind the detection stream"
+              description: >-
+                Lag (entries not yet delivered to the group) or pending (delivered but not
+                acknowledged) has stayed above 1000 for 2 minutes. Sightings reach the bus
+                faster than ingest persists them, so search, journeys and alerts trail what
+                the cameras saw. The stream is capped (MAXLEN, 100,000 by default), and an
+                entry trimmed before the group reads it is lost. Check contrail_ingest_workers,
+                ingest CPU and database write latency.
+          - exp_labels:
+              severity: warning
+              group: g2
+            exp_annotations:
+              summary: "Consumer group g2 is falling behind the detection stream"
+              description: >-
+                Lag (entries not yet delivered to the group) or pending (delivered but not
+                acknowledged) has stayed above 1000 for 2 minutes. Sightings reach the bus
+                faster than ingest persists them, so search, journeys and alerts trail what
+                the cameras saw. The stream is capped (MAXLEN, 100,000 by default), and an
+                entry trimmed before the group reads it is lost. Check contrail_ingest_workers,
+                ingest CPU and database write latency.
+
+  # ── Capture-to-persisted latency ─────────────────────────────────────────
+  - name: latency fires on the worst consumer's p95 only, after 5m
+    interval: 15s
+    input_series:
+      # ingest-a p95 over budget from 1m15s.
+      - series: 'contrail_ingest_latency_ms{worker="ingest-a",quantile="0.95"}'
+        values: '800x4 4500x40'
+      # A p99 far over budget is not the p95 budget.
+      - series: 'contrail_ingest_latency_ms{worker="ingest-a",quantile="0.99"}'
+        values: '9000x44'
+      - series: 'contrail_ingest_latency_ms{worker="ingest-b",quantile="0.95"}'
+        values: '500x44'
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: ContrailIngestLatencyHigh
+        exp_alerts: []
+      - eval_time: 7m
+        alertname: ContrailIngestLatencyHigh
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: "Capture-to-persisted p95 is 4.5k ms, over the 3000 ms budget"
+              description: >-
+                The worst consumer's p95 from the event timestamp to the committed row has
+                exceeded the 3 s budget for 5 minutes, so alerts and the live map trail the
+                road by at least that much. The percentile is over each consumer's last
+                10,000 sightings, not a time window: on a quiet stream it reacts slowly and
+                stays high after the cause has cleared. Events replayed from an edge spool
+                keep their original timestamp and legitimately inflate it. Check
+                ContrailConsumerLag and database latency.
+
+  - name: latency stays silent when every p95 is within budget
+    interval: 15s
+    input_series:
+      - series: 'contrail_ingest_latency_ms{worker="ingest-a",quantile="0.95"}'
+        values: '2900x60'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: ContrailIngestLatencyHigh
+        exp_alerts: []
+
+  # ── Edge spool ───────────────────────────────────────────────────────────
+  - name: spooling fires after 1m and clears when the spool drains
+    interval: 15s
+    input_series:
+      # 0/3 holds 120 events from 1m15s to 6m, then drains.
+      - series: 'contrail_ai_worker_spool_events{worker="0/3"}'
+        values: '0x4 120x19 0x20'
+      - series: 'contrail_ai_worker_spool_events{worker="1/3"}'
+        values: '0x44'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: ContrailAiWorkerSpooling
+        exp_alerts: []
+      - eval_time: 2m30s
+        alertname: ContrailAiWorkerSpooling
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              worker: "0/3"
+            exp_annotations:
+              summary: "AI worker 0/3 is holding 120 event(s) in its spool"
+              description: >-
+                The edge worker cannot reach the central bus and is holding settled sightings
+                locally, in order, to replay when it reconnects. Nothing is lost yet, but
+                nothing it sees reaches search, journeys or alerts until the spool drains.
+                Live boxes are discarded rather than spooled. Check Redis health and the
+                network path from the ai-worker container to Redis.
+      - eval_time: 7m
+        alertname: ContrailAiWorkerSpooling
+        exp_alerts: []
+
+  - name: spool dropping fires on any drop, not on a flat counter
+    interval: 15s
+    input_series:
+      - series: 'contrail_ai_worker_spool_dropped_total{worker="0/3"}'
+        values: '0x20 50x40'
+      - series: 'contrail_ai_worker_spool_dropped_total{worker="1/3"}'
+        values: '0x60'
+      # Dropped long ago, nothing since.
+      - series: 'contrail_ai_worker_spool_dropped_total{worker="2/3"}'
+        values: '3x60'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: ContrailAiWorkerSpoolDropping
+        exp_alerts: []
+      - eval_time: 6m
+        alertname: ContrailAiWorkerSpoolDropping
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              worker: "0/3"
+            exp_annotations:
+              summary: "AI worker 0/3 dropped spooled events in the last 5m"
+              description: >-
+                The spool hit its memory (and disk, if configured) bounds and discarded its
+                oldest events, or a shutdown could not flush them. These are settled
+                sightings that will never be persisted, so journeys through this worker's
+                cameras have gaps. Restore the bus first, then consider raising
+                AI_WORKER_SPOOL_MAX_EVENTS / _MAX_BYTES (memory) or
+                AI_WORKER_SPOOL_DISK_MAX_BYTES (disk).
+      - eval_time: 12m
+        alertname: ContrailAiWorkerSpoolDropping
+        exp_alerts: []
+
+  # ── Edge worker staleness ────────────────────────────────────────────────
+  - name: a worker that stops reporting fires after 60s + 2m
+    interval: 15s
+    input_series:
+      # 2/3 reports normally, then goes silent at ~1m: age climbs from 1m15s.
+      - series: 'contrail_ai_worker_stats_age_seconds{worker="2/3"}'
+        values: '3x4 15+15x40'
+      - series: 'contrail_ai_worker_stats_age_seconds{worker="0/3"}'
+        values: '4x44'
+    alert_rule_test:
+      # Over 60 from 2m15s; pending for 1m45s.
+      - eval_time: 4m
+        alertname: ContrailAiWorkerStale
+        exp_alerts: []
+      - eval_time: 4m30s
+        alertname: ContrailAiWorkerStale
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              worker: "2/3"
+            exp_annotations:
+              summary: "AI worker 2/3 has not reported for 210s"
+              description: >-
+                Each worker rewrites its stats every ~5 s; this one has been silent for over
+                a minute. It has probably crashed, hung, or lost Redis, and its cameras are
+                not being analysed. The exporter drops a worker 300 s after its last report,
+                so this fires at about 3 minutes and resolves at 5 whether or not the worker
+                came back; check that it did. Check `docker compose ps` for the ai-worker
+                containers and their logs.
+
+  # ── Exporter health ──────────────────────────────────────────────────────
+  - name: exporter errors fire per source on an increase
+    interval: 15s
+    input_series:
+      - series: 'contrail_metrics_scrape_errors_total{source="redis"}'
+        values: '0x10 1x30'
+      - series: 'contrail_metrics_scrape_errors_total{source="postgres"}'
+        values: '0x40'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: ContrailExporterErrors
+        exp_alerts: []
+      - eval_time: 3m
+        alertname: ContrailExporterErrors
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              source: redis
+            exp_annotations:
+              summary: "The metrics exporter could not read its redis source"
+              description: >-
+                The exporter failed to collect from redis at least once in
+                the last 5 minutes. The series built from that source are missing or stale
+                for those scrapes, so a quiet panel or an alert that did not fire may be a
+                blind spot, not good news. Check that Redis and Postgres are reachable from
+                the api container and read the api logs.

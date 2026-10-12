@@ -83,7 +83,10 @@ async def cameras() -> list[dict]:
                 text(
                     "SELECT id, camera_code, "
                     "ST_Y(location::geometry) AS lat, ST_X(location::geometry) AS lon "
-                    "FROM cameras ORDER BY camera_code LIMIT 2"
+                    # A camera with no known position sits at a placeholder; a
+                    # gap measured to it is a distance to nowhere.
+                    "FROM cameras WHERE NOT ('placement:unknown' = ANY(coalesce(tags, '{}'))) "
+                    "ORDER BY camera_code LIMIT 2"
                 )
             )
         ).mappings()

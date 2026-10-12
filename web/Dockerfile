@@ -49,11 +49,18 @@ LABEL org.opencontainers.image.title="NagarNetra Command Centre" \
       org.opencontainers.image.description="Statewide CCTV intelligence platform — web tier" \
       org.opencontainers.image.licenses="Apache-2.0"
 
-RUN rm -rf /usr/share/nginx/html/*
+# openssl, for the self-signed certificate the HTTPS server falls back to when
+# none is mounted (docker/30-contrail-tls.sh). Pinned to the 3.3 series that
+# this Alpine release (3.21) ships.
+RUN apk add --no-cache "openssl~3.3" \
+ && rm -rf /usr/share/nginx/html/*
 COPY --from=build /app/dist /usr/share/nginx/html
 COPY nginx.conf /etc/nginx/conf.d/default.conf
+COPY nginx/contrail-app.conf /etc/nginx/contrail/app.conf
+COPY --chmod=0755 docker/30-contrail-tls.sh /docker-entrypoint.d/30-contrail-tls.sh
 
-EXPOSE 80
+# 80: plain HTTP (published as 8080). 8443: HTTPS.
+EXPOSE 80 8443
 
 HEALTHCHECK --interval=10s --timeout=5s --start-period=10s --retries=12 \
     CMD wget -q -O- http://127.0.0.1:80/healthz >/dev/null 2>&1 || exit 1

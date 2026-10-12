@@ -18,7 +18,8 @@ document, because it stops anyone looking.
 |---|---|---|
 | Password hashing (argon2id) | ✅ | `app/core/security.py` |
 | JWT access + refresh, rotation, revocation | ✅ | `app/routers/auth.py`, `app/services/token_store.py` |
-| Role-based access, 6 roles × 19 permissions | ✅ | `app/core/rbac.py` |
+| Role-based access, 6 roles × 23 permissions | ✅ | `app/core/rbac.py` |
+| Persons watchlist: four-eyes enrolment, private face media, every view audited | ✅ | §7.1, `app/routers/persons.py` |
 | Audit trail on every mutation and every search | ✅ | `app/middleware/audit.py`, `app/services/audit.py` |
 | Audit trail readable, and reading it is audited | ✅ | `app/routers/audit.py` |
 | Password policy beyond length | ✅ | `app/core/password_policy.py` |
@@ -47,10 +48,10 @@ a control** — every one of these is checked server-side on every request.
 | Role | Holds | Notably cannot |
 |---|---|---|
 | `admin` | every permission | — |
-| `supervisor` | camera RW, watchlist RW, full alert lifecycle, streams, search, audit read | manage accounts |
-| `operator` | camera read, streams, watchlist read, alert read + **acknowledge**, search | dispatch or close an alert; change the watchlist |
-| `analyst` | camera read, watchlist read, alert read, search | view streams; change anything |
-| `auditor` | camera read, watchlist read, alert read, **audit read** | view streams; run vehicle searches |
+| `supervisor` | camera RW, watchlist RW, persons enrol/approve/retire, full alert lifecycle, streams, search, audit read | manage accounts; approve a person they enrolled |
+| `operator` | camera read, streams, watchlist read, persons read, alert read + **acknowledge**, search | dispatch or close an alert; change either watchlist |
+| `analyst` | camera read, watchlist read, persons read, alert read, search | view streams; change anything |
+| `auditor` | camera read, watchlist read, persons read, alert read, **audit read** | view streams; run vehicle searches; change anything |
 | `api_client` | camera create only | everything else |
 
 Two deliberate splits:
@@ -140,6 +141,8 @@ Configured in `Settings`, **enforced daily** by `app/services/retention.py`.
 | Camera health | 90 days | TimescaleDB `drop_chunks` |
 | Media (crops, snapshots) | 90 days | *not yet wired — see §8* |
 | Audit log | 1825 days (5 years) | predicate delete |
+| Face embedding of a persons-watchlist entry | while the entry can match | nulled on rejection, retirement or expiry (`app/services/persons.py`) |
+| Reference photo of a retired or rejected entry; face crop on a person-match alarm | 90 days (`RETENTION_PERSON_MEDIA_DAYS`) | deleted from object storage by the persons sweeper, hourly |
 
 Under the DPDP Act the stated period is the lawful basis for holding the data
 at all, so these are not advisory. A policy nobody enforces is worse than no
@@ -253,6 +256,77 @@ toward that:
 Not addressed here and needing legal rather than engineering input: the lawful
 basis for deployment, DPIA, the notification regime, and who may authorise a
 watchlist entry.
+
+### 7.1 The persons watchlist — purpose limitation, and what is never stored
+
+Face matching against a list of people is the most privacy-sensitive thing
+this platform does. It was built only with these controls, each enforced in
+code and covered by tests (`services/api/tests/test_persons.py`,
+`ai-lab/tests/test_face.py`, `services/ai-worker/tests/test_persons_edge.py`):
+
+**Who decides.**
+
+* **Four-eyes.** An entry is enrolled (`person.enrol`) by one account and
+  matched only after a *different* account approves it (`person.approve`). The
+  API refuses self-approval and self-rejection, audits the attempt as denied,
+  and CHECK constraints in migration `0009` refuse it again at the database.
+* **Purpose and expiry.** Every entry carries a category (`missing`, `wanted`
+  under a named warrant, or `demo` — a fictional case on recorded footage), a
+  case reference and a written purpose and legal basis, all required. It
+  lapses at `valid_until`: 30 days by default, never more than 90; the platform
+  retires it on the minute and audits that as `person.expire`. Renewal is a new
+  enrolment and a new approval.
+* **A person confirms every match.** A match is raised as a *Possible person
+  match*, priority `high` and never `critical`, with its reasons — similarity
+  against the threshold, frames that agreed, the margin over the next-closest
+  entry, what the entry is held for. The alarm screen shows the enrolled face
+  and the captured face side by side under "A person must confirm this match
+  before anyone acts". Nothing is dispatched automatically.
+
+**Where it runs.** Only on cameras the registry tags `analytics:faces` — never
+on the grid's junction cameras by default — and only while an approved entry
+exists: with an empty gallery the face stage does not even look.
+
+**What is never stored.**
+
+* **Faces that matched nothing.** At the edge, a face's embedding exists for
+  one comparison and is discarded (`ailab/face/stage.py`); the multi-frame
+  logic is handed the comparison result, never the embedding. A crop is taken
+  only of a frame that passed the threshold, held in memory only while that
+  face is in view, and uploaded only if several frames agreed. No log line,
+  event or file records a face that matched nothing.
+* **Embeddings of a face a camera saw** — not even a matched one. The event
+  carries the similarity, never the vector.
+* **The uploaded original.** A reference photo is re-encoded from its pixels
+  before it is stored: no EXIF, no GPS, no embedded thumbnail. Its header is
+  checked before it is decoded, so an upload cannot be a decompression bomb.
+* **Embeddings of entries that can no longer match.** Rejection, retirement
+  and expiry null the embedding at once; the photo goes at the retention date.
+
+**Who can see a face, and the record of it.**
+
+* Photographs live in a separate bucket (`MINIO_PERSONS_BUCKET`) that is never
+  given an anonymous policy — `minio-init` sets it private, and the API refuses
+  to store a face if it has acquired one. Plate crops' bucket is unaffected.
+* A face is reachable only through a two-minute signed link issued by an
+  endpoint that requires `person.read` (all human roles; never `api_client`).
+* **Every list, every view and every alarm-evidence read writes an audit row
+  naming each photograph it issued a link for** (`person.list`, `person.view`,
+  `person.match_view`), as does every enrolment, refusal, approval, rejection
+  and retirement.
+* The live event feed reaches every signed-in role, so raw `person.match`
+  events are never fanned out to it (`event_tailer.PRIVATE_EVENTS`); the alarm
+  that is carries no name and no photograph.
+* The gallery the cameras read carries ids, categories, case references and
+  embeddings — no photograph, no name — and expires after 15 minutes without a
+  refresh, so a worker cut off from the platform stops matching rather than
+  matching an outdated list.
+
+**What this does not settle.** The accuracy figures are from three people in
+one well-lit stock clip, not real CCTV; the threshold is a starting point to be
+re-measured on footage from the cameras it will run on. Who may lawfully
+authorise an entry, notification of the people enrolled, and a DPIA need
+legal input, as for the plate watchlist.
 
 ---
 

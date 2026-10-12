@@ -66,10 +66,22 @@ class LoadedRun:
         ]
 
     def hard_case_index(self) -> list[dict[str, Any]]:
+        """The hard cases this run flagged, one dict per vehicle.
+
+        `ailab run` writes the index as `{"summary": ..., "cases": [...]}`.
+        This used to wrap that object in `list()`, which returns its *keys*, so
+        `ailab report` rendered two "cases" called "summary" and "cases" and
+        `ailab mine` harvested no hard case at all. A bare list is still
+        accepted, for an index written by hand or by an older lab.
+        """
         path = self.path / "hard_cases" / "index.json"
         if not path.exists():
             return []
-        return list(json.loads(path.read_text()))
+        index = json.loads(path.read_text())
+        cases = index.get("cases", []) if isinstance(index, dict) else index
+        if not isinstance(cases, list):
+            return []
+        return [case for case in cases if isinstance(case, dict)]
 
 
 def _read_csv(path: Path) -> list[dict[str, str]]:

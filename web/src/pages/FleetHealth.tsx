@@ -39,8 +39,10 @@ import {
 } from '@/components/network/cameraFacts'
 import { bucketProbes, type ProbeBucket } from '@/components/network/probeHistory'
 import {
+  Button,
   EmptyState,
   ErrorBanner,
+  Icon,
   PageHeader,
   Panel,
   PanelHeader,
@@ -370,6 +372,7 @@ function GapPanel({
           title="Where the network is blind"
           caption={gaps ? `last ${gaps.window_hours} hours` : undefined}
           info="Four failure modes, kept apart because each needs a different response: fix the camera, steady a flapping one, install a camera where there is none, or add plate reading where there is too little. Unreliable means below 90% uptime over the window; the ANPR target is a share of a district's cameras."
+          action={<GapReportDownload hours={gaps?.window_hours ?? 24} />}
         />
       </div>
       <div className="mt-3 px-2">
@@ -480,6 +483,52 @@ function GapPanel({
         )}
       </div>
     </section>
+  )
+}
+
+/**
+ * The gap report as a CSV file — the same analysis, one row per gap, times in
+ * IST and UTC — for whoever has to act on it. The download is audited.
+ * Its outcome is said beside the button rather than in a toast, so it stays
+ * readable for as long as the panel is on screen.
+ */
+function GapReportDownload({ hours }: { hours: number }) {
+  const [state, setState] = useState<
+    { kind: 'idle' } | { kind: 'busy' } | { kind: 'saved'; name: string } | { kind: 'failed'; message: string }
+  >({ kind: 'idle' })
+
+  async function download() {
+    setState({ kind: 'busy' })
+    try {
+      setState({ kind: 'saved', name: await api.downloadGapReport(hours) })
+    } catch (err) {
+      setState({ kind: 'failed', message: err instanceof Error ? err.message : String(err) })
+    }
+  }
+
+  return (
+    <div className="flex shrink-0 items-center gap-2">
+      {state.kind === 'saved' && (
+        <span className="hidden max-w-[14rem] truncate text-[11px] text-faint sm:inline" title={state.name}>
+          Saved {state.name}
+        </span>
+      )}
+      {state.kind === 'failed' && (
+        <span role="alert" className="max-w-[16rem] truncate text-[11px] text-status-offline" title={state.message}>
+          {state.message}
+        </span>
+      )}
+      <Button
+        variant="outline"
+        size="sm"
+        onClick={() => void download()}
+        disabled={state.kind === 'busy'}
+        title={`One row per gap over the last ${hours} hours, as CSV`}
+      >
+        <Icon name="download" size={14} />
+        {state.kind === 'busy' ? 'Preparing…' : 'Download gap report'}
+      </Button>
+    </div>
   )
 }
 

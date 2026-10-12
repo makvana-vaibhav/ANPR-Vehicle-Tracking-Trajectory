@@ -28,15 +28,15 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 from ailab.aggregate.consensus import consensus
-from ailab.artifacts import RunDirectory
+from ailab.artifacts import CropStore
 from ailab.config import RunConfig
 from ailab.logging import get_logger
 from ailab.pipeline import Pipeline
 from ailab.stream.events import (
-    EventSink,
+    EventSinkLike,
     LiveTrackBox,
     SourceIdentity,
     track_batch_event,
@@ -47,6 +47,26 @@ from ailab.track.merge import Vehicle
 from ailab.types import BBox, Detection, Frame, StageTimer, Track, TrackObservation
 
 log = get_logger(__name__)
+
+
+class FaceStageLike(Protocol):
+    """The persons watchlist's face stage (`ailab.face.stage.FaceStage`), as
+    the runner sees it: handed each analysed frame, told when the scene cuts,
+    asked for its figures. Optional — only a camera tagged `analytics:faces`
+    is given one."""
+
+    def process(
+        self,
+        image: Any,
+        *,
+        t_s: float,
+        captured_at: datetime | None = None,
+        latency_ms: float | None = None,
+    ) -> Any: ...
+
+    def reset(self) -> None: ...
+
+    def describe(self) -> dict[str, Any]: ...
 
 
 @dataclass
@@ -133,9 +153,11 @@ class StreamRunner:
         self,
         config: RunConfig,
         source: SourceIdentity,
-        sink: EventSink,
-        run_dir: RunDirectory | None = None,
+        sink: EventSinkLike,
+        run_dir: CropStore | None = None,
         pipeline: Pipeline | None = None,
+        face_stage: FaceStageLike | None = None,
+        vehicles: bool = True,
     ) -> None:
         """`pipeline` lets a caller supply models that are already loaded.
 
@@ -147,11 +169,19 @@ class StreamRunner:
         counters; the caller owns its lifetime and must not share one between
         two runners at the same time, because inference state is not
         thread-safe.
+
+        `face_stage`, when given, sees every analysed frame after the vehicle
+        pipeline and decides for itself how often to look (the persons
+        watchlist, `ailab.face`). `vehicles=False` is a camera analysed for
+        faces only: no vehicle detection, no plates and no vehicle events, so a
+        pavement camera costs the face stage and nothing else.
         """
         self.config = config
         self.source = source
         self.sink = sink
         self.run_dir = run_dir
+        self.face_stage = face_stage
+        self.vehicles = vehicles
         if pipeline is None:
             self.pipeline = Pipeline(config)
         else:
@@ -291,6 +321,7 @@ class StreamRunner:
             "plate_schedule": self.pipeline.scheduler.stats(),
             "crop_gate": self.pipeline.crop_gate.stats(),
             "events": {"written": self.sink.written, "by_kind": dict(self.sink.by_kind)},
+            "faces": self.face_stage.describe() if self.face_stage is not None else None,
         }
         self._log_summary(report)
         return report
@@ -308,6 +339,12 @@ class StreamRunner:
             # associate vehicles from before it with vehicles after it. Vehicles
             # in view at the cut are completed with the evidence they have.
             self._on_discontinuity()
+
+        if not self.vehicles:
+            # A camera analysed for faces only (`analytics:faces` without
+            # ANPR): nothing below would find anything it is wanted for.
+            self._process_faces(captured)
+            return
 
         frame = Frame(
             index=frame_index,
@@ -351,6 +388,20 @@ class StreamRunner:
         # the platform has not yet been told about.
         self._emit_track_batch(captured)
         self._retire_stale(captured)
+        self._process_faces(captured)
+
+    def _process_faces(self, captured: Any) -> None:
+        """Hand the frame to the face stage, which paces itself (`max_fps`)."""
+        if self.face_stage is None or captured.image is None:
+            return
+        t0 = time.perf_counter()
+        self.face_stage.process(
+            captured.image,
+            t_s=captured.source_t_s,
+            captured_at=captured.wall_time,
+            latency_ms=captured.age_ms,
+        )
+        self.timer.add("faces", time.perf_counter() - t0)
 
     def _new_epoch(self) -> str:
         return f"{self.source.camera_id}.{secrets.token_hex(3)}"
@@ -375,6 +426,10 @@ class StreamRunner:
         self._reads_by_track.clear()
         self._crops_saved.clear()
         self._labels.clear()
+        if self.face_stage is not None:
+            # Faces in view at the cut are forgotten with their evidence: a
+            # face before a scene cut and one after it are not the same track.
+            self.face_stage.reset()
         return live
 
     def _on_discontinuity(self) -> None:
@@ -630,23 +685,66 @@ class StreamRunner:
         position the car has demonstrably left.
 
         Falls back to the measured box when there is nothing to anchor to.
+
+        ## When the vehicle box stops describing the same vehicle
+
+        The fractions assume the box still frames the car the plate was found
+        on. It does not when the detector boxes two vehicles as one, splits one,
+        or loses half of it behind a bus — and then the fractions scaled the
+        plate by however much the *box* grew: a box merged over two cars drew a
+        plate the size of a car, floating between them. So:
+
+        * While the box keeps its shape (both sides scaled alike: the same
+          vehicle, nearer or further), the fractions apply exactly as above.
+        * When it changes shape, the plate is scaled by the side that changed
+          least — a merge or split moves one side and leaves the other — and
+          held at its offset from the box edges that moved least, which are the
+          edges still belonging to this vehicle.
+        * Either way it is never wider than 60% or taller than 40% of the
+          vehicle box (a plate is about a fifth of a car's width, and under half
+          even of a motorcycle seen head-on), and never outside it.
         """
         if vehicle_then is None or vehicle_now is None:
             return plate
         width, height = vehicle_then.width, vehicle_then.height
-        if width <= 0.0 or height <= 0.0:
+        if width <= 0.0 or height <= 0.0 or vehicle_now.width <= 0.0 or vehicle_now.height <= 0.0:
             return plate
 
-        fx1 = (plate.x1 - vehicle_then.x1) / width
-        fy1 = (plate.y1 - vehicle_then.y1) / height
-        fx2 = (plate.x2 - vehicle_then.x1) / width
-        fy2 = (plate.y2 - vehicle_then.y1) / height
-        return BBox(
-            vehicle_now.x1 + fx1 * vehicle_now.width,
-            vehicle_now.y1 + fy1 * vehicle_now.height,
-            vehicle_now.x1 + fx2 * vehicle_now.width,
-            vehicle_now.y1 + fy2 * vehicle_now.height,
-        )
+        # How far the box's proportions may change before it is no longer
+        # taken to frame the same extent of the same vehicle. A car turning
+        # across the frame widens its box gradually; a merge doubles it.
+        shape_tolerance = 1.25
+        max_width_share, max_height_share = 0.60, 0.40
+
+        rw = vehicle_now.width / width
+        rh = vehicle_now.height / height
+        if max(rw, rh) / min(rw, rh) <= shape_tolerance:
+            fx1 = (plate.x1 - vehicle_then.x1) / width
+            fy1 = (plate.y1 - vehicle_then.y1) / height
+            fx2 = (plate.x2 - vehicle_then.x1) / width
+            fy2 = (plate.y2 - vehicle_then.y1) / height
+            anchored = BBox(
+                vehicle_now.x1 + fx1 * vehicle_now.width,
+                vehicle_now.y1 + fy1 * vehicle_now.height,
+                vehicle_now.x1 + fx2 * vehicle_now.width,
+                vehicle_now.y1 + fy2 * vehicle_now.height,
+            )
+        else:
+            # max(r, 1/r) orders ratios by how far from 1 they are either way.
+            scale = rw if max(rw, 1.0 / rw) <= max(rh, 1.0 / rh) else rh
+            cx = _carried(plate.cx, vehicle_then.x1, vehicle_then.x2,
+                          vehicle_now.x1, vehicle_now.x2, scale)
+            cy = _carried(plate.cy, vehicle_then.y1, vehicle_then.y2,
+                          vehicle_now.y1, vehicle_now.y2, scale)
+            half_w, half_h = plate.width * scale / 2.0, plate.height * scale / 2.0
+            anchored = BBox(cx - half_w, cy - half_h, cx + half_w, cy + half_h)
+
+        # Plausible size, shrunk about its own centre, then kept on the vehicle.
+        half_w = min(anchored.width, max_width_share * vehicle_now.width) / 2.0
+        half_h = min(anchored.height, max_height_share * vehicle_now.height) / 2.0
+        cx = min(max(anchored.cx, vehicle_now.x1 + half_w), vehicle_now.x2 - half_w)
+        cy = min(max(anchored.cy, vehicle_now.y1 + half_h), vehicle_now.y2 - half_h)
+        return BBox(cx - half_w, cy - half_h, cx + half_w, cy + half_h)
 
     @staticmethod
     def _latest_bbox(track: Track) -> Any:
@@ -771,6 +869,21 @@ class StreamRunner:
             stream["events_completed"], 100.0 * reader["drop_rate"],
             reader["frames_decoded"], stream["latency_ms"]["median"],
         )
+
+
+def _carried(
+    position: float, then_lo: float, then_hi: float, now_lo: float, now_hi: float, scale: float
+) -> float:
+    """Carry a coordinate on one axis by its offset from the steadier box edge.
+
+    When a vehicle box merges with another vehicle's, the edge on the far side
+    of the newcomer jumps while this vehicle's own edge only moves with it. The
+    edge that moved less is the one still attached to this vehicle, so the plate
+    keeps its (scaled) offset from that one.
+    """
+    if abs(now_lo - then_lo) <= abs(now_hi - then_hi):
+        return now_lo + (position - then_lo) * scale
+    return now_hi - (then_hi - position) * scale
 
 
 @dataclass(frozen=True, slots=True)

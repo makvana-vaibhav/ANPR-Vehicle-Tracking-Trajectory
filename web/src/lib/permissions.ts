@@ -15,7 +15,7 @@
  * that way round deliberately.
  *
  * Names are duplicated from the backend rather than generated because there
- * are nineteen of them and they change about once a phase; the RBAC test suite
+ * are about two dozen of them and they change about once a phase; the RBAC test suite
  * asserts the matrix, and `lib/__tests__/nav.test.ts` asserts every screen's
  * permission is one of these strings.
  */
@@ -32,6 +32,14 @@ export const PERMISSIONS = {
   watchlistRead: 'watchlist.read',
   watchlistUpdate: 'watchlist.update',
   watchlistDelete: 'watchlist.delete',
+
+  // The persons watchlist. Reading shows photographs of people, so it is its
+  // own grant; enrolling, approving and retiring are separate again, and the
+  // API refuses an approval by the account that enrolled the entry.
+  personRead: 'person.read',
+  personEnrol: 'person.enrol',
+  personApprove: 'person.approve',
+  personRetire: 'person.retire',
 
   alertRead: 'alert.read',
   alertAcknowledge: 'alert.acknowledge',
@@ -60,9 +68,9 @@ export type Permission = (typeof PERMISSIONS)[keyof typeof PERMISSIONS]
  */
 export const ROLE_SUMMARY: Record<string, string> = {
   admin: 'Full access, including users and audit',
-  supervisor: 'Manage cameras, watchlist and the full alert lifecycle',
+  supervisor: 'Manage cameras, both watchlists and the full alert lifecycle',
   operator: 'Watch cameras, acknowledge alerts, search vehicles',
-  analyst: 'Read cameras, watchlist and alerts; search vehicles',
+  analyst: 'Read cameras, watchlists and alerts; search vehicles',
   auditor: 'Read-only, plus the audit trail',
   api_client: 'Machine identity — camera onboarding only',
 }

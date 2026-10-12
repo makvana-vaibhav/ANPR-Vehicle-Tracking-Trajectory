@@ -256,3 +256,51 @@ four.
 The thing slots actually buy is **coverage**: 10 → 15 → 27 distinct cameras
 seen in five minutes, at no CPU cost. That matters for PS demo step 3, which
 needs the same vehicle on more than one camera before it can link anything.
+
+## 8. 12 Oct: decoding less, reading better, and not mistaking jitter for a cut
+
+Three worker-level changes, measured in the worker image (one thread, the live
+stack sharing the machine; details and reproduction in
+[ai-lab/PERFORMANCE.md](../ai-lab/PERFORMANCE.md) §12).
+
+**Only the frames that will be analysed are converted.** `StreamReader` still
+decodes every frame, but converts to BGR only the one a consumer is about to
+take, timed from the consumer's own pace, and none while a camera's analysis
+slot has rotated away. Per open 1080p25 stream: H.264 0.140 → 0.070 cores
+analysed, 0.103 → 0.063 paused; H.265 0.154 → 0.121 and 0.161 → 0.115.
+
+**OCR reads the raw crop.** Dropping the pad + CLAHE variants and bounding
+PP-OCR's detection fallback cut OCR from 64 to 25 ms per crop and the whole
+pipeline from ~0.35 to ~0.30 core-s per analysed frame on the busy demo clip —
+while reading more plates right (ai-lab/FINDINGS.md §9).
+
+**Timestamp jitter is no longer a scene cut.** Two grid cameras interleave
+frames stamped 1–4 s (up to 53 s) behind their live timeline and then carry
+straight on. Every such step was taken for a loop: 1,453 tracker rebuilds on
+11 Oct, each completing every vehicle in view mid-sighting and so cutting its
+multi-frame evidence short (two in three grid plates rested on a single OCR
+read that day; the rebuilds are one cause, the frame rate another). Now a backward step is
+held, its frame withheld (a drop-to-latest reader loses nothing by skipping
+one), and it is a cut only if the stream *stays* on the earlier timeline for a
+second. A reconnect is now a cut too, on a clock that keeps rising; before, the
+clock restarted near zero and vehicles in view before the outage were never
+retired. The reader's stats count `pts_excursions` and `frames_off_timeline`.
+
+The before/after on the live grid comes from the bus, not a recording:
+
+```bash
+python3 ai-lab/scripts/bus_window.py --minutes 30          # per camera: valid plates,
+                                                           # single-read share, reads per plate
+```
+
+Compare windows of equal length at the same time of day, and treat it as an
+observation — traffic confounds it.
+
+CAM-DEMO-01 loops one clip, so there the traffic is identical and the 11:02
+restart onto this code is a fair before/after (same worker image): valid plates
+outside the labelled set 27% → 13% of reads, plates resting on one OCR read
+24% → 9%, OCR reads per plate (median) 2 → 4, capture-to-event p50 330 → 241 ms.
+
+On this Mac the bigger lever is outside Docker altogether: the same pipeline
+natively on CoreML costs ~0.11 core-s per analysed frame against ~0.30 in the
+worker image. See [GPU.md](GPU.md), "Native worker".

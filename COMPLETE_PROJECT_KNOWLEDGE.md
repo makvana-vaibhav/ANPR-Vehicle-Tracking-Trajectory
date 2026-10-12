@@ -1,3 +1,19 @@
+> # ⚠️ SUPERSEDED — snapshot of 11 Sep 2026, aimed at SIH26127
+>
+> This was reverse-engineered from the code on 11 Sep, for the city-wide SIH26127 brief. A good
+> part of it is now false. For example, it says "12 cameras", "no analytics screen", and "fuzzy
+> search not implemented"; all three have since changed. The project is back on the Gujarat Police
+> CCTV Hackathon "Sentinel".
+>
+> **For the current state, read:**
+>
+> - [README.md](README.md)
+> - [docs/HLD.md](docs/HLD.md)
+> - [docs/REQUIREMENTS.md](docs/REQUIREMENTS.md)
+> - [docs/INFRASTRUCTURE.md](docs/INFRASTRUCTURE.md)
+>
+> Kept as a historical record.
+
 # COMPLETE PROJECT KNOWLEDGE — Contrail (SIH26127)
 
 **Single source of truth. Reverse-engineered from the code on 11 September 2026.**

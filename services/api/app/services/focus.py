@@ -72,6 +72,12 @@ async def watch(camera_code: str, now: float | None = None) -> bool:
     return True
 
 
+def client() -> aioredis.Redis:
+    """The shared Redis client. Pursuit (`app.services.pursuit`) keeps its
+    pursuit state beside the focus set it heartbeats, on this connection."""
+    return _redis()
+
+
 async def watched(now: float | None = None) -> list[str]:
     """Camera codes on someone's screen now."""
     now = time.time() if now is None else now

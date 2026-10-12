@@ -185,3 +185,38 @@ class TestRegions:
         assert parts == {
             "format": "uk_current", "area": "NA", "age": "13", "series": "NRU",
         }
+
+
+class TestDropLeadingJunk:
+    """The HSRP strip read as one extra leading letter (research §4.6)."""
+
+    def test_drops_the_strip_read_as_a_letter(self) -> None:
+        assert grammar.drop_leading_junk("HGJ01HU2061") == "GJ01HU2061"
+
+    def test_leaves_a_valid_plate_alone(self) -> None:
+        assert grammar.drop_leading_junk("GJ01HU2061") == "GJ01HU2061"
+
+    def test_leaves_an_invalid_string_when_the_rest_is_invalid_too(self) -> None:
+        # CJ is no state code: dropping K would only trade one non-plate for another.
+        assert grammar.drop_leading_junk("KCJ1Y83455") == "KCJ1Y83455"
+
+    def test_does_not_lean_on_confusion_repair(self) -> None:
+        # "GJ0IHU2061" becomes valid only after I -> 1 repair; the rule must not
+        # chain the two and manufacture a plate from a doubly-damaged read.
+        assert grammar.drop_leading_junk("HGJ0IHU2061") == "HGJ0IHU2061"
+
+    def test_never_produces_a_legacy_plate(self) -> None:
+        # Junk plus "ABC1234" would match the rare legacy form; refused.
+        assert grammar.drop_leading_junk("1ABC1234") == "1ABC1234"
+
+    def test_drops_only_one_character(self) -> None:
+        assert grammar.drop_leading_junk("XHGJ01HU2061") == "XHGJ01HU2061"
+
+    def test_respects_the_regions_in_force(self) -> None:
+        # A UK plate behind junk is repaired only where UK plates are accepted.
+        assert grammar.drop_leading_junk("1MW51VSU", ("IN", "GB")) == "MW51VSU"
+        assert grammar.drop_leading_junk("1MW51VSU", ("IN",)) == "1MW51VSU"
+
+    def test_short_and_empty_strings_pass_through(self) -> None:
+        assert grammar.drop_leading_junk("") == ""
+        assert grammar.drop_leading_junk("GJ03") == "GJ03"

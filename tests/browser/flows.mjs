@@ -111,6 +111,31 @@ await step('report', async () => {
   return 'printable report rendered'
 })
 
+// A plate the recorded clip read, so nothing below can touch a grid camera.
+const demoPlate = recent.find(
+  (d) => d.camera_code === 'CAM-DEMO-01' && d.plate && (d.plate_confidence ?? 0) > 0.85,
+)?.plate
+
+await step('investigate-candidates', async () => {
+  if (!demoPlate) throw new Error('no plate read on CAM-DEMO-01 recently')
+  await page.goto(`${BASE}/vehicles?plate=${demoPlate}`)
+  const list = page.getByRole('region', { name: 'Possibly the same vehicle' })
+  await list.waitFor({ timeout: 20000 })
+  const cards = await list.getByRole('listitem').count()
+  return `${cards} candidate card(s) for ${demoPlate}, none in the journey until included`
+})
+
+await step('pursuit-prediction', async () => {
+  // Only ever the prediction: a flow never starts a pursuit, so it never pins.
+  if (!demoPlate) throw new Error('no plate read on CAM-DEMO-01 recently')
+  await page.goto(`${BASE}/vehicles?plate=${demoPlate}&pursuit=1`)
+  const panel = page.getByRole('region', { name: 'Pursuit' })
+  await panel.getByText(/Starting would pin/).waitFor({ timeout: 20000 })
+  const running = (await api('/pursuits', token)).body.pursuits ?? []
+  if (running.some((p) => p.plate === demoPlate)) throw new Error('a prediction started a pursuit')
+  return `prediction shown for ${demoPlate}; nothing pinned`
+})
+
 await step('live-demo-camera', async () => {
   await page.goto(`${BASE}/anpr?camera=CAM-DEMO-01`)
   await page.locator('video').first().waitFor({ timeout: 20000 })
@@ -166,6 +191,21 @@ if (watchId) {
   }
   await api(`/watchlist/${watchId}`, token, { method: 'DELETE' })
 }
+
+await step('persons', async () => {
+  // The persons watchlist: enrolled entries with their four-eyes state, and a
+  // face match on the Alarms screen showing both faces. Read-only.
+  await page.goto(`${BASE}/persons`)
+  await page.getByText(/DEMO\/PERSONS\/001/).first().waitFor({ timeout: 15000 })
+  const matches = (await api('/alerts?alert_type=person_match&limit=5', token)).body.items ?? []
+  const match = matches.find((a) => a.alert_type === 'person_match')
+  if (match) {
+    await page.goto(`${BASE}/alerts?alert=${match.id}&status=all`)
+    await page.getByText(/must confirm/i).first().waitFor({ timeout: 15000 })
+    return 'persons list, and a face match with its human-confirmation notice'
+  }
+  return 'persons list (no face match recorded yet)'
+})
 
 await step('network', async () => {
   await page.goto(`${BASE}/map`)

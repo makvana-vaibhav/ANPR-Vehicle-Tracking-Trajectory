@@ -22,6 +22,8 @@ import Users from '@/pages/Users'
 import VehicleReport from '@/pages/VehicleReport'
 import VehicleSearch from '@/pages/VehicleSearch'
 import Watchlist from '@/pages/Watchlist'
+import Persons from '@/pages/Persons'
+import Registries from '@/pages/Registries'
 import RequirePermission from '@/components/RequirePermission'
 import { useAuth } from '@/hooks/useAuth'
 import { EventStreamProvider } from '@/hooks/useEventStream'
@@ -171,6 +173,22 @@ function Shell() {
                 label="The watchlist"
               >
                 <Watchlist />
+              </RequirePermission>
+            }
+          />
+          <Route
+            path="/registries"
+            element={
+              <RequirePermission anyOf={[PERMISSIONS.searchExecute]} label="Registry lookups">
+                <Registries />
+              </RequirePermission>
+            }
+          />
+          <Route
+            path="/persons"
+            element={
+              <RequirePermission anyOf={[PERMISSIONS.personRead]} label="The persons watchlist">
+                <Persons />
               </RequirePermission>
             }
           />

@@ -49,6 +49,7 @@ from botocore.config import Config
 from botocore.exceptions import BotoCoreError
 from botocore.session import get_session
 
+from app.core import public_origin
 from app.core.config import settings
 from app.core.logging import get_logger
 
@@ -86,13 +87,35 @@ def _client() -> Any:
     )
 
 
+@functools.lru_cache(maxsize=1)
+def _internal_client() -> Any:
+    """Signs for the internal endpoint, for URLs the HTTPS web tier proxies.
+
+    nginx forwards `/media/…` to MinIO presenting the internal host, so that is
+    the host these must be signed for. See `app/core/public_origin.py`.
+    """
+    return get_session().create_client(
+        "s3",
+        endpoint_url=settings.minio_url,
+        aws_access_key_id=settings.minio_root_user,
+        aws_secret_access_key=settings.minio_root_password,
+        config=_CONFIG,
+    )
+
+
 def crop_url(key: str | None) -> str | None:
-    """A short-lived URL for one crop, or None when there is no key."""
+    """A short-lived URL for one crop, or None when there is no key.
+
+    Over HTTPS the URL is on the browser's own origin (proxied by the web
+    tier), so the page loads it without mixed content; over HTTP it is the
+    public MinIO address, as it always was.
+    """
     if not key:
         return None
 
+    proxied = public_origin.current() is not None
     try:
-        url: str = _client().generate_presigned_url(
+        url: str = (_internal_client() if proxied else _client()).generate_presigned_url(
             "get_object",
             Params={"Bucket": settings.minio_bucket, "Key": key},
             ExpiresIn=URL_TTL_SECONDS,
@@ -104,4 +127,4 @@ def crop_url(key: str | None) -> str | None:
         log.warning("evidence.presign_failed", key=key, error=str(exc))
         return None
 
-    return url
+    return public_origin.object_url(url) if proxied else url

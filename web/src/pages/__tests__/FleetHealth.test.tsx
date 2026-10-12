@@ -157,6 +157,24 @@ describe('FleetHealth', () => {
     await waitFor(() => expect(api.getCameraHealth).toHaveBeenCalledWith(GRID_CAMERA.id, 24))
   })
 
+  it('downloads the gap report for the window on screen, and says what it saved', async () => {
+    const download = vi
+      .spyOn(api, 'downloadGapReport')
+      .mockResolvedValue('gap-report-20261011-0723-to-20261012-0723.csv')
+    renderAt('/health')
+    await screen.findByText('Visat teen Rasta')
+    fireEvent.click(screen.getByRole('button', { name: /Download gap report/ }))
+    await waitFor(() => expect(download).toHaveBeenCalledWith(24))
+    expect(await screen.findByText(/Saved gap-report-20261011-0723/)).toBeTruthy()
+  })
+
+  it('says why a gap report download failed, beside the button', async () => {
+    vi.spyOn(api, 'downloadGapReport').mockRejectedValue(new Error('Export failed (502)'))
+    renderAt('/health')
+    fireEvent.click(await screen.findByRole('button', { name: /Download gap report/ }))
+    expect((await screen.findByRole('alert')).textContent).toContain('Export failed (502)')
+  })
+
   it('colours only the figure that needs someone', async () => {
     renderAt('/health')
     const unknown = (await screen.findByText('State unknown')).closest('div')!

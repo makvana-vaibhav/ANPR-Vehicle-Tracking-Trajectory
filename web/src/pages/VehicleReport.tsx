@@ -16,11 +16,16 @@
  *
  * Every number on it is the route endpoint's, unchanged. Opening it is a
  * plate search, and the audit log records it as one.
+ *
+ * Candidate visits an analyst included on Investigate (`?include=`) are on it
+ * too — never as confirmed sightings: hollow and dashed on the sketch, marked
+ * "Candidate — read as …" in the table, and explained in the notes.
  */
 
 import { useEffect, useMemo, useState } from 'react'
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom'
 
+import { isCandidateLeg } from '@/components/routeTrail'
 import { useToast } from '@/components/Toast'
 import { Button, ErrorBanner, Icon, PlateChip, Spinner } from '@/components/ui'
 import { useAuth } from '@/hooks/useAuth'
@@ -36,6 +41,7 @@ const FLAG_WORDS: Record<string, string> = {
   heading_conflict: "against the camera's direction",
   co_located: 'cameras at the same spot',
   revisit: 'back at a camera already passed',
+  same_visit: 'the same pass, read two ways',
 }
 
 function istStamp(iso: string): string {
@@ -99,6 +105,7 @@ function RouteSketch({ hops }: { hops: RouteHop[] }) {
       {points.slice(1).map((p, i) => {
         const from = points[i]!
         const believed = hops[i + 1]!.plausible
+        const candidate = isCandidateLeg(hops, i + 1)
         return (
           <line
             key={`leg-${i}`}
@@ -108,7 +115,7 @@ function RouteSketch({ hops }: { hops: RouteHop[] }) {
             y2={p.y}
             stroke={believed ? '#0369a1' : '#dc2626'}
             strokeWidth={2}
-            strokeDasharray={believed ? undefined : '6 4'}
+            strokeDasharray={!believed ? '6 4' : candidate ? '2 3' : undefined}
           />
         )
       })}
@@ -118,9 +125,10 @@ function RouteSketch({ hops }: { hops: RouteHop[] }) {
             cx={p.x}
             cy={p.y}
             r={10}
-            fill={hops[i]!.plausible ? '#0369a1' : '#dc2626'}
-            stroke="#ffffff"
+            fill={hops[i]!.candidate ? '#ffffff' : hops[i]!.plausible ? '#0369a1' : '#dc2626'}
+            stroke={hops[i]!.candidate ? '#0369a1' : '#ffffff'}
             strokeWidth={2}
+            strokeDasharray={hops[i]!.candidate ? '3 2' : undefined}
           />
           <text
             x={p.x}
@@ -129,7 +137,7 @@ function RouteSketch({ hops }: { hops: RouteHop[] }) {
             fontSize={10}
             fontWeight={600}
             fontFamily="'IBM Plex Mono', ui-monospace, monospace"
-            fill="#ffffff"
+            fill={hops[i]!.candidate ? '#0369a1' : '#ffffff'}
           >
             {i + 1}
           </text>
@@ -141,6 +149,7 @@ function RouteSketch({ hops }: { hops: RouteHop[] }) {
             fill="#18181b"
           >
             {hops[i]!.camera_code}
+            {hops[i]!.candidate ? ' (candidate)' : ''}
           </text>
         </g>
       ))}
@@ -156,6 +165,11 @@ export default function VehicleReport() {
   const { user } = useAuth()
   const since = params.get('since') ?? undefined
   const until = params.get('until') ?? undefined
+  // Candidates included on Investigate: the same list, so the paper shows the
+  // journey the screen did.
+  const includeKey = params.get('include') ?? ''
+  const include = useMemo(() => includeKey.split(',').filter(Boolean), [includeKey])
+  const [candidateCrops, setCandidateCrops] = useState<Record<string, string | null>>({})
 
   const [route, setRoute] = useState<VehicleRoute | null>(null)
   const [crops, setCrops] = useState<Record<string, string | null>>({})
@@ -169,7 +183,7 @@ export default function VehicleReport() {
       try {
         const window = { since, until }
         const [document, cameras] = await Promise.all([
-          api.getVehicleRoute(plate, window),
+          api.getVehicleRoute(plate, include.length > 0 ? { ...window, include } : window),
           api.getCameras({ limit: '500' }),
         ])
         if (cancelled) return
@@ -187,7 +201,33 @@ export default function VehicleReport() {
     return () => {
       cancelled = true
     }
-  }, [plate, since, until])
+  }, [plate, since, until, include])
+
+  // A candidate's crop is a read of another plate, so it comes with the
+  // candidate list rather than with this plate's reads.
+  useEffect(() => {
+    if (!route?.candidate_hop_count) {
+      setCandidateCrops({})
+      return
+    }
+    let cancelled = false
+    api
+      .getCandidates(plate, { since: route.window.from ?? since, until, limit: 100 })
+      .then((report) => {
+        if (cancelled) return
+        const out: Record<string, string | null> = {}
+        for (const c of report.candidates) {
+          for (const id of [c.detection_id, ...c.detection_ids]) out[id] = c.crop_url
+        }
+        setCandidateCrops(out)
+      })
+      .catch(() => {
+        if (!cancelled) setCandidateCrops({})
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [route, plate, since, until])
 
   // The crop for each visit, from its clearest read. Asked for once the route
   // is known, and only for reads as confident as the weakest visit's best —
@@ -245,7 +285,9 @@ export default function VehicleReport() {
 
   async function downloadCsv() {
     try {
-      toast.success(`Downloaded ${await api.downloadRouteReport(plate, { since, until })}`)
+      toast.success(
+        `Downloaded ${await api.downloadRouteReport(plate, include.length > 0 ? { since, until, include } : { since, until })}`,
+      )
     } catch (err) {
       toast.error(err)
     }
@@ -369,6 +411,12 @@ export default function VehicleReport() {
                     label="Seen where position unknown"
                     value={String(route.unplaced_sightings.length)}
                   />
+                  {(route.candidate_hop_count ?? 0) > 0 && (
+                    <Fact
+                      label="Candidate visits included"
+                      value={`${route.candidate_hop_count} — not confirmed`}
+                    />
+                  )}
                 </dl>
               </>
             )}
@@ -405,12 +453,14 @@ export default function VehicleReport() {
                 </thead>
                 <tbody>
                   {route.hops.map((hop, i) => {
-                    const crop = hop.best_detection_id ? crops[hop.best_detection_id] : null
+                    const crop = hop.best_detection_id
+                      ? (crops[hop.best_detection_id] ?? candidateCrops[hop.best_detection_id])
+                      : null
                     return (
                       <tr
                         key={`${hop.camera_id}-${hop.arrived_at}`}
                         className={`border-b border-zinc-200 align-top print:break-inside-avoid ${
-                          hop.plausible ? '' : 'bg-red-50'
+                          !hop.plausible ? 'bg-red-50' : hop.candidate ? 'bg-sky-50' : ''
                         }`}
                       >
                         <td className="py-1.5 pr-2 font-mono font-semibold">{i + 1}</td>
@@ -424,6 +474,13 @@ export default function VehicleReport() {
                         </td>
                         <td className="py-1.5 pr-2">
                           <span className="font-mono font-semibold">{hop.camera_code}</span>
+                          {hop.candidate && (
+                            <span className="block font-semibold text-sky-800">
+                              Candidate — read as{' '}
+                              <span className="font-mono">{hop.read_as}</span>, included by an
+                              analyst; not a confirmed read
+                            </span>
+                          )}
                           <span className="block">{hop.camera_name}</span>
                           <span className="block text-zinc-600">
                             {[hop.city, hop.district].filter(Boolean).join(', ')}
@@ -487,6 +544,11 @@ export default function VehicleReport() {
                       <td className="whitespace-nowrap py-1.5 pr-2 font-mono">{api.formatIST(s.seen_at)}</td>
                       <td className="py-1.5 pr-2">
                         <span className="font-mono font-semibold">{s.camera_code}</span>
+                        {s.read_as && (
+                          <span className="block font-semibold text-sky-800">
+                            Candidate — read as <span className="font-mono">{s.read_as}</span>
+                          </span>
+                        )}
                         <span className="block">{s.camera_name}</span>
                         {departments[s.camera_id] && (
                           <span className="block text-zinc-600">{departments[s.camera_id]}</span>
@@ -494,9 +556,9 @@ export default function VehicleReport() {
                       </td>
                       <td className="py-1.5 pr-2 font-mono">{s.plate_confidence.toFixed(2)}</td>
                       <td className="py-1.5">
-                        {crops[s.detection_id] ? (
+                        {(crops[s.detection_id] ?? candidateCrops[s.detection_id]) ? (
                           <img
-                            src={crops[s.detection_id]!}
+                            src={(crops[s.detection_id] ?? candidateCrops[s.detection_id])!}
                             alt={`Plate read at ${s.camera_code}`}
                             className="h-10 max-w-[140px] rounded border border-zinc-300 object-contain"
                           />
@@ -525,6 +587,14 @@ export default function VehicleReport() {
                 Reads at cameras whose position is not known are listed separately. They are real
                 reads, but no distance or speed can be measured to them, so they are not on the
                 route.
+              </p>
+            )}
+            {(route.candidate_hop_count ?? 0) > 0 && (
+              <p>
+                Visits marked <strong>Candidate</strong> are reads of a different plate — the one
+                shown as &ldquo;read as&rdquo; — that an analyst judged may be this vehicle misread,
+                and included. They are not confirmed sightings: they are drawn hollow and dashed on
+                the sketch, and every figure in the summary includes them.
               </p>
             )}
             <p>

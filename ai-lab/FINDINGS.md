@@ -177,6 +177,10 @@ better than voting down the reply.
 
 ## 6. Preprocessing: perspective correction is not earning its place
 
+> **Reversed on real plates, 12 Oct 2026 — see §9.** The variants below were
+> chosen on synthetic plates. On real grid plates the padding + CLAHE they all
+> share cost accuracy, and the live config now reads the raw crop.
+
 Across 95 reads:
 
 | variant | times it won | mean confidence |
@@ -200,9 +204,11 @@ that comparison.
 
 ## 7. What is not yet known
 
-* **Real-world accuracy.** Unmeasured. Everything above is generated footage.
-* **Real Indian plates.** Never tested — no embossing, no two-row motorcycle
-  plates, no dirt, damage or regional fonts have been through this.
+* **Real-world accuracy.** Still not claimable as *system* accuracy. Single-crop
+  accuracy on real grid plates is now measured (§9), on a set biased toward
+  plates the pipeline could partly read and labelled by AI labellers.
+* **Real Indian plates.** First measured 12 Oct (§9): 160 night-time grid crops.
+  Two-row plates (3 labelled) and motorcycles are still effectively untested.
 * **The plate detector's licence.** The current weights are an Ultralytics
   AGPL-3.0 export. Fine for evaluation; must be replaced before production.
 * **GPU throughput.** Cannot be measured on this machine and is not estimated.
@@ -227,3 +233,70 @@ that comparison.
 4. **Replace the plate detector weights** with a permissively licensed or
    self-trained model.
 5. **Then** consider integration into the platform.
+
+---
+
+## 9. Real grid plates, 12 Oct 2026: the conditioning was the largest fault
+
+The first accuracy measurement on real Indian plates. It acts on the research
+in `docs/research/ANPR_ACCURACY_LATENCY.md`, whose labelled crops were lost
+when `/tmp` was wiped; the set was rebuilt and re-labelled from scratch.
+
+**The set.** `scripts/fetch_eval_crops.py` drew 160 crops the workers had saved
+to object storage (11 Oct, 20:30–02:30 IST, night), one per vehicle, at random
+(seed 7): 65 SBX-cam22, 55 cam21, 37 cam10, one each cam07/15/19. Plus 50 from
+CAM-DEMO-01 (UK plates). Kept under `datasets/` (gitignored — they are
+photographs of real vehicles).
+
+**The labels.** Two independent AI labellers, working blind from contact sheets
+(`scripts/label_sheets.py`; neither saw the pipeline's reading or the other's
+labels), each wrote text plus C (sure) / U (best guess) / P / X / N. Adjudicated
+mechanically by `scripts/ocr_bench.py`: **gold** = same text, both sure (54);
+**agreed** = same text, at least one unsure (44); 17 disputed and excluded; 31
+both-unreadable. The two read the same text on 85% of crops both could read.
+The O/0 glyph, which the HSRP font draws identically, is resolved by the plate
+slot before comparison, and nothing else is.
+
+> **Caveats, stated where the numbers are.** AI labellers, not humans. Crops
+> exist only where the pipeline of the day produced *some* reading, so this is
+> "legible-ish grid plates", not "plates that passed". 37 of 54 gold crops are
+> one camera (cam22). It ranks configurations; it does not certify ">90%".
+
+**Result, one read per crop, worker image, one ONNX thread** (exact match after
+the pipeline's own grammar repair):
+
+| Configuration | Gold (n=54) | Gold+agreed (n=98) | Committed reads right | Valid plate on unreadable crops | OCR CPU / crop |
+|---|---|---|---|---|---|
+| As shipped: pad+CLAHE variants, fallback 736 px + angle classifier | 42 (77.8%, CI 65–87%) | 50 | 42/46 (91%) | 3/31 | 64 ms |
+| Fallback capped only | 41 | 50 | 41/46 | 3/31 | 46 ms |
+| Raw crop only | 47 | 60 (p=0.053) | 47/50 | 2/31 | 28 ms |
+| **Raw crop + capped fallback + junk rule (deployed)** | **47 (87.0%, CI 76–94%)** | **61 (p=0.035)** | **47/51 (92%)** | **2/31** | **25 ms** |
+
+p is the exact McNemar test against "as shipped" (+17/−6 discordant crops for
+the deployed configuration). On gold alone the gain is +9/−4 (p=0.27): the gold
+set, which both labellers found easy, is where conditioning matters least.
+
+* **The raw crop wins**, as the research found (it measured 61.7% → 83.3% on its
+  own 60 labels, p=0.001). PP-OCR resizes to 48 px high itself; padding and
+  CLAHE only add artefacts it was not trained on.
+* **The leading-junk rule** (`grammar.drop_leading_junk`) changed no crop in
+  this set and made nothing worse; it is kept for the HSRP-strip case the
+  research saw (+1/60) and is covered by unit tests.
+* **The capped fallback** fired on only 2 of 160 grid crops: few stored crops
+  are tall enough to qualify. Its value is CPU (below), not accuracy here.
+* **UK demo camera** (gold n=21): 18 → 17, agreed 7 → 8 of 15 — no change
+  beyond noise.
+
+**Whole pipeline, the demo clip** (`scripts/profile_clip.py`, 38 analysed
+frames, worker image, twice each, identical results):
+
+| | Valid plates | In the labelled set | Wrong | CPU per analysed frame |
+|---|---|---|---|---|
+| As shipped | 12 | 8 | 3 (AV08HVE, MY51YSU, VR02FKD) | 0.346–0.358 core-s |
+| Deployed | 11 | 10 | 0 | 0.296–0.297 core-s |
+
+(one more in each is the car the labellers could not agree on).
+
+**What this does not show.** Vehicle-level gains on the grid, which only the
+live bus can show (`scripts/bus_window.py`); and anything about two-row plates
+(3 labelled) or motorcycles.

@@ -13,6 +13,12 @@ to each event, in this order and for this reason:
    redelivers the event, which is the right failure: a duplicate detection is
    recoverable, a lost one is not.
 
+`person.match` events (the persons watchlist, `ailab/face`) take a separate,
+smaller path: each is checked against the platform's own policy and the entry
+as it stands now, and becomes a `person_match` alert in its own transaction —
+see `app/services/persons.py`. Nothing about a face is persisted except as
+part of that alert.
+
 Live fan-out to operators is **not** done here — see `event_tailer.py` for why
 that is a different job with the opposite delivery requirement.
 
@@ -28,8 +34,9 @@ import json
 import time
 import uuid
 from collections import deque
+from collections.abc import Awaitable
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, cast
 
 import redis.asyncio as aioredis
 from redis.exceptions import RedisError, ResponseError
@@ -40,7 +47,7 @@ from app.core.logging import get_logger
 from app.db.session import SessionLocal
 from app.models.intelligence import Detection
 from app.models.registry import Camera
-from app.services import alert_fanout, alerts, watchlist
+from app.services import alert_fanout, alerts, persons, watchlist
 from app.services.event_bus import parse_event
 
 log = get_logger("event_consumer")
@@ -88,7 +95,10 @@ UNKNOWN_CAMERA_TTL_S = 60.0
 class EventConsumer:
     """Reads the detection stream and lands events in the platform."""
 
-    def __init__(self) -> None:
+    def __init__(self, deduper: alerts.SharedAlertDeduper | None = None) -> None:
+        #: The alert dedup window. Shared through Redis by every replica, so
+        #: two consumers handed sightings of one car raise one alarm.
+        self._deduper = deduper or alerts.deduper
         self._client: aioredis.Redis | None = None
         self._task: asyncio.Task[None] | None = None
         self._stop = asyncio.Event()
@@ -104,6 +114,11 @@ class EventConsumer:
         self.boxes = 0
         self.persisted = 0
         self.alerts_raised = 0
+        #: `person.match` events received, and how many became alerts. The
+        #: difference is policy refusals, expired entries and deduplication —
+        #: each logged with its reason by `persons.raise_for_match`.
+        self.person_matches = 0
+        self.person_alerts = 0
         self.failed = 0
         self.batches = 0
         self._stats_published_at = 0.0
@@ -196,10 +211,18 @@ class EventConsumer:
             return
         self._stats_published_at = now
         try:
-            await client.hset(
-                WORKER_STATS_KEY,
-                consumer_name,
-                json.dumps({"worker": consumer_name, "reported_at": time.time(), **self.stats()}),
+            # redis-py types HSET for its sync and async clients at once
+            # (`Awaitable[int] | int`); on the asyncio client it is always the
+            # awaitable.
+            await cast(
+                Awaitable[int],
+                client.hset(
+                    WORKER_STATS_KEY,
+                    consumer_name,
+                    json.dumps(
+                        {"worker": consumer_name, "reported_at": time.time(), **self.stats()}
+                    ),
+                ),
             )
             # The hash as a whole expires, so a platform shut down overnight
             # does not come back reporting yesterday's ingest fleet.
@@ -245,6 +268,7 @@ class EventConsumer:
         """
         entry_ids: list[str] = []
         settled: list[dict[str, Any]] = []
+        person_matches: list[dict[str, Any]] = []
 
         for entry_id, raw in entries:
             entry_ids.append(entry_id)
@@ -267,6 +291,11 @@ class EventConsumer:
                 # a vehicle appears in dozens of consecutive batches and each
                 # one is the same car.
                 self.boxes += 1
+            elif kind == "person.match":
+                person_matches.append(event)
+
+        if person_matches:
+            await self._raise_person_matches(person_matches)
 
         if settled:
             try:
@@ -423,7 +452,9 @@ class EventConsumer:
         camera_ids = await self._resolve_cameras(codes)
 
         pending: list[tuple[Detection, str]] = []
-        async with SessionLocal() as session:
+        # A dedup claim made for an alert this transaction then fails to store
+        # is released, so the one-at-a-time retry can still raise it.
+        async with self._deduper.unit(), SessionLocal() as session:
             for event in events:
                 code = str(event.get("source", {}).get("camera_id", ""))
                 detection = self._build_detection(event, camera_ids.get(code))
@@ -452,6 +483,7 @@ class EventConsumer:
                     detection_id=detection.id,
                     detection_ts=detection.ts,
                     confidence=detection.plate_confidence,
+                    dedup=self._deduper,
                 )
                 if alert is not None:
                     raised.append(alerts.alert_payload(alert, match))
@@ -469,6 +501,43 @@ class EventConsumer:
         for payload in raised:
             self.alerts_raised += 1
             await alert_fanout.publish(payload)
+
+    async def _raise_person_matches(self, events: list[dict[str, Any]]) -> None:
+        """Turn `person.match` events into `person_match` alerts, one at a time.
+
+        One transaction each, not one per batch: they are rare, and a second
+        match on the same entry at the same camera in the same batch must see
+        the first one committed so it folds into it rather than raising twice.
+        A malformed or refused event is logged with its reason and acked —
+        retrying a match the platform has decided against changes nothing.
+        """
+        codes = {str(e.get("source", {}).get("camera_id", "")) for e in events}
+        camera_ids = await self._resolve_cameras(codes)
+        for raw in events:
+            self.person_matches += 1
+            event = persons.parse_event(raw)
+            if event is None:
+                continue
+            try:
+                async with self._deduper.unit(), SessionLocal() as session:
+                    raised = await persons.raise_for_match(
+                        session, event, camera_ids.get(event.camera_code), dedup=self._deduper
+                    )
+                    await session.commit()
+            except Exception:
+                # Supervisor boundary: one match failing to land must not stop
+                # the vehicle events in the same batch from being persisted.
+                self.failed += 1
+                log.exception("event_consumer.person_match_failed", camera=event.camera_code)
+                continue
+            if raised is None:
+                continue
+            alert, entry = raised
+            self.person_alerts += 1
+            self.alerts_raised += 1
+            # After the commit, like every other alert: an operator never sees
+            # an alarm a rolled-back transaction says does not exist.
+            await alert_fanout.publish(persons.alert_payload(alert, entry))
 
     def _record_latency(self, pending: list[tuple[Detection, str]]) -> None:
         """Capture-to-persisted latency for each row just committed.
@@ -504,6 +573,8 @@ class EventConsumer:
             "boxes": self.boxes,
             "persisted": self.persisted,
             "alerts_raised": self.alerts_raised,
+            "person_matches": self.person_matches,
+            "person_alerts": self.person_alerts,
             "failed": self.failed,
             "batches": self.batches,
             "mean_batch": round(self.consumed / self.batches, 1) if self.batches else 0.0,

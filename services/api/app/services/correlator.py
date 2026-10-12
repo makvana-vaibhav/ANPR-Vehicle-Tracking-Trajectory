@@ -37,6 +37,7 @@ shows up precisely as an impossible hop.
 from __future__ import annotations
 
 import uuid
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from itertools import pairwise
@@ -133,6 +134,10 @@ class Sighting:
     lon: float
     heading_deg: float | None
     plate_confidence: float
+    #: Set only on a *candidate* sighting: a read of a different plate that an
+    #: analyst chose to include in this vehicle's journey (`app.services.
+    #: candidates`). None on every read of the plate itself.
+    read_as: str | None = None
 
 
 @dataclass(slots=True)
@@ -162,6 +167,13 @@ class Hop:
     #: The sighting read with the most confidence on this visit: the evidence
     #: a report shows for it.
     best_detection_id: uuid.UUID | None = None
+    #: A visit an analyst *included* although the plate read there was a
+    #: different one (`read_as`) — never a confirmed sighting, and never merged
+    #: into one. Every screen and report that shows the route says so.
+    candidate: bool = False
+    read_as: str | None = None
+    #: The characters that differ, in words, for a candidate visit.
+    candidate_note: str | None = None
 
     @property
     def dwell_s(self) -> float:
@@ -197,6 +209,9 @@ class Hop:
             "flags": list(self.flags),
             "plausible": self.plausible,
             "best_detection_id": (str(self.best_detection_id) if self.best_detection_id else None),
+            "candidate": self.candidate,
+            "read_as": self.read_as,
+            "candidate_note": self.candidate_note,
         }
 
 
@@ -211,6 +226,8 @@ def unplaced_to_dict(sighting: Sighting) -> dict[str, Any]:
         "district": sighting.district,
         "seen_at": sighting.ts.isoformat(),
         "plate_confidence": round(sighting.plate_confidence, 4),
+        "candidate": sighting.read_as is not None,
+        "read_as": sighting.read_as,
     }
 
 
@@ -227,6 +244,16 @@ class Route:
     #: a sighting that cannot be placed must be visibly unplaced, not dropped —
     #: but they take no part in any distance, speed or flag.
     unplaced: list[Sighting] = field(default_factory=list)
+    #: Candidate sightings an analyst asked to include that are not in this
+    #: window (or no longer near enough to the plate). Reported, so a link that
+    #: carries a decision never silently loses it.
+    candidates_missing: list[str] = field(default_factory=list)
+
+    @property
+    def candidate_hop_count(self) -> int:
+        return sum(1 for hop in self.hops if hop.candidate) + sum(
+            1 for sighting in self.unplaced if sighting.read_as is not None
+        )
 
     @property
     def camera_count(self) -> int:
@@ -396,6 +423,15 @@ class Route:
                 "Sightings at cameras whose position is not known are listed under "
                 "unplaced_sightings and are not part of the route: no distance or "
                 "speed can be measured to them."
+            ),
+            "candidate_hop_count": self.candidate_hop_count,
+            "candidates_missing": list(self.candidates_missing),
+            "candidate_note": (
+                "Visits marked candidate are reads of a different plate that an analyst "
+                "included as possibly this vehicle. They are not confirmed sightings, and "
+                "every figure above includes them."
+                if self.candidate_hop_count
+                else None
             ),
         }
 
@@ -578,6 +614,58 @@ async def sightings_for(
     return placed
 
 
+def _mark_same_visits(hops: list[Hop]) -> None:
+    """Name a candidate read inside a confirmed visit for what it is.
+
+    A candidate included at the camera the vehicle was already at, within the
+    dwell window, is the same pass read two ways (or the vehicle behind it) —
+    not the vehicle *returning*, which is what `revisit` says. Only candidate
+    legs are renamed; a confirmed revisit stays a revisit.
+    """
+    for previous, hop in pairwise(hops):
+        if not (hop.candidate or previous.candidate) or "revisit" not in hop.flags:
+            continue
+        if hop.elapsed_s is not None and hop.elapsed_s <= DWELL_WINDOW.total_seconds():
+            hop.flags[hop.flags.index("revisit")] = "same_visit"
+
+
+def assemble_route(
+    plate: str,
+    sightings: list[Sighting],
+    unplaced: list[Sighting],
+    since: datetime | None,
+    until: datetime | None,
+    *,
+    extra_hops: Sequence[Hop] = (),
+    extra_unplaced: Sequence[Sighting] = (),
+    extra_headings: Mapping[uuid.UUID, float | None] | None = None,
+) -> Route:
+    """A route from sightings already read — and from candidate visits, if any.
+
+    `extra_hops` are candidate visits an analyst included. They are placed in
+    time order among the confirmed ones but never clustered into them, even at
+    the same camera: a read of a different plate must stay visibly separate
+    from the reads of this one. Their legs are scored by exactly the rules
+    every other leg is.
+    """
+    hops = cluster_into_hops(sightings)
+    if extra_hops:
+        # Stable: at equal times the confirmed visit comes first.
+        hops = sorted([*hops, *extra_hops], key=lambda hop: hop.arrived_at)
+    headings: dict[uuid.UUID, float | None] = {s.camera_id: s.heading_deg for s in sightings}
+    for camera_id, heading in (extra_headings or {}).items():
+        headings.setdefault(camera_id, heading)
+    score_legs(hops, headings)
+    _mark_same_visits(hops)
+    return Route(
+        plate=plate,
+        hops=hops,
+        window_from=since,
+        window_to=until,
+        unplaced=sorted([*unplaced, *extra_unplaced], key=lambda s: s.ts),
+    )
+
+
 async def build_route(
     session: AsyncSession,
     plate: str,
@@ -586,10 +674,7 @@ async def build_route(
 ) -> Route:
     """Reconstruct one plate's journey."""
     sightings, unplaced = await all_sightings_for(session, plate, since, until)
-    hops = cluster_into_hops(sightings)
-    headings = {s.camera_id: s.heading_deg for s in sightings}
-    score_legs(hops, headings)
-    return Route(plate=plate, hops=hops, window_from=since, window_to=until, unplaced=unplaced)
+    return assemble_route(plate, sightings, unplaced, since, until)
 
 
 # ─────────────────────────────────────────────────────────────────────

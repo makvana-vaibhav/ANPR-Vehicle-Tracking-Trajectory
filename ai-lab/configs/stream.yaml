@@ -47,6 +47,21 @@ plate:
     max_interval: 16
     min_vehicle_width: 100
 
+preprocess:
+  # The recogniser reads the crop exactly as the plate detector cut it. The
+  # `rectified`/`upscaled` variants (padding + CLAHE + upscale) were chosen on
+  # synthetic plates; on real ones they cost accuracy and doubled OCR calls.
+  # Measured 12 Oct in the worker image, one read per crop, two blind
+  # labellers (ai-lab/scripts/ocr_bench.py, ai-lab/PERFORMANCE.md §12):
+  #   grid, both labellers sure (n=54)   42 -> 47 exact
+  #   grid, labellers agree (n=98)       50 -> 61 exact, McNemar p=0.035
+  #   demo clip, whole pipeline          8 -> 10 plates right, 3 -> 0 wrong
+  #   OCR CPU per crop                   64 -> 25 ms
+  # CLAHE is the culprit (docs/research/ANPR_ACCURACY_LATENCY.md §3.2). Do not
+  # put enhancement back in front of the recogniser without re-running that
+  # benchmark.
+  variants: [raw]
+
 ocr:
   max_reads_per_track: 20
   stop_when_confident: true

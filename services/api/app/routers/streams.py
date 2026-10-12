@@ -24,6 +24,7 @@ from pydantic import BaseModel, Field
 
 from app.adapters import adapter_for
 from app.api.deps import CurrentUser, DbSession
+from app.core import public_origin
 from app.core.config import settings
 from app.core.logging import get_logger
 from app.core.rbac import Permission, require_permission
@@ -139,8 +140,10 @@ async def open_stream(
         status=camera.status,
         token=token,
         expires_in=settings.stream_token_expire_seconds,
-        whep_url=endpoints.whep,
-        hls_url=hls_url,
+        # On the browser's own origin when it came in over HTTPS, so the player
+        # is not blocked as mixed content; unchanged over HTTP.
+        whep_url=public_origin.gateway_url(endpoints.whep),
+        hls_url=public_origin.gateway_url(hls_url),
         rtsp_url=rtsp_url,
     )
 

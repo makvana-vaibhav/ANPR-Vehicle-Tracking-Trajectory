@@ -1,0 +1,22 @@
+# The Docker workers with an int8 plate detector. OPT-IN, NOT DEPLOYED.
+#
+# Same weights statically quantised (scripts/derive_models.py; SHA-256 pinned
+# in scripts/fetch_models.sh, derived with `make models-derived INT8=1`).
+# Measured in the worker image, 12 Oct (ai-lab/PERFORMANCE.md §12):
+#
+#   plate search CPU per vehicle    24.2 -> 8.6 ms   (-64%)
+#   fp32 plates >= 40 px it finds   33 of 35 on held-out vehicle crops,
+#                                   67 of 73 over every crop tried, at the
+#                                   same 0.25 threshold; the ones it loses
+#                                   are borderline (fp32 0.27-0.31)
+#
+# That is a recall loss on the step that already limits plate yield on the
+# grid, where the CPU it saves is small (about one plate search per frame).
+# It earns its place only on a busy, CPU-starved Docker host. Natively on macOS
+# int8 is slower than fp32 — use `stream_native` there.
+extends: stream.yaml
+name: stream_int8
+description: Live worker, Docker only, int8 plate detector (trades some plate recall for CPU).
+
+plate:
+  weights: models/plate_yolo11n_static320_int8.onnx

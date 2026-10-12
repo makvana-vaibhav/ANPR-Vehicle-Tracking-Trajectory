@@ -184,6 +184,67 @@ else
     fi
 fi
 
+# ── The persons-watchlist demonstration clip ─────────────────────────────────
+# The grid's junction cameras are too far from anyone for a face to resolve,
+# so the persons watchlist is demonstrated on recorded footage that the
+# simulator replays as CAM-DEMO-02. Three people walk toward a fixed camera
+# along a pavement. One of them is enrolled as a `demo` entry under a case
+# reference marked fictional; the other two are the point of the clip as much
+# as the match is — a face that matches nothing is matched to nothing, and
+# nothing about it is stored.
+#
+# "Officemates Walking on the Street" by olia danilevich, Pexels, 8 Sep 2020,
+# under the Pexels License (https://www.pexels.com/license/): free to use and
+# to modify, attribution not required (given anyway). Its one condition that
+# bears on this use: identifiable people may not be shown in a bad light. That
+# is why the enrolment is category `demo` with a fictional case, and never
+# `wanted` or `missing` — a stranger in stock footage is not labelled as either.
+#
+# The source is pinned by checksum, like the models: a different file under
+# the same URL would quietly change which face the demo enrolment matches.
+PERSONS_URL="https://videos.pexels.com/video-files/5311355/5311355-hd_1920_1080_25fps.mp4"
+PERSONS_SHA256="fb647301b3eda819c83ae185da044819dcb5c80ad65febc126055765aae45a45"
+persons_demo="${VIDEO_DIR}/persons_demo.mp4"
+
+sha256_of() {
+    if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | awk '{print $1}'
+    else shasum -a 256 "$1" | awk '{print $1}'; fi
+}
+
+if [ -f "${persons_demo}" ] && [ -z "${FORCE:-}" ]; then
+    printf '  \033[2m%-20s already present\033[0m\n' "persons_demo"
+    skipped=$((skipped + 1))
+else
+    printf '  %-20s downloading… ' "persons_demo"
+    raw="${VIDEO_DIR}/.persons_demo.src"
+    if curl -sL --max-time 300 --retry 2 -A "${UA}" -o "${raw}" "${PERSONS_URL}" \
+        && [ "$(sha256_of "${raw}")" = "${PERSONS_SHA256}" ]; then
+        # Kept at 1080p like the ANPR clip, and for the same reason: a face's
+        # pixel size decides whether it can be matched at all. 15 fps is what a
+        # municipal camera delivers; the audio track is dropped.
+        printf 'transcoding… '
+        if have_ffmpeg; then
+            ffmpeg -hide_banner -loglevel error -y -i "${raw}" \
+                -vf "scale=1920:1080" -r 15 -c:v libx264 -preset veryfast -crf 24 \
+                -pix_fmt yuv420p -an "${persons_demo}" 2>/dev/null || true
+        else
+            docker compose exec -T api ffmpeg -hide_banner -loglevel error -y \
+                -i "/data/videos/.persons_demo.src" \
+                -vf "scale=1920:1080" -r 15 -c:v libx264 -preset veryfast -crf 24 \
+                -pix_fmt yuv420p -an "/data/videos/persons_demo.mp4" 2>/dev/null || true
+        fi
+        if [ -s "${persons_demo}" ]; then
+            printf '\033[32m✓\033[0m %s MB\n' "$(( $(wc -c < "${persons_demo}") / 1000000 ))"
+            fetched=$((fetched + 1))
+        else
+            printf '\033[33mtranscode failed\033[0m\n'
+        fi
+    else
+        printf '\033[33mfailed or checksum mismatch — persons demo unavailable\033[0m\n'
+    fi
+    rm -f "${raw}"
+fi
+
 # Attribution is a licence obligation for CC BY-SA material, not a nicety.
 {
     printf '# Sample footage — sources and licences\n\n'
@@ -195,10 +256,12 @@ fi
         printf '| `%s.mp4` | %s | %s |\n' "${name}" "${licence}" "${attribution}"
     done
     printf '| `anpr_sample.mp4` | see source | Sample published with the reference ANPR project |\n'
-    printf '| `anpr_demo.mp4` | see source | 15 s 1080p cut of `anpr_sample.mp4`, pinned to CAM-00001 |\n'
+    printf '| `anpr_demo.mp4` | see source | 15 s 1080p cut of `anpr_sample.mp4`, pinned to CAM-DEMO-01 |\n'
+    printf '| `persons_demo.mp4` | [Pexels License](https://www.pexels.com/license/) | "Officemates Walking on the Street" by olia danilevich, Pexels, 8 Sep 2020 — https://www.pexels.com/video/officemates-walking-on-the-street-5311355/ (source file SHA-256 %s). 12 s, 1080p/15 fps, audio removed. Pinned to CAM-DEMO-02 for the persons watchlist; the one enrolled face is a `demo` entry with a fictional case reference |\n' "${PERSONS_SHA256}"
     printf '\nAll clips are re-encoded to %sx%s H.264 at %s fps for replay, except\n' \
         "${TARGET_WIDTH}" "${TARGET_HEIGHT}" "${TARGET_FPS}"
-    printf 'the ANPR clip, kept at 1080p because plate legibility is its whole point.\n'
+    printf 'the ANPR and persons clips, kept at 1080p because plate and face legibility\n'
+    printf 'is their whole point.\n'
     printf '\nNote on plates: the four Wikimedia clips were shot too far from the\n'
     printf 'traffic for any plate to be legible — they exercise detection, tracking\n'
     printf 'and camera health, not OCR. `anpr_demo.mp4` is the clip where plates are\n'
