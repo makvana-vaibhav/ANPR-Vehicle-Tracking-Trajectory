@@ -48,6 +48,9 @@ const DEMO_ACCOUNTS: { username: string; role: Role; can: string }[] = [
   { username: 'auditor', role: 'auditor', can: 'Read the audit trail — no plate search' },
 ]
 
+/** The shared password of the seeded demo accounts (jury round only). */
+const DEMO_PASSWORD = 'admin@123'
+
 /** What the product does, in the words the rest of the interface uses. Every
  *  line names something that exists behind this screen today. */
 const CAPABILITIES: { icon: IconName; label: string }[] = [
@@ -60,10 +63,10 @@ const CAPABILITIES: { icon: IconName; label: string }[] = [
 export default function Login() {
   const { signIn } = useAuth()
   const [username, setUsername] = useState('admin')
-  // Never prefilled. The demo accounts each have their own password, generated
-  // per install into .env and issued by the administrator (scripts/seed.py);
-  // they used to share one printed on this screen and committed to the repo.
-  const [password, setPassword] = useState('')
+  // Prefilled for the jury round: every demo account shares DEMO_PASSWORD
+  // (set in .env, applied by `make demo-passwords`). Remove before any real
+  // deployment — docs/SECURITY.md on account provisioning.
+  const [password, setPassword] = useState(DEMO_PASSWORD)
   const [error, setError] = useState<{ message: string; status: number | null } | null>(null)
   const [busy, setBusy] = useState(false)
   const [showAccounts, setShowAccounts] = useState(false)
@@ -270,7 +273,7 @@ export default function Login() {
                           type="button"
                           onClick={() => {
                             setUsername(account.username)
-                            setPassword('')
+                            setPassword(DEMO_PASSWORD)
                             setError(null)
                           }}
                           aria-pressed={chosen}
@@ -295,7 +298,8 @@ export default function Login() {
                     )
                   })}
                   <li className="px-3.5 py-2 text-[11px] text-muted-foreground">
-                    Each account has its own password, issued by the administrator.
+                    Demo password for every account:{' '}
+                    <span className="font-mono text-foreground">{DEMO_PASSWORD}</span>
                   </li>
                 </ul>
               )}

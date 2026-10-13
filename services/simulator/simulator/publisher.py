@@ -695,7 +695,13 @@ class StreamPublisher:
         This is what the Phase 3 verification uses to take a camera down on
         purpose and confirm the health monitor notices.
         """
-        stream = self._streams.pop(camera_code, None)
+        # Case-insensitive: the control API upper-cases what it is given, and
+        # grid cameras are registered as `SBX-cam01`.
+        key = next(
+            (code for code in self._streams if code.upper() == camera_code.upper()),
+            camera_code,
+        )
+        stream = self._streams.pop(key, None)
         if stream is None:
             return False
 

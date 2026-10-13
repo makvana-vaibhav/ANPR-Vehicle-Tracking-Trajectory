@@ -104,6 +104,18 @@ Only if it is still refusing after 20 minutes: check `SANDBOX_RTSP_USERNAME` /
 `SANDBOX_RTSP_PASSWORD` in `.env` against the portal, then call the
 organisers' helpdesk (+91 95370 89982).
 
+### 2a-bis. Take the grid out of the demo entirely
+
+Every grid camera has a 60-second recording of its own feed in `data/videos`
+(`grid-SBX-camNN.mp4`, made by `make grid-record` on 13 Oct). `make grid-replay`
+plays each camera from its recording — same code, name, position and history,
+labelled "Recorded clip" in the UI and kept out of Insights. `make grid-live`
+puts them back on the grid. Neither restarts anything.
+
+Say: *"These are recordings of the organisers' cameras, replayed through the
+same gateway and pipeline, because the venue network cannot carry thirty live
+feeds. `make grid-live` switches them back."*
+
 ### 2b. The roster is empty
 
 The API publishes it every 30 s. If the API restarted recently, wait 30 s.

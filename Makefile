@@ -301,6 +301,18 @@ ai-multi: ## Start three ANPR workers that split the camera grid between them
 	@AILAB_INFERENCE_BUDGET=2 AI_WORKER_COUNT=3 $(COMPOSE) --profile ai --profile ai-multi up -d
 	@$(MAKE) --no-print-directory wait-healthy
 
+.PHONY: grid-record
+grid-record: ## Record a 60 s clip from each grid camera into data/videos (skips ones already recorded)
+	@python3 scripts/record_grid.py --skip-existing
+
+.PHONY: grid-replay
+grid-replay: ## Play every recorded grid camera from its local clip (no grid, no venue network)
+	@$(COMPOSE) exec -T api python -m scripts.grid_replay on
+
+.PHONY: grid-live
+grid-live: ## Put the grid cameras back on the live grid
+	@$(COMPOSE) exec -T api python -m scripts.grid_replay off
+
 .PHONY: scale
 scale: ## Start the scale profile (3 ingest consumer replicas; the bus stays Redis)
 	@# docker-compose.scale.yml adds consumer replicas and stops the API

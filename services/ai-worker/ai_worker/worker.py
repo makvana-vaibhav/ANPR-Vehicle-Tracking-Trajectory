@@ -515,6 +515,13 @@ class AiWorker:
             if code not in self._assigned:
                 log.info("camera %s no longer assigned; stopping", code)
                 self._stop(code)
+            elif self._assigned[code].rtsp_url != self.tasks[code].stream.rtsp_url:
+                # The registry moved the camera's source (`make grid-replay`,
+                # a new URL typed in the UI). Stopped here, reopened below on
+                # the new address; left alone it would read the old one until
+                # that stream happened to end.
+                log.info("camera %s changed source; reopening", code)
+                self._stop(code)
             elif code not in open_set:
                 log.info(
                     "closing %s; it has not been on anyone's screen for %.0f min",

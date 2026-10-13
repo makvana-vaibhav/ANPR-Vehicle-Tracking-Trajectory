@@ -23,7 +23,7 @@ from urllib.parse import quote
 
 import uvicorn
 from fastapi import Depends, FastAPI, Header, HTTPException, status
-from sqlalchemy import and_, false, or_, select, true
+from sqlalchemy import and_, false, func, or_, select, true
 
 from app.core import service_auth
 from app.core.config import settings
@@ -472,11 +472,15 @@ async def stop_stream(camera_code: str) -> dict[str, Any]:
 async def start_stream(camera_code: str) -> dict[str, Any]:
     """Bring a stream up — a stopped one, or a camera just onboarded with a clip."""
     code = camera_code.upper()
-    if code in publisher.running():
+    # Case-insensitive throughout: grid cameras are `SBX-cam01`, and an exact
+    # match on the upper-cased code reported them "not registered".
+    if any(running.upper() == code for running in publisher.running()):
         return {"camera_code": code, "started": False, "detail": "Already publishing"}
 
     async with SessionLocal() as session:
-        camera = await session.scalar(select(Camera).where(Camera.camera_code == code))
+        camera = await session.scalar(
+            select(Camera).where(func.upper(Camera.camera_code) == code)
+        )
     if camera is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail=f"{code} is not registered"

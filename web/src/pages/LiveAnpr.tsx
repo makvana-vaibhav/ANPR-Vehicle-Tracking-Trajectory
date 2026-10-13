@@ -160,7 +160,11 @@ const LATENCY_SAMPLES = 20
  * counts as demonstration footage.
  */
 export function isDemoFeed(camera: Camera): boolean {
-  return (camera.tags ?? []).includes('demo')
+  // A grid camera switched to its own recording (`make grid-replay`) has a
+  // clip and the `recorded-footage` tag but not `demo`; it is still a loop.
+  if (camera.source_file) return true
+  const tags = camera.tags ?? []
+  return tags.includes('demo') || tags.includes('recorded-footage')
 }
 
 /**
@@ -175,6 +179,8 @@ export function isDemoFeed(camera: Camera): boolean {
  * and every one tried WebRTC against the grid first.
  */
 export function isGridCamera(camera: Camera): boolean {
+  // Replaying its recording, it is served by our own gateway, not the grid.
+  if (camera.source_file) return false
   if (camera.vms_vendor === 'hosted_grid') return true
   if ((camera.tags ?? []).includes('sandbox')) return true
   return (camera.vms_name ?? '').toLowerCase().includes('sandbox')

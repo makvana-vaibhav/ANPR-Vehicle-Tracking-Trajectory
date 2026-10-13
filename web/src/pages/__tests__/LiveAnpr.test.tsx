@@ -24,7 +24,7 @@ import type {
   LiveEvent,
   StreamGrant,
 } from '@/lib/types'
-import LiveAnpr, { findCamera, isGridCamera, orderCameras, watchHits } from '@/pages/LiveAnpr'
+import LiveAnpr, { findCamera, isDemoFeed, isGridCamera, orderCameras, watchHits } from '@/pages/LiveAnpr'
 
 const socket = vi.hoisted(() => ({
   alerts: [] as LiveAlertEvent[],
@@ -444,6 +444,16 @@ describe('helpers', () => {
     expect(isGridCamera(GRID)).toBe(true)
     expect(isGridCamera(camera('X', { vms_vendor: 'hosted_grid' }))).toBe(true)
     expect(isGridCamera(DEMO)).toBe(false)
+  })
+
+  it('treats a grid camera replaying its recording as a recorded clip', () => {
+    // `make grid-replay`: same camera, served from our gateway, on a loop.
+    const replay = camera('SBX-cam10', {
+      tags: ['sandbox', 'grid-id:cam10', 'recorded-footage', 'grid-replay'],
+      source_file: 'grid-SBX-cam10.mp4',
+    })
+    expect(isGridCamera(replay)).toBe(false)
+    expect(isDemoFeed(replay)).toBe(true)
   })
 
   it('orders recently active cameras first, then online, then by code', () => {
