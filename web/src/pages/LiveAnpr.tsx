@@ -94,7 +94,6 @@ import {
   EmptyState,
   ErrorBanner,
   Icon,
-  InfoHint,
   Input,
   PlateChip,
   SeverityGlyph,
@@ -478,27 +477,6 @@ function plural(count: number, one: string, many = `${one}s`): string {
   return `${count} ${count === 1 ? one : many}`
 }
 
-/** "A", "A and B", "A, B and C", "A, B, C, D and 3 more". */
-function ReadingList({ cameras }: { cameras: Camera[] }) {
-  const named = cameras.slice(0, 4)
-  const rest = cameras.length - named.length
-  return (
-    <>
-      {named.map((camera, index) => {
-        const last = index === named.length - 1
-        const separator = index === 0 ? '' : last && rest === 0 ? ' and ' : ', '
-        return (
-          <span key={camera.id}>
-            {separator}
-            <span className="font-mono text-foreground">{camera.camera_code}</span>
-          </span>
-        )
-      })}
-      {rest > 0 && ` and ${rest} more`}
-    </>
-  )
-}
-
 // ── The page ────────────────────────────────────────────────────────────
 
 export default function LiveAnpr() {
@@ -535,6 +513,7 @@ export default function LiveAnpr() {
   // Diagnostics are opt-in: the panel is for proving an optimisation worked,
   // not something an operator needs on screen during normal use.
   const [showDiagnostics, setShowDiagnostics] = useState(false)
+  const [showOptions, setShowOptions] = useState(false)
 
   const [query, setQuery] = useState('')
   const [chip, setChip] = useState('all')
@@ -767,7 +746,6 @@ export default function LiveAnpr() {
 
   const reading = selected !== null && readingNow.has(selected.camera_code.toLowerCase())
   const alarmHere = selected !== null && alarmCameras.has(selected.id)
-  const demoCount = fleet.filter(isDemoFeed).length
   const looking = requested !== null && !requestedCamera && !(lookup?.code === requested && lookup.missing)
   const missing = requested !== null && !requestedCamera && lookup?.code === requested && lookup.missing
   const earlier = (history ?? [])
@@ -803,24 +781,17 @@ export default function LiveAnpr() {
                 </span>
               </>
             )}
-            <InfoHint label="How analysis is assigned">
-              Every camera streams to this screen, but one machine cannot read
-              plates on all of them at once: each analysed camera costs about a
-              core. ANPR runs continuously on a short always-on list, and the
-              camera open here is analysed first for as long as it is open —
-              its boxes start within a few seconds of opening it. A camera
-              counts as reading when it has located or read a plate in the last{' '}
-              {READING_WINDOW_MS / 1000} seconds.
-            </InfoHint>
           </p>
         </div>
 
         {cameras !== null && fleet.length > 0 && (
           <div role="group" aria-label="Show cameras" className="flex flex-wrap gap-1.5">
+            {/* Towns are one search away in the rail; the two choices that
+                matter at a glance are every camera, or the ones reading. */}
             {[
               { key: 'all', label: 'All', count: fleet.length },
               { key: 'reading', label: 'Reading plates', count: readingInFleet.length },
-              ...chips,
+              ...chips.filter((c) => c.key === chip),
             ].map((option) => {
               const on = chip === option.key
               return (
@@ -829,7 +800,7 @@ export default function LiveAnpr() {
                   type="button"
                   aria-pressed={on}
                   onClick={() => setChip(option.key)}
-                  className={`flex h-7 items-center gap-1.5 rounded-md border px-2.5 text-xs transition ${
+                  className={`flex h-8 items-center gap-1.5 rounded-md border px-3 text-[13px] transition ${
                     on
                       ? 'border-input bg-secondary text-foreground'
                       : 'border-border text-muted-foreground hover:bg-secondary/50 hover:text-foreground'
@@ -1063,7 +1034,7 @@ export default function LiveAnpr() {
                         </StatePill>
                       )
                     )}
-                    {aiLatency !== null && (
+                    {aiLatency !== null && showDiagnostics && (
                       <span
                         title="Capture to event on the worker — the median of the last few batches"
                         className="font-mono text-[11px] text-faint"
@@ -1134,27 +1105,31 @@ export default function LiveAnpr() {
                           label="Plate boxes"
                           labelClassName="gap-1.5 text-xs text-muted-foreground"
                         />
-                        <span className="flex items-center gap-1">
-                          <Checkbox
-                            checked={syncBoxes}
-                            onChange={(e) => setSyncBoxes(e.target.checked)}
-                            label="Extra buffer"
-                            labelClassName="gap-1.5 text-xs text-muted-foreground"
-                          />
-                          <InfoHint label="What the extra buffer does">
-                            Holds the picture {(SYNC_DELAY_MS / 1000).toFixed(1)}s
-                            behind live, so every reading arrives before the frame
-                            it describes is shown. Boxes are aligned to the picture
-                            either way — turn this on only when the worker is loaded
-                            enough that readings arrive seconds late.
-                          </InfoHint>
-                        </span>
-                        <Checkbox
-                          checked={showDiagnostics}
-                          onChange={(e) => setShowDiagnostics(e.target.checked)}
-                          label="Latency"
-                          labelClassName="gap-1.5 text-xs text-muted-foreground"
-                        />
+                        <button
+                          type="button"
+                          aria-expanded={showOptions}
+                          onClick={() => setShowOptions((v) => !v)}
+                          className="flex items-center gap-1 rounded px-1.5 py-0.5 text-xs text-muted-foreground transition hover:bg-secondary hover:text-foreground"
+                        >
+                          Options
+                          <Icon name={showOptions ? 'chevronUp' : 'chevronDown'} size={12} />
+                        </button>
+                        {showOptions && (
+                          <>
+                            <Checkbox
+                              checked={syncBoxes}
+                              onChange={(e) => setSyncBoxes(e.target.checked)}
+                              label={`Hold ${(SYNC_DELAY_MS / 1000).toFixed(1)} s behind live (exact boxes)`}
+                              labelClassName="gap-1.5 text-xs text-muted-foreground"
+                            />
+                            <Checkbox
+                              checked={showDiagnostics}
+                              onChange={(e) => setShowDiagnostics(e.target.checked)}
+                              label="Latency"
+                              labelClassName="gap-1.5 text-xs text-muted-foreground"
+                            />
+                          </>
+                        )}
                       </>
                     }
                   />
@@ -1174,77 +1149,18 @@ export default function LiveAnpr() {
                     is a few words plus a marker, not a paragraph under every
                     camera they open. The reasoning is intact behind the hints. */}
                 <div className="flex flex-wrap items-center gap-x-5 gap-y-1.5 text-xs text-muted-foreground">
-                  {isDemoFeed(selected) ? (
-                    <span className="flex items-center gap-1.5">
-                      Recorded footage, replayed on a loop
-                      <InfoHint label="Why this feed is recorded footage">
-                        Recorded footage, not a live camera. It is replayed so
-                        the pipeline can be demonstrated end to end on traffic
-                        close enough for plates to be legible.
-                        {demoCount > 1 &&
-                          ` ${demoCount} cameras in this list replay recorded footage.`}
-                        {regionOf(selected) &&
-                          ` The plates in it are ${regionOf(selected)} registrations, read by the same pipeline.`}
-                      </InfoHint>
-                    </span>
-                  ) : (
-                    <span className="flex items-center gap-1.5">
-                      {isGridCamera(selected)
-                        ? "From the organisers' grid, pulled on demand"
-                        : 'Live, pulled on demand'}
-                      <InfoHint label="What affects plate legibility here">
-                        Plate legibility depends entirely on what the camera can
-                        see. Vehicles are detected and tracked regardless, but a
-                        plate at 40–60&nbsp;px in glare is frequently unreadable.
-                        Nothing is invented when a plate cannot be read — the
-                        ledger simply stays empty.
-                      </InfoHint>
-                    </span>
-                  )}
-
-                  {selected.vms_name && (
-                    <span className="text-faint" title="The video management system this camera is federated from">
-                      {selected.vms_name}
-                    </span>
-                  )}
-
-                  <span className="flex items-center gap-1.5">
-                    {syncBoxes ? (
-                      <>
-                        <span className="text-foreground">
-                          Buffered {(SYNC_DELAY_MS / 1000).toFixed(1)}s
-                        </span>
-                        · boxes exact
-                      </>
-                    ) : (
-                      <>
-                        <span className="text-foreground">Live</span>· boxes predicted
-                      </>
-                    )}
-                    <InfoHint label="How the boxes are placed">
-                      {syncBoxes ? (
-                        <>
-                          The picture is held {(SYNC_DELAY_MS / 1000).toFixed(1)}s
-                          behind live, so every reading is already here before
-                          the frame it describes is shown and no box has to be
-                          predicted at all.
-                        </>
-                      ) : (
-                        <>
-                          The lowest-latency picture the transport allows. A box
-                          appears as soon as a plate is located — dashed until
-                          it has been read — placed against the capture instant
-                          on screen and carried forward on the vehicle&rsquo;s
-                          own measured velocity, so it lands on the car rather
-                          than behind it.
-                        </>
-                      )}{' '}
-                      Every box carries the pipeline&rsquo;s own
-                      capture-to-event figure; tick <em>Latency</em> to see it
-                      aggregated. The ledger on the right is the authoritative
-                      record of what was read.
-                    </InfoHint>
+                  <span>
+                    {isDemoFeed(selected)
+                      ? `Recorded clip, replayed on a loop${regionOf(selected) ? ` · ${regionOf(selected)} plates` : ''}`
+                      : isGridCamera(selected)
+                        ? "Organisers' grid camera"
+                        : 'Live camera'}
                   </span>
+                  {syncBoxes && (
+                    <span className="text-foreground">
+                      Held {(SYNC_DELAY_MS / 1000).toFixed(1)} s behind live
+                    </span>
+                  )}
                 </div>
 
                 {showDiagnostics && grant && (
@@ -1271,7 +1187,7 @@ export default function LiveAnpr() {
                     the thing that got cut off. */}
                 <section aria-label="Earlier on this camera" className="pb-1">
                   <h3 className="flex items-baseline gap-2 text-[11px] font-medium uppercase tracking-[0.06em] text-muted-foreground">
-                    Earlier on this camera
+                    Earlier reads
                     {history !== null && earlier.length > 0 && (
                       <span className="font-mono normal-case tracking-normal text-faint">
                         {plural(earlier.length, 'read')}, newest first
@@ -1308,7 +1224,7 @@ export default function LiveAnpr() {
                             </span>
                             {read.confidence !== null && (
                               <span className="font-mono text-[11px] text-faint">
-                                {read.confidence.toFixed(2)}
+                                {Math.round(read.confidence * 100)}%
                               </span>
                             )}
                           </>
@@ -1388,23 +1304,13 @@ export default function LiveAnpr() {
           className="flex max-h-[80vh] min-h-[320px] min-w-0 flex-col overflow-hidden rounded-lg border border-border bg-card lg:max-h-none lg:min-h-0"
         >
           <div className="flex shrink-0 items-center gap-2 border-b border-border px-3.5 py-2.5">
-            <h2 className="text-[13px] font-semibold">Reads</h2>
+            <h2 className="text-[13px] font-semibold">Plates read</h2>
             <span
               aria-hidden
               className={`h-1.5 w-1.5 shrink-0 rounded-full ${reading ? 'animate-pulse-alert bg-primary' : 'bg-status-unknown'}`}
             />
             <span className="min-w-0 truncate text-xs text-faint">
               newest first{selectedCode && <> · <span className="font-mono">{selectedCode}</span></>}
-            </span>
-            <span className="ml-auto">
-              <InfoHint label="What this ledger is" align="right">
-                The authoritative record of what the pipeline read. Unlike the
-                boxes on the video, nothing here depends on lining up with a
-                moving picture — each row carries the crop it was read from,
-                how many frames were involved, whether they agreed, and whether
-                the grammar had to repair the string. A plate that raised a
-                watchlist alarm is ringed in red.
-              </InfoHint>
             </span>
           </div>
 
@@ -1421,20 +1327,6 @@ export default function LiveAnpr() {
             />
           </div>
 
-          <div className="shrink-0 border-t border-border px-3.5 py-3 text-xs leading-relaxed text-muted-foreground">
-            <p className="font-medium text-foreground">What is being read</p>
-            <p className="mt-1">
-              {readingInFleet.length === 0 ? (
-                'No camera has located or read a plate in the last half-minute.'
-              ) : (
-                <>
-                  Plates are being read on <ReadingList cameras={readingInFleet} />.
-                </>
-              )}{' '}
-              Opening a camera puts it first: reading starts within a few
-              seconds and continues while it is on screen.
-            </p>
-          </div>
         </aside>
       </div>
     </div>

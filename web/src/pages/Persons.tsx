@@ -23,6 +23,7 @@
  */
 
 import { useCallback, useEffect, useMemo, useState, type FormEvent, type ReactNode } from 'react'
+import { Link } from 'react-router-dom'
 
 import { SkeletonRows } from '@/components/Skeleton'
 import { useToast } from '@/components/Toast'
@@ -192,12 +193,23 @@ export default function Persons() {
             </>
           }
           actions={
-            mayEnrol ? (
-              <Button onClick={() => setEnrolling(true)}>
-                <Icon name="plus" size={14} />
-                Enrol a person
-              </Button>
-            ) : undefined
+            <>
+              {/* Face matches are kept out of the vehicle alarm queue; this
+                  is the way to them from the list that raises them. */}
+              <Link
+                to="/alerts?kind=persons"
+                className="inline-flex h-8 items-center gap-1.5 rounded-md border border-input px-3.5 text-[13px] font-medium transition hover:bg-secondary/60"
+              >
+                <Icon name="alert" size={14} />
+                Face match alarms
+              </Link>
+              {mayEnrol && (
+                <Button onClick={() => setEnrolling(true)}>
+                  <Icon name="plus" size={14} />
+                  Enrol a person
+                </Button>
+              )}
+            </>
           }
         />
 

@@ -27,10 +27,9 @@ import { STATUS_LABEL, STATUS_ORDER, TOWN_LEVEL_TAG, townOf } from './cameraFact
    colours they need are named here by value and shared with the legend that
    explains them. Keep in step with styles/index.css and CommandMap. */
 
-/** A camera place: light, but below --foreground. */
-export const MARKER_FILL = '#C9D3DD'
-/** --faint: a place where no camera's state can be told. */
-export const MARKER_FILL_DIM = '#7A8897'
+/* A camera place is drawn in --place (HTML markers read the CSS variable, so
+   it follows the theme); a place where no camera's state can be told, in
+   --faint. */
 
 /**
  * Corridor congestion, quiet to loud. Flowing traffic is normal, so it is

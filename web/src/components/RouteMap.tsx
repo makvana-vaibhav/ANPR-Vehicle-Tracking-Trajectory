@@ -67,24 +67,68 @@ import {
 import { createMap } from '@/lib/maps'
 import MapUnavailable from '@/components/MapUnavailable'
 import { buildTimeline, istClock, journeySeconds, positionAt } from '@/lib/journey'
+import { mapPalette, useTheme, type ResolvedTheme } from '@/lib/theme'
 import type { RouteHop } from '@/lib/types'
 
 /*
-  The map's palette. MapLibre paint specs cannot take Tailwind classes, so the
-  tokens they need are restated here, once: TRAIL is --primary, IMPOSSIBLE is
-  --priority-critical, GROUND is --background, and STOP is the light grey the
-  design language gives a camera on a map. Retune them with index.css.
+  The map's palette, per theme. MapLibre paint specs cannot take Tailwind
+  classes or CSS variables, so the colours come from lib/theme's map palette:
+  the trail is --primary, impossible legs --priority-critical, a stop the
+  camera colour. The offline basemap is land a step off the ground, with its
+  edges and the city's arterial roads a step further — context, never
+  competing with a trail. Repainted when the theme changes.
 */
-const TRAIL_RGB = [92, 200, 255] as const // #5CC8FF
-const TRAIL = '#5CC8FF'
-const IMPOSSIBLE = '#FF5C55'
-const GROUND = '#0A0E13'
-const STOP = '#C9D3DD'
-// The offline basemap: land a step above the ground, its edges and the city's
-// arterial roads a step above that — context, never competing with a trail.
-const LAND = '#0F1620'
-const LAND_EDGE = '#1F2A36'
-const ROAD = '#2A3644'
+interface RouteColours {
+  trailRgb: readonly [number, number, number]
+  trail: string
+  impossible: string
+  ground: string
+  /** The fill of a hollow stop: the map's own ground, so it reads as empty. */
+  hollow: string
+  stop: string
+  land: string
+  landEdge: string
+  road: string
+}
+
+function routeColours(theme: ResolvedTheme): RouteColours {
+  const p = mapPalette(theme)
+  return {
+    trailRgb: p.trailRgb,
+    trail: p.trail,
+    impossible: p.critical,
+    ground: p.ground,
+    hollow: theme === 'light' ? '#FFFFFF' : p.ground,
+    stop: p.place,
+    land: p.land,
+    landEdge: p.boundary,
+    road: p.road,
+  }
+}
+
+function stopFill(c: RouteColours): ExpressionSpecification {
+  return ['match', ['get', 'look'], 'start', c.hollow, 'impossible', c.hollow, 'candidate', c.hollow, 'end', c.trail, c.stop]
+}
+
+function stopStroke(c: RouteColours): ExpressionSpecification {
+  return ['match', ['get', 'look'], 'start', c.stop, 'impossible', c.impossible, 'candidate', c.trail, c.hollow]
+}
+
+/** Repaint the colours that do not depend on the journey drawn. */
+function paintRoute(m: maplibregl.Map, c: RouteColours): void {
+  const set = (layer: string, property: string, value: unknown) => {
+    if (m.getLayer(layer)) m.setPaintProperty(layer, property, value)
+  }
+  set('background', 'background-color', c.ground)
+  set('context-land', 'fill-color', c.land)
+  set('context-land-edge', 'line-color', c.landEdge)
+  set('context-roads', 'line-color', c.road)
+  set('impossible-legs', 'line-color', c.impossible)
+  set('candidate-legs', 'line-color', c.trail)
+  set('stop-halo', 'circle-stroke-color', c.trail)
+  set('stop-dot', 'circle-color', stopFill(c))
+  set('stop-dot', 'circle-stroke-color', stopStroke(c))
+}
 
 const EMPTY: GeoJSON.FeatureCollection = { type: 'FeatureCollection', features: [] }
 
@@ -206,6 +250,10 @@ const RouteMap = forwardRef<RouteMapHandle, Props>(function RouteMap(
   const [unavailable, setUnavailable] = useState(false)
   const [choice, setChoice] = useState<Basemap>(basemap)
   const [effective, setEffective] = useState<Basemap>(basemap)
+  const { resolved } = useTheme()
+  const colours = useMemo(() => routeColours(resolved), [resolved])
+  const coloursRef = useRef(colours)
+  coloursRef.current = colours
 
   // The latest callbacks, read by marker handlers created once per journey —
   // otherwise every hover in the list would rebuild every marker.
@@ -323,7 +371,7 @@ const RouteMap = forwardRef<RouteMapHandle, Props>(function RouteMap(
     if (map.current || !container.current) return
     const m = createMap({
       container: container.current,
-      style: baseStyle({ ground: GROUND }),
+      style: baseStyle({ ground: coloursRef.current.ground }),
       center: GUJARAT_CENTER,
       zoom: 6.2,
       attributionControl: false,
@@ -379,7 +427,12 @@ const RouteMap = forwardRef<RouteMapHandle, Props>(function RouteMap(
     m.addSource('context-land', { type: 'geojson', data: EMPTY })
     m.addSource('context-roads', { type: 'geojson', data: EMPTY })
     m.addLayer(
-      { id: 'context-land', type: 'fill', source: 'context-land', paint: { 'fill-color': LAND } },
+      {
+        id: 'context-land',
+        type: 'fill',
+        source: 'context-land',
+        paint: { 'fill-color': coloursRef.current.land },
+      },
       'satellite',
     )
     m.addLayer(
@@ -388,7 +441,7 @@ const RouteMap = forwardRef<RouteMapHandle, Props>(function RouteMap(
         type: 'line',
         source: 'context-land',
         paint: {
-          'line-color': LAND_EDGE,
+          'line-color': coloursRef.current.landEdge,
           'line-width': ['interpolate', ['linear'], ['zoom'], 6, 0.8, 12, 1.4],
         },
       },
@@ -401,7 +454,7 @@ const RouteMap = forwardRef<RouteMapHandle, Props>(function RouteMap(
         source: 'context-roads',
         layout: { 'line-cap': 'round', 'line-join': 'round' },
         paint: {
-          'line-color': ROAD,
+          'line-color': coloursRef.current.road,
           'line-width': ['interpolate', ['linear'], ['zoom'], 9, 0.8, 15, 3],
         },
       },
@@ -436,14 +489,15 @@ const RouteMap = forwardRef<RouteMapHandle, Props>(function RouteMap(
     m.addSource('route-candidate', { type: 'geojson', data: EMPTY })
     m.addSource('route-stops', { type: 'geojson', data: EMPTY })
 
+    const c = coloursRef.current
     const placeholder: ExpressionSpecification = [
       'interpolate',
       ['linear'],
       ['line-progress'],
       0,
-      TRAIL,
+      c.trail,
       1,
-      TRAIL,
+      c.trail,
     ]
     const round = { 'line-cap': 'round', 'line-join': 'round' } as const
 
@@ -471,7 +525,7 @@ const RouteMap = forwardRef<RouteMapHandle, Props>(function RouteMap(
       type: 'line',
       source: 'route-impossible',
       layout: { 'line-cap': 'butt', 'line-join': 'round' },
-      paint: { 'line-color': IMPOSSIBLE, 'line-width': 2, 'line-dasharray': [2.5, 2] },
+      paint: { 'line-color': c.impossible, 'line-width': 2, 'line-dasharray': [2.5, 2] },
     })
     // Legs to or from a candidate: the trail's colour, dashed, never solid.
     m.addLayer({
@@ -480,7 +534,7 @@ const RouteMap = forwardRef<RouteMapHandle, Props>(function RouteMap(
       source: 'route-candidate',
       layout: { 'line-cap': 'butt', 'line-join': 'round' },
       paint: {
-        'line-color': TRAIL,
+        'line-color': c.trail,
         'line-width': 2,
         'line-opacity': 0.85,
         'line-dasharray': [1.5, 1.5],
@@ -513,7 +567,7 @@ const RouteMap = forwardRef<RouteMapHandle, Props>(function RouteMap(
       paint: {
         'circle-radius': ['+', ['get', 'radius'], 5],
         'circle-color': 'rgba(0, 0, 0, 0)',
-        'circle-stroke-color': TRAIL,
+        'circle-stroke-color': c.trail,
         'circle-stroke-width': 2,
         'circle-stroke-opacity': ['case', ['boolean', ['feature-state', 'active'], false], 1, 0],
       },
@@ -526,30 +580,8 @@ const RouteMap = forwardRef<RouteMapHandle, Props>(function RouteMap(
       source: 'route-stops',
       paint: {
         'circle-radius': ['get', 'radius'],
-        'circle-color': [
-          'match',
-          ['get', 'look'],
-          'start',
-          GROUND,
-          'impossible',
-          GROUND,
-          'candidate',
-          GROUND,
-          'end',
-          TRAIL,
-          STOP,
-        ],
-        'circle-stroke-color': [
-          'match',
-          ['get', 'look'],
-          'start',
-          STOP,
-          'impossible',
-          IMPOSSIBLE,
-          'candidate',
-          TRAIL,
-          GROUND,
-        ],
+        'circle-color': stopFill(c),
+        'circle-stroke-color': stopStroke(c),
         'circle-stroke-width': [
           'match',
           ['get', 'look'],
@@ -560,6 +592,14 @@ const RouteMap = forwardRef<RouteMapHandle, Props>(function RouteMap(
       },
     })
   }, [ready])
+
+  // The theme changed: repaint what does not depend on the journey. The
+  // trail gradients are redrawn by the effects below, which take `colours`.
+  useEffect(() => {
+    const m = map.current
+    if (!m || !ready) return
+    paintRoute(m, colours)
+  }, [ready, colours])
 
   // ── Draw the journey ────────────────────────────────────────────────
   useEffect(() => {
@@ -573,7 +613,7 @@ const RouteMap = forwardRef<RouteMapHandle, Props>(function RouteMap(
 
     // The trail: every sighting in time order, brightness by time.
     const trail = journeyTrail(hops, timeline)
-    const gradient = trailGradient(trail.vertices, trail.believed, TRAIL_RGB)
+    const gradient = trailGradient(trail.vertices, trail.believed, colours.trailRgb)
     setData(m, 'route-trail', gradient ? lineOf(hops.map((h) => [h.lon, h.lat])) : EMPTY)
     if (gradient) {
       m.setPaintProperty('trail', 'line-gradient', gradient)
@@ -712,7 +752,7 @@ const RouteMap = forwardRef<RouteMapHandle, Props>(function RouteMap(
     }
 
     frame()
-  }, [ready, hops, timeline, groups, frame])
+  }, [ready, hops, timeline, groups, frame, colours])
 
   // ── The selected visit: ring it, brighten its label, show its leg ────
   useEffect(() => {
@@ -744,7 +784,7 @@ const RouteMap = forwardRef<RouteMapHandle, Props>(function RouteMap(
     const here = engaged ? positionAt(hops, timeline, playhead) : null
     const travelled = here ? travelledTrail(hops, timeline, playhead, here) : null
     const gradient = travelled
-      ? trailGradient(travelled.vertices, travelled.believed, TRAIL_RGB, 0.04)
+      ? trailGradient(travelled.vertices, travelled.believed, colours.trailRgb, 0.04)
       : null
     setData(
       m,
@@ -772,7 +812,7 @@ const RouteMap = forwardRef<RouteMapHandle, Props>(function RouteMap(
     } else {
       vehicle.current.setLngLat(here)
     }
-  }, [ready, hops, timeline, playhead, engaged])
+  }, [ready, hops, timeline, playhead, engaged, colours])
 
   // ── A pursuit's next cameras: rings, solid when pinned ───────────────
   useEffect(() => {

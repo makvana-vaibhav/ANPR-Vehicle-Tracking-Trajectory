@@ -868,12 +868,6 @@ export default function VehicleSearch() {
                     Every plate read in {windowLabel(hours, exact)}, on every camera.
                   </p>
                 </div>
-                <div className="rounded-lg border border-border p-3 text-xs leading-relaxed text-muted-foreground">
-                  <p className="mb-1 font-medium text-foreground">Reading a route</p>
-                  Legs are straight lines between cameras, so every distance and speed is a lower
-                  bound. A camera that was not reading plates at the time could not have seen the
-                  vehicle: absence here is not absence from the road.
-                </div>
               </div>
             </aside>
 
@@ -1081,30 +1075,11 @@ function PageBand({ mode }: { mode: 'plate' | 'attributes' }) {
   return (
     <header className="flex shrink-0 flex-wrap items-center gap-x-6 gap-y-2 border-b border-border bg-chrome px-5 py-3">
       <div className="min-w-0">
-        <h1 className="text-[17px] font-semibold leading-tight tracking-tight">Vehicle search</h1>
-        <p className="mt-0.5 flex flex-wrap items-center gap-x-1.5 text-xs text-muted-foreground">
-          {mode === 'plate' ? (
-            <>
-              <span>every sighting of a plate, and the journey they imply</span>
-              <InfoHint label="What a drawn route is and is not">
-                A route is inference. The platform knows where a vehicle was seen, not how it
-                got between those points — the lines are straight legs between cameras, not
-                the roads driven, so every distance and speed is a lower bound. Legs the
-                correlator could not believe are shown in red rather than hidden: an
-                impossible leg is the signature of a cloned plate, and removing it would
-                remove the most useful thing on the page.
-              </InfoHint>
-            </>
-          ) : (
-            <>
-              <span>browse sightings by what a vehicle looks like</span>
-              <InfoHint label="What can be searched on">
-                Type, camera and time window filter every sighting the pipeline has made,
-                including ones whose plate could not be read. Colour cannot be filtered on
-                yet — nothing in the pipeline reads it.
-              </InfoHint>
-            </>
-          )}
+        <h1 className="text-[17px] font-semibold leading-tight tracking-tight">Search vehicle</h1>
+        <p className="mt-0.5 text-xs text-muted-foreground">
+          {mode === 'plate'
+            ? 'Type a plate to see where the vehicle has been'
+            : 'Find sightings by vehicle type, camera and time — including unread plates'}
         </p>
       </div>
     </header>
@@ -1397,11 +1372,10 @@ function Starting({
 }) {
   return (
     <>
-      <p className="eyebrow">Investigate</p>
-      <h2 className="mt-1 text-lg font-semibold leading-snug">Where has a vehicle been?</h2>
+      <h2 className="text-lg font-semibold leading-snug">Where has a vehicle been?</h2>
       <p className="mt-1.5 text-[13px] leading-relaxed text-muted-foreground">
-        Type a plate — as read, or as remembered — for every sighting of it, the journey those
-        sightings imply, and anything about that journey that needs explaining.
+        Type a plate on the left — as read, or as remembered. You get every sighting and the
+        journey on the map. Or pick one below.
       </p>
 
       {suggestions.length > 0 && (

@@ -65,7 +65,6 @@ import {
   SegmentedControl,
   Select,
   Spinner,
-  StatTile,
   StatusDot,
 } from '@/components/ui'
 import { useAuth } from '@/hooks/useAuth'
@@ -383,34 +382,29 @@ export default function MapView() {
 
         {/* Figures and layer controls, over the map's top edge. */}
         <div className="pointer-events-none absolute inset-x-3 top-3 z-10 flex flex-wrap items-start gap-2">
+          {/* Two short facts, not three tiles: how much of the estate is on
+              the map, and whether it is answering. Offline and degraded are
+              named only when there are some — normal is quiet. */}
           <div className="pointer-events-auto flex flex-wrap gap-2">
-            <StatTile
-              className="min-w-[9.5rem] shadow-lg"
-              label="On the map"
-              value={cameras ? String(all.length - unplacedTotal) : '—'}
-              detail={cameras ? `of ${all.length} registered` : undefined}
-            />
-            <StatTile
-              className="min-w-[9.5rem] shadow-lg"
-              label="Answering"
-              value={cameras ? `${counts.online} / ${known}` : '—'}
-              detail={
-                cameras
-                  ? counts.unknown > 0
-                    ? `${counts.unknown} state unknown`
-                    : 'every camera accounted for'
-                  : undefined
-              }
-              info="Counts only cameras whose state is known. A camera behind an integration that is not answering — the organisers' grid refusing our login, say — is unknown rather than offline: its own state cannot be told."
-              tone={cameras && all.length > 0 && known === 0 ? 'warn' : undefined}
-            />
-            <StatTile
-              className="min-w-[9.5rem] shadow-lg"
-              label="Offline or degraded"
-              value={cameras ? String(attention) : '—'}
-              detail={cameras ? `${counts.offline} offline · ${counts.degraded} degraded` : undefined}
-              tone={counts.offline > 0 ? 'bad' : counts.degraded > 0 ? 'warn' : undefined}
-            />
+            {cameras && (
+              <>
+                <MapFact>
+                  {all.length - unplacedTotal} of {all.length} on the map
+                </MapFact>
+                <MapFact
+                  tone={all.length > 0 && known === 0 ? 'warn' : undefined}
+                  title="Only cameras whose state is known are counted. A camera behind an integration that is not answering (the grid refusing our login, say) is unknown, not offline."
+                >
+                  {counts.online} of {known} answering
+                  {counts.unknown > 0 && <span className="text-faint"> · {counts.unknown} unknown</span>}
+                </MapFact>
+                {attention > 0 && (
+                  <MapFact tone={counts.offline > 0 ? 'bad' : 'warn'}>
+                    {counts.offline} offline · {counts.degraded} degraded
+                  </MapFact>
+                )}
+              </>
+            )}
           </div>
 
           <div className="pointer-events-auto ml-auto w-[13.5rem] rounded-lg border border-border bg-card p-2.5 shadow-lg">
@@ -836,5 +830,36 @@ function LegendItem({ glyph, children }: { glyph: ReactNode; children: ReactNode
 function LineKey({ colour }: { colour: string }) {
   return (
     <span aria-hidden="true" className="h-[3px] w-4 rounded-full" style={{ background: colour }} />
+  )
+}
+
+/** One fact over the map, as a pill — the Overview's shape. */
+function MapFact({
+  children,
+  tone,
+  title,
+}: {
+  children: ReactNode
+  tone?: 'warn' | 'bad'
+  title?: string
+}) {
+  return (
+    <span
+      title={title}
+      className={`inline-flex h-9 items-center gap-2 rounded-full border bg-card px-3.5 text-[13px] shadow-lg ${
+        tone === 'bad'
+          ? 'border-priority-critical/50 text-priority-critical'
+          : tone === 'warn'
+            ? 'border-priority-high/50 text-priority-high'
+            : 'border-border text-foreground'
+      }`}
+    >
+      <span
+        className={`h-2 w-2 shrink-0 rounded-full ${
+          tone === 'bad' ? 'bg-priority-critical' : tone === 'warn' ? 'bg-priority-high' : 'bg-primary'
+        }`}
+      />
+      {children}
+    </span>
   )
 }

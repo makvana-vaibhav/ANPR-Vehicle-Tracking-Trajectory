@@ -36,8 +36,6 @@ import { placeLine, STATUS_LABEL } from '@/components/network/cameraFacts'
 import {
   CONGESTION_COLOUR,
   HEATMAP_STOPS,
-  MARKER_FILL,
-  MARKER_FILL_DIM,
   NO_FIGURE_COLOUR,
   clusterSpots,
   clusterTone,
@@ -51,14 +49,16 @@ import { baseStyle, GUJARAT_CENTER, satelliteReachable, type Basemap } from '@/l
 import { createMap } from '@/lib/maps'
 import MapUnavailable from '@/components/MapUnavailable'
 import { isUnplaced } from '@/lib/places'
+import { mapPalette, useTheme, type MapPalette } from '@/lib/theme'
 import type { Camera, CongestionLevel } from '@/lib/types'
 
-/* Map paint cannot take Tailwind classes, so the tokens it needs are repeated
-   here by value — keep them in step with styles/index.css. */
-const GROUND = '#0A0E13' // --background
-const LAND = '#0F1620' // a step above the ground, below a panel
-const BOUNDARY = '#1F2A36' // just above --border
+/* Map paint cannot take Tailwind classes or CSS variables, so the ground,
+   land and outline colours come from lib/theme's palette for the current
+   theme, and are repainted when it changes. Markers are HTML and use the CSS
+   variables directly. */
 const BOUNDARY_ON_IMAGERY = '#C9D3DD' // the marker grey, faint, so outlines survive bright imagery
+const DOT_FILL = 'hsl(var(--place))'
+const DOT_FILL_DIM = 'hsl(var(--faint))'
 
 /** Room the page's own overlays take at each edge, when framing cameras. */
 export interface FramePadding {
@@ -174,12 +174,17 @@ const CameraMap = forwardRef<CameraMapHandle, Props>(function CameraMap(
     onDistrictHover,
   }
 
+  const { resolved } = useTheme()
+  const palette = mapPalette(resolved)
+  const paletteRef = useRef(palette)
+  paletteRef.current = palette
+
   // ── The map, once ────────────────────────────────────────────────────
   useEffect(() => {
     if (!container.current || mapRef.current) return
     const map = createMap({
       container: container.current,
-      style: baseStyle({ ground: GROUND, dim: true }),
+      style: baseStyle({ ground: paletteRef.current.ground, dim: true }),
       center: GUJARAT_CENTER,
       zoom: 6.6,
       minZoom: 4.5,
@@ -240,7 +245,12 @@ const CameraMap = forwardRef<CameraMapHandle, Props>(function CameraMap(
     // Beneath any analytics layer already on the map.
     const before = overlayFloor(map)
     map.addLayer(
-      { id: 'district-fill', type: 'fill', source: 'districts', paint: { 'fill-color': LAND } },
+      {
+        id: 'district-fill',
+        type: 'fill',
+        source: 'districts',
+        paint: { 'fill-color': paletteRef.current.land },
+      },
       before,
     )
     map.addLayer(
@@ -248,7 +258,7 @@ const CameraMap = forwardRef<CameraMapHandle, Props>(function CameraMap(
         id: 'district-hover',
         type: 'fill',
         source: 'districts',
-        paint: { 'fill-color': MARKER_FILL, 'fill-opacity': 0.05 },
+        paint: { 'fill-color': paletteRef.current.place, 'fill-opacity': 0.05 },
         filter: ['==', ['get', 'district'], ''],
       },
       before,
@@ -259,13 +269,13 @@ const CameraMap = forwardRef<CameraMapHandle, Props>(function CameraMap(
         type: 'line',
         source: 'districts',
         paint: {
-          'line-color': BOUNDARY,
+          'line-color': paletteRef.current.boundary,
           'line-width': ['interpolate', ['linear'], ['zoom'], 6, 0.7, 12, 1.4],
         },
       },
       before,
     )
-    styleBasemap(map, latest.current.basemap)
+    styleBasemap(map, latest.current.basemap, paletteRef.current)
 
     let hovered = ''
     map.on('mousemove', 'district-fill', (event) => {
@@ -398,8 +408,17 @@ const CameraMap = forwardRef<CameraMapHandle, Props>(function CameraMap(
   useEffect(() => {
     const map = mapRef.current
     if (!map || !ready) return
-    styleBasemap(map, basemap)
-  }, [ready, basemap])
+    styleBasemap(map, basemap, palette)
+  }, [ready, basemap, palette])
+
+  // The theme changed: repaint the ground and land. Markers follow by CSS.
+  useEffect(() => {
+    const map = mapRef.current
+    if (!map || !ready) return
+    if (map.getLayer('background')) map.setPaintProperty('background', 'background-color', palette.ground)
+    if (map.getLayer('district-fill')) map.setPaintProperty('district-fill', 'fill-color', palette.land)
+    if (map.getLayer('district-hover')) map.setPaintProperty('district-hover', 'fill-color', palette.place)
+  }, [ready, palette])
 
   // Fall back before the operator is left staring at a blank map.
   useEffect(() => {
@@ -420,7 +439,7 @@ const CameraMap = forwardRef<CameraMapHandle, Props>(function CameraMap(
       const parts = markers.current.get(cluster.key)
       if (!parts) continue
       const tone = clusterTone(cluster.cameras)
-      parts.dot.style.background = tone === 'unknown' ? MARKER_FILL_DIM : MARKER_FILL
+      parts.dot.style.background = tone === 'unknown' ? DOT_FILL_DIM : DOT_FILL
       parts.statusRing.classList.toggle('hidden', tone !== 'offline' && tone !== 'degraded')
       parts.statusRing.classList.toggle('border-status-offline', tone === 'offline')
       parts.statusRing.classList.toggle('border-status-degraded', tone === 'degraded')
@@ -627,7 +646,7 @@ function buildMarker(
   dot.className = `${centred} shadow-[0_0_0_2px_hsl(var(--background))] transition-transform duration-150 group-hover:scale-125`
   dot.style.width = `${size}px`
   dot.style.height = `${size}px`
-  dot.style.background = MARKER_FILL
+  dot.style.background = DOT_FILL
 
   const label = document.createElement('span')
   label.className =
@@ -768,7 +787,7 @@ function setVisible(map: maplibregl.Map, id: string, visible: boolean): void {
   if (map.getLayer(id)) map.setLayoutProperty(id, 'visibility', visible ? 'visible' : 'none')
 }
 
-function styleBasemap(map: maplibregl.Map, basemap: Basemap): void {
+function styleBasemap(map: maplibregl.Map, basemap: Basemap, palette: MapPalette): void {
   const satellite = basemap === 'satellite'
   setVisible(map, 'satellite', satellite)
   setVisible(map, 'satellite-labels', satellite)
@@ -783,7 +802,7 @@ function styleBasemap(map: maplibregl.Map, basemap: Basemap): void {
   setVisible(map, 'district-fill', !satellite)
   setVisible(map, 'district-hover', !satellite)
   if (map.getLayer('district-outline')) {
-    map.setPaintProperty('district-outline', 'line-color', satellite ? BOUNDARY_ON_IMAGERY : BOUNDARY)
+    map.setPaintProperty('district-outline', 'line-color', satellite ? BOUNDARY_ON_IMAGERY : palette.boundary)
     map.setPaintProperty('district-outline', 'line-opacity', satellite ? 0.4 : 1)
   }
 }

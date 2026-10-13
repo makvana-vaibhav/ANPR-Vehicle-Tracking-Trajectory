@@ -7,7 +7,7 @@
  * markers are built from.
  */
 
-import { MARKER_FILL, type ClusterTone } from './mapClusters'
+import type { ClusterTone } from './mapClusters'
 
 export function PlaceDot({
   tone = 'normal',
@@ -48,7 +48,7 @@ export function PlaceDot({
         style={{
           width: size,
           height: size,
-          background: tone === 'unknown' ? undefined : MARKER_FILL,
+          background: tone === 'unknown' ? undefined : 'hsl(var(--place))',
         }}
       />
     </span>

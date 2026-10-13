@@ -57,7 +57,6 @@ import {
   ErrorBanner,
   Field,
   Icon,
-  InfoHint,
   Input,
   PlateChip,
   PriorityBadge,
@@ -918,13 +917,6 @@ export default function Alerts() {
               ? '…'
               : `${kind === 'all' ? Math.max(0, total - counts.person) : counts[kind]} ${scopeCaption}`}
           </span>
-          <InfoHint label="How the queue is ordered">
-            Most severe first; within a severity, a watchlist hit — a known
-            vehicle, read now — leads anything inferred. Alarms on one plate
-            are drawn together where the worst of them falls. The queue
-            re-reads itself the moment an alarm is raised, and every 30
-            seconds besides.
-          </InfoHint>
           <div className="ml-auto w-36">
             <Select
               aria-label="Which alarms"

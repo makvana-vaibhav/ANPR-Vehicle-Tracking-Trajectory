@@ -118,6 +118,20 @@ function watchSentence(hit: WatchHit): string {
   return hit.category ? `On the watchlist · ${hit.category}` : 'On the watchlist'
 }
 
+/** The pipeline's working, for whoever hovers: frames, agreement, repair. */
+function evidenceTitle(read: PlateRead): string | undefined {
+  const parts: string[] = []
+  if (read.confidence !== null) parts.push(`read ${read.confidence.toFixed(2)}`)
+  if (read.frames !== null) {
+    parts.push(`${read.frames} frame${read.frames === 1 ? '' : 's'}`)
+    if (read.agreement !== null && read.frames > 1) parts.push(`${Math.round(read.agreement * 100)}% agree`)
+  }
+  if (read.state === 'settled') parts.push('settled')
+  if (read.grammarValid === false) parts.push('not a valid plate format')
+  if (read.correctedFrom) parts.push(`repaired from ${read.correctedFrom}`)
+  return parts.length ? parts.join(' · ') : undefined
+}
+
 export function PlateReadRow({
   read,
   watch = null,
@@ -146,39 +160,20 @@ export function PlateReadRow({
         </span>
       </div>
 
-      <div className="mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-1 font-mono text-[11px] text-faint">
-        <span className="font-sans text-muted-foreground">{read.vehicleType ?? 'vehicle'}</span>
-        {read.confidence !== null && <span>read {read.confidence.toFixed(2)}</span>}
-        {read.frames !== null && (
-          <span>
-            {read.frames} frame{read.frames === 1 ? '' : 's'}
-            {/* Agreement among one read is not a measurement: printed, a
-                single-frame read said "0% agree", which reads as the frames
-                contradicting each other when there was only one. */}
-            {read.agreement !== null &&
-              read.frames > 1 &&
-              `, ${Math.round(read.agreement * 100)}% agree`}
-          </span>
+      {/* One quiet line: what it was, and how sure. The frame counts, the
+          agreement and the grammar repair stay on the record (and in the
+          chip's title) — a constable needs "car · 93%", not the pipeline's
+          working. An uncertain read is drawn dashed and says so in a word. */}
+      <div
+        className="mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-faint"
+        title={evidenceTitle(read)}
+      >
+        <span className="text-muted-foreground">{read.vehicleType ?? 'vehicle'}</span>
+        {read.confidence !== null && (
+          <span className="font-mono">{Math.round(read.confidence * 100)}%</span>
         )}
         {read.state === 'in-view' && <span className="text-primary">in view</span>}
-        {read.state === 'settled' && <span>settled</span>}
-
-        {/* Grey, not amber: an unsettled read needs no one to act, and the
-            plate itself is already drawn dashed to say it is not certain.
-            Colour on this screen is kept for the watchlist. */}
-        {read.grammarValid === false && <Badge>invalid format</Badge>}
-        {read.ambiguous && <Badge>ambiguous</Badge>}
-        {/* The pre-correction string is deliberately not shown.
-            `was GX150CJ` next to `GX150GJ` reads as two conflicting answers to
-            someone scanning the feed, when it is really one answer plus the
-            grammar repair that produced it — and with a row per reading it
-            doubled the text on screen. The correction is still carried on the
-            event and in `ocr_raw` on the stored detection, which is where an
-            operator checking a specific reading should see it. `repaired`
-            says the same thing in one word. */}
-        {read.correctedFrom && (
-          <Badge title={`Grammar repaired from ${read.correctedFrom}`}>repaired</Badge>
-        )}
+        {unsettled && <Badge>{read.ambiguous ? 'ambiguous' : 'unsure'}</Badge>}
       </div>
 
       {watch && (

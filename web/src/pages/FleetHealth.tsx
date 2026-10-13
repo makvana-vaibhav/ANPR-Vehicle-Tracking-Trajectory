@@ -76,13 +76,13 @@ type GapTab = 'unavailable' | 'unreliable' | 'coverage' | 'capability' | 'ageing
 type HistoryWindow = '1' | '6' | '24'
 type HistoryView = 'chart' | 'table'
 
-/* Recharts takes colours as props, not classes, so the tokens are repeated
-   here by value — keep them in step with styles/index.css. */
-const GRID = '#1E2833' // --border: recessive
-const TICK = '#7A8897' // --faint
-const SERIES = '#5CC8FF' // --primary: the one series that is the point
-const FAILED = '#FF5C55' // --status-offline: a probe nobody answered (drawn at 80%: ≥3:1 on --card)
-const CURSOR = 'rgba(154, 169, 184, 0.08)' // a ghost of --muted-foreground
+/* Recharts takes colours as props, not classes; CSS variables work in them
+   (as on Traffic), so the charts follow the theme. */
+const GRID = 'hsl(var(--border))' // recessive
+const TICK = 'hsl(var(--faint))'
+const SERIES = 'hsl(var(--primary))' // the one series that is the point
+const FAILED = 'hsl(var(--status-offline))' // a probe nobody answered (drawn at 80%: ≥3:1 on --card)
+const CURSOR = 'hsl(var(--muted-foreground) / 0.08)' // a ghost of --muted-foreground
 const TICK_STYLE = { fill: TICK, fontSize: 11, fontFamily: 'IBM Plex Mono, monospace' }
 
 const CLOCK = new Intl.DateTimeFormat('en-IN', {
