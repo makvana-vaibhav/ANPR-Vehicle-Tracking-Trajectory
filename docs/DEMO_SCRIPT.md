@@ -71,7 +71,15 @@ for w in contrail-ai-worker contrail-ai-worker-2 contrail-ai-worker-3; do
 | `… refused our login — next try in Ns` | The grid is pausing us. **Leave it**; it resumes on its own. CAM-DEMO-01 is unaffected |
 | `no cameras assigned` | Roster empty — [PANIC §2b](PANIC.md#2b-the-roster-is-empty) |
 
-In the browser at **http://localhost:8080**:
+**If the venue network or the grid is unreliable:** `make grid-replay` plays every grid camera
+that has a recording (`data/videos/grid-SBX-camNN.mp4`, 60 s each, recorded 13 Oct) from that
+recording instead, through the same gateway and pipeline, labelled "Recorded clip" in Live.
+`make grid-live` switches back. `docker compose exec -T api python -m scripts.grid_replay status`
+says which cameras are on which. Say it plainly if asked: *"these are recordings of the
+organisers' cameras, replayed because the venue link cannot carry thirty live feeds."*
+
+In the browser at **http://localhost:8080** (use `localhost`, not `127.0.0.1` — the API only
+accepts the page's own origin). Every demo account signs in with **`admin@123`**, already filled in:
 
 - [ ] Feed pill says **Live**
 - [ ] **Command** — the "Reading now" strip is moving and the recorded clip (CAM-DEMO-01) ripples
