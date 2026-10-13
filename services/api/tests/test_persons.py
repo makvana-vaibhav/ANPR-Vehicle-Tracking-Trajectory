@@ -531,6 +531,69 @@ class TestMatchToAlarm:
         assert count == 1
         assert consumer.person_matches == 3 and consumer.person_alerts == 1
 
+    async def test_an_open_alarm_absorbs_repeats_after_the_window_until_closed(
+        self, client: AsyncClient, auth_headers, faces_camera, published
+    ) -> None:
+        """A person who stays in view — or a looping clip — must not raise a
+        fresh alarm every window while the first is still waiting for someone."""
+        from app.services import alerts as alert_service
+
+        camera_id, code = faces_camera
+        entry = await _active_entry(client, auth_headers)
+        consumer = EventConsumer()
+
+        async def raise_after_window() -> list[Alert]:
+            # Past the time window, both in the record and in the shared claim,
+            # so only the open-alert rule can fold the repeat.
+            async with SessionLocal() as session:
+                await session.execute(
+                    update(Alert)
+                    .where(Alert.camera_id == camera_id)
+                    .values(
+                        created_at=datetime.now(UTC)
+                        - timedelta(seconds=settings.person_match_dedup_seconds + 60)
+                    )
+                )
+                await session.commit()
+            await alert_service.deduper.clear()
+            await consumer._raise_person_matches([_match_event(entry["id"], code)])
+            async with SessionLocal() as session:
+                return list(
+                    (
+                        await session.execute(
+                            select(Alert)
+                            .where(Alert.camera_id == camera_id)
+                            .order_by(Alert.created_at)
+                        )
+                    ).scalars()
+                )
+
+        await consumer._raise_person_matches([_match_event(entry["id"], code)])
+        assert len(await raise_after_window()) == 1, "open alarm absorbs the repeat"
+
+        # Acknowledged is still open.
+        async with SessionLocal() as session:
+            await session.execute(
+                update(Alert)
+                .where(Alert.camera_id == camera_id)
+                .values(status=AlertStatus.ACKNOWLEDGED.value)
+            )
+            await session.commit()
+        assert len(await raise_after_window()) == 1, "acknowledged is still open"
+
+        # Once closed, the next match is a new alarm.
+        async with SessionLocal() as session:
+            await session.execute(
+                update(Alert)
+                .where(Alert.camera_id == camera_id)
+                .values(status=AlertStatus.CLOSED.value)
+            )
+            await session.commit()
+        after_close = await raise_after_window()
+        assert len(after_close) == 2
+        assert after_close[-1].status == AlertStatus.NEW.value
+        assert consumer.person_alerts == 2
+
     @pytest.mark.parametrize(
         ("override", "why"),
         [

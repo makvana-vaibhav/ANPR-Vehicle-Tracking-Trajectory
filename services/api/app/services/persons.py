@@ -25,7 +25,8 @@ The alert is always `high`, never `critical`, and always a *possible* match:
 it carries its reasons (similarity against threshold, frames agreed, margin
 over the next-closest entry, what the entry is held for) and a person must
 compare the two faces before anyone acts. Repeats on the same entry at the same
-camera within `PERSON_MATCH_DEDUP_SECONDS` fold into the alert already raised.
+camera within `PERSON_MATCH_DEDUP_SECONDS`, or while the alert already raised
+there is still open, fold into that alert.
 
 ## Expiry and retention
 
@@ -82,6 +83,13 @@ MEDIA_SWEEP_EVERY_S = 3600.0
 #: Objects deleted per media sweep, so one pass over a large backlog cannot
 #: hold a transaction for minutes.
 MEDIA_SWEEP_BATCH = 200
+
+#: An alert still needing a person — the same set the alarm list calls open.
+OPEN_ALERT_STATUSES = (
+    AlertStatus.NEW.value,
+    AlertStatus.ACKNOWLEDGED.value,
+    AlertStatus.DISPATCHED.value,
+)
 
 CATEGORY_WORDS = {
     PersonCategory.MISSING.value: "reported missing",
@@ -369,6 +377,13 @@ async def raise_for_match(
     Redis restart), and by a claim in Redis (which closes the race the first
     check leaves open — two consumer replicas, each in its own transaction,
     would both find nothing committed and both raise).
+
+    The committed check folds a repeat into any alert raised inside the window
+    **or still open** for the same entry at the same camera. The window alone
+    let a person who stays in view — or a looping demonstration clip — raise a
+    fresh alarm every few minutes, which buried the one an operator had yet to
+    look at under copies of itself. A new alarm is raised once the open one has
+    been closed or dismissed.
     """
     entry = await session.get(PersonEntry, event.person.id)
     refusal = _policy_refusal(event, entry)
@@ -382,13 +397,19 @@ async def raise_for_match(
         return None
 
     window_start = _now() - timedelta(seconds=settings.person_match_dedup_seconds)
+    # A window of 0 turns deduplication off — the open-alert fold with it.
+    recent_or_open = (
+        or_(Alert.created_at >= window_start, Alert.status.in_(OPEN_ALERT_STATUSES))
+        if settings.person_match_dedup_seconds > 0
+        else Alert.created_at >= window_start
+    )
     repeat = await session.scalar(
         select(Alert.id)
         .where(
             Alert.alert_type == AlertType.PERSON_MATCH.value,
             Alert.person_id == entry.id,
             Alert.camera_id == camera_id if camera_id is not None else Alert.camera_id.is_(None),
-            Alert.created_at >= window_start,
+            recent_or_open,
         )
         .order_by(Alert.created_at.desc())
         .limit(1)
