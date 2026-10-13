@@ -1,9 +1,25 @@
 <!doctype html>
-<html lang="en" class="dark">
+<html lang="en" class="dark" data-theme="dark">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta name="color-scheme" content="dark" />
+    <meta name="color-scheme" content="dark light" />
+    <!-- The theme before the first paint (see src/lib/theme.ts): the stored
+         choice, else the operating system's. Storage may throw; dark wins. -->
+    <script>
+      (function () {
+        var theme = 'dark'
+        try {
+          var stored = window.localStorage.getItem('contrail.theme')
+          if (stored === 'light' || stored === 'dark') theme = stored
+          else if (window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches) theme = 'light'
+        } catch (e) {}
+        var root = document.documentElement
+        root.setAttribute('data-theme', theme)
+        if (theme !== 'dark') root.classList.remove('dark')
+        root.style.colorScheme = theme
+      })()
+    </script>
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <meta
       name="description"

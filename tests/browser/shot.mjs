@@ -1,8 +1,10 @@
 // Screenshot screens of the running app, signed in.
 //
 //   node shot.mjs [--base http://localhost:8080] [--out out/shots] [--size 1440x900]
-//                 [--wait 6000] page [page ...]
+//                 [--wait 6000] [--theme light|dark] page [page ...]
 //
+// --theme emulates the operating system's colour scheme (the app follows it
+// unless a choice is stored), and suffixes each file name with the theme.
 // A page is a path without its leading slash ("dashboard", "vehicles?plate=GJ01AB1234").
 // Prints any console errors per page. Never opens grid cameras.
 import { mkdirSync } from 'node:fs'
@@ -21,6 +23,7 @@ const BASE = opt('base', 'http://localhost:8080')
 const OUT = opt('out', new URL('./out/shots', import.meta.url).pathname)
 const [W, H] = opt('size', '1440x900').split('x').map(Number)
 const WAIT = Number(opt('wait', '6000'))
+const THEME = opt('theme', null)
 const PAGES = args.length ? args : ['dashboard']
 
 if (PAGES.some((p) => /camera=SBX-/i.test(p))) {
@@ -30,7 +33,10 @@ if (PAGES.some((p) => /camera=SBX-/i.test(p))) {
 mkdirSync(OUT, { recursive: true })
 const { token } = await login()
 const browser = await launch()
-const context = await browser.newContext({ viewport: { width: W, height: H } })
+const context = await browser.newContext({
+  viewport: { width: W, height: H },
+  ...(THEME ? { colorScheme: THEME } : {}),
+})
 await guardGrid(context)
 await signInByToken(context, token)
 const page = await context.newPage()
@@ -42,7 +48,7 @@ for (const path of PAGES) {
   errors = []
   await page.goto(`${BASE}/${path}`)
   await page.waitForTimeout(WAIT)
-  const file = `${OUT}/${path.replace(/[/?=&]/g, '_') || 'root'}.png`
+  const file = `${OUT}/${path.replace(/[/?=&]/g, '_') || 'root'}${THEME ? `.${THEME}` : ''}.png`
   await page.screenshot({ path: file })
   console.log(`captured ${path} -> ${file}`)
   if (errors.length) console.log('  console errors:', [...new Set(errors)].slice(0, 5))

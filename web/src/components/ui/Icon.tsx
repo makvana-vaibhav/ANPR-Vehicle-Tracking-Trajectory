@@ -54,6 +54,9 @@ export type IconName =
   | 'filter'
   | 'refresh'
   | 'live'
+  | 'sun'
+  | 'moon'
+  | 'monitor'
 
 /**
  * Path data only — every wrapper attribute is applied once, below, so a glyph
@@ -99,6 +102,9 @@ const PATHS: Record<IconName, string> = {
   filter: 'M4 5h16l-6 7.5V19l-4 1.5v-8z',
   refresh: 'M20 11a8 8 0 0 0-14.8-4M4 4v4h4M4 13a8 8 0 0 0 14.8 4M20 20v-4h-4',
   live: 'M7.8 16.2a6 6 0 0 1 0-8.4M16.2 7.8a6 6 0 0 1 0 8.4M4.9 19.1a10 10 0 0 1 0-14.2M19.1 4.9a10 10 0 0 1 0 14.2M12 13a1 1 0 1 0 0-2 1 1 0 0 0 0 2z',
+  sun: 'M12 16a4 4 0 1 0 0-8 4 4 0 0 0 0 8zM12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4',
+  moon: 'M20 14.5A8 8 0 1 1 9.5 4a6.5 6.5 0 0 0 10.5 10.5z',
+  monitor: 'M3 5h18v11H3zM8 20h8M12 16v4',
 }
 
 interface IconProps extends Omit<SVGProps<SVGSVGElement>, 'name'> {

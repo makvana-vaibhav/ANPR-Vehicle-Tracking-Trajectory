@@ -13,6 +13,7 @@ import { useCallback, useEffect, useState } from 'react'
 
 import { useAuth } from '@/hooks/useAuth'
 import { useEventStream } from '@/hooks/useEventStream'
+import { isPersonAlarm } from '@/lib/alarms'
 import * as api from '@/lib/api'
 import { PERMISSIONS } from '@/lib/permissions'
 
@@ -34,12 +35,18 @@ export function useOpenAlarms(): OpenAlarms {
     if (!allowed) return
     try {
       // Sorted most severe first, so every critical alarm is on the first
-      // page unless more than fifty are open at once — at which point the
-      // badge saying "50+ critical" would not change what anyone does.
-      const page = await api.getAlerts({ open_only: true, sort: 'priority', limit: 50 })
+      // page unless more than 200 are open at once — at which point the
+      // badge would not change what anyone does.
+      //
+      // Persons-watchlist matches are left out: they have their own lane on
+      // the Alarms screen (Persons), and the badge counts what the default
+      // queue shows — vehicles and cameras.
+      const page = await api.getAlerts({ open_only: true, sort: 'priority', limit: 200 })
+      const persons = page.items.filter((a) => isPersonAlarm(a.alert_type)).length
       setState({
-        open: page.total,
-        critical: page.items.filter((a) => a.priority === 'critical').length,
+        open: Math.max(0, page.total - persons),
+        critical: page.items.filter((a) => a.priority === 'critical' && !isPersonAlarm(a.alert_type))
+          .length,
       })
     } catch {
       // The badge is a convenience; the Alarms screen reports its own errors.

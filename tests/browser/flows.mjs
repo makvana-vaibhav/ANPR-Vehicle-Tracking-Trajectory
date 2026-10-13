@@ -67,12 +67,12 @@ await step('sign-in', async () => {
   await page.getByRole('button', { name: /sign in/i }).click()
   await page.waitForURL(/\/dashboard/, { timeout: 15000 })
   await page.getByRole('navigation', { name: 'Workspaces' }).waitFor({ timeout: 10000 })
-  return 'landed on Command'
+  return 'landed on the Overview'
 })
 
 await step('command', async () => {
   await page.goto(`${BASE}/dashboard`)
-  await page.getByText('Feeds answering').waitFor({ timeout: 15000 })
+  await page.getByText(/cameras online/).first().waitFor({ timeout: 15000 })
   await page.locator('.maplibregl-canvas').waitFor({ timeout: 15000 })
   const strip = page.getByRole('region', { name: 'Reading now' })
   await strip.locator('.plate-chip').first().waitFor({ timeout: 30000 })

@@ -21,6 +21,7 @@ import { useEventStream } from '@/hooks/useEventStream'
 import { useOpenAlarms } from '@/hooks/useOpenAlarms'
 import { landingFor, locate, visiblePages, WORKSPACES } from '@/lib/nav'
 import { ROLE_SUMMARY } from '@/lib/permissions'
+import { useTheme, type ThemeChoice } from '@/lib/theme'
 
 /** "⌘K" on a Mac, "Ctrl K" elsewhere — the hint should name the keys the
  *  operator actually has. */
@@ -75,13 +76,13 @@ export default function TopBar({ onOpenSearch }: { onOpenSearch: () => void }) {
                 to={w.usable[0]?.to ?? '/'}
                 aria-current={active ? 'page' : undefined}
                 title={w.hint}
-                className={`flex shrink-0 items-center gap-2 border-b-2 px-2.5 text-[13px] transition xl:px-3 ${
+                className={`flex shrink-0 items-center gap-2 border-b-2 px-3 text-[14px] transition ${
                   active
                     ? 'border-primary font-medium text-foreground'
                     : 'border-transparent text-muted-foreground hover:text-foreground'
                 }`}
               >
-                <Icon name={w.icon} size={16} className="hidden md:block lg:hidden" />
+                <Icon name={w.icon} size={16} className="hidden md:block lg:hidden xl:block" />
                 {/* Words on a phone's own row and on a wide screen; icons only
                     in the squeeze between, where the row has to share. */}
                 <span className="md:hidden lg:inline">{w.label}</span>
@@ -98,13 +99,14 @@ export default function TopBar({ onOpenSearch }: { onOpenSearch: () => void }) {
           className="my-2 flex h-[34px] min-w-0 flex-1 basis-24 items-center gap-2.5 rounded-lg border border-input bg-background px-2.5 text-left text-[13px] text-faint transition hover:border-muted-foreground/50 md:my-0 md:max-w-[420px]"
         >
           <Icon name="search" size={15} />
-          <span className="hidden truncate sm:inline">Plate, camera or screen</span>
+          <span className="hidden truncate sm:inline">Search a plate or camera</span>
           <span className="kbd ml-auto hidden sm:inline-flex">{shortcutLabel()}</span>
         </button>
 
-        <div className="ml-auto flex shrink-0 items-center gap-3">
+        <div className="ml-auto flex shrink-0 items-center gap-2.5">
           <PursuitPill />
           <FeedPill />
+          <ThemeToggle />
           <AccountMenu />
         </div>
       </div>
@@ -113,17 +115,14 @@ export default function TopBar({ onOpenSearch }: { onOpenSearch: () => void }) {
       {current && subPages.length > 1 && (
         <nav
           aria-label={`${current.label} screens`}
-          className="flex h-10 items-center gap-1 overflow-x-auto border-t border-border/60 px-4"
+          className="flex h-11 items-center gap-1 overflow-x-auto border-t border-border/60 px-4"
         >
-          <span className="mr-2 text-[11px] font-medium uppercase tracking-[0.06em] text-faint">
-            {current.label}
-          </span>
           {subPages.map((page) => (
             <NavLink
               key={page.to}
               to={page.to}
               className={({ isActive }) =>
-                `whitespace-nowrap rounded-md px-2.5 py-1 text-[13px] transition ${
+                `whitespace-nowrap rounded-md px-3 py-1.5 text-[13px] transition ${
                   isActive || here?.page.to === page.to
                     ? 'bg-secondary text-foreground shadow-[inset_0_0_0_1px_hsl(var(--input))]'
                     : 'text-muted-foreground hover:bg-secondary/50 hover:text-foreground'
@@ -202,6 +201,60 @@ function FeedPill() {
   )
 }
 
+/** One click between light and dark. The account menu also offers "System". */
+function ThemeToggle() {
+  const { resolved, setChoice } = useTheme()
+  const next = resolved === 'dark' ? 'light' : 'dark'
+  return (
+    <button
+      type="button"
+      onClick={() => setChoice(next)}
+      aria-label={`Switch to ${next} theme`}
+      title={`Switch to ${next} theme`}
+      className="grid h-8 w-8 place-items-center rounded-full text-muted-foreground transition hover:bg-secondary hover:text-foreground"
+    >
+      <Icon name={resolved === 'dark' ? 'sun' : 'moon'} size={17} />
+    </button>
+  )
+}
+
+const THEME_OPTIONS: { value: ThemeChoice; label: string; icon: 'monitor' | 'sun' | 'moon' }[] = [
+  { value: 'system', label: 'System', icon: 'monitor' },
+  { value: 'light', label: 'Light', icon: 'sun' },
+  { value: 'dark', label: 'Dark', icon: 'moon' },
+]
+
+function ThemeChoices() {
+  const { choice, setChoice } = useTheme()
+  return (
+    <div className="border-b border-border px-3 py-2.5">
+      <p className="mb-1.5 text-xs text-muted-foreground">Theme</p>
+      <div role="radiogroup" aria-label="Theme" className="flex gap-1 rounded-md border border-border p-0.5">
+        {THEME_OPTIONS.map((option) => {
+          const active = choice === option.value
+          return (
+            <button
+              key={option.value}
+              type="button"
+              role="radio"
+              aria-checked={active}
+              onClick={() => setChoice(option.value)}
+              className={`flex h-8 flex-1 items-center justify-center gap-1.5 rounded text-xs transition ${
+                active
+                  ? 'bg-secondary font-medium text-foreground'
+                  : 'text-muted-foreground hover:text-foreground'
+              }`}
+            >
+              <Icon name={option.icon} size={14} />
+              {option.label}
+            </button>
+          )
+        })}
+      </div>
+    </div>
+  )
+}
+
 function initialsOf(name: string): string {
   const words = name.trim().split(/[\s._-]+/).filter(Boolean)
   if (words.length >= 2) return `${words[0]?.charAt(0) ?? ''}${words[1]?.charAt(0) ?? ''}`.toUpperCase()
@@ -274,6 +327,7 @@ function AccountMenu() {
               {ROLE_SUMMARY[user.role] ?? ''}
             </p>
           </div>
+          <ThemeChoices />
           <Link
             to="/password"
             role="menuitem"

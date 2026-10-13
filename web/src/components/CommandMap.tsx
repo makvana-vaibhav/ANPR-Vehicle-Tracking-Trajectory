@@ -29,15 +29,32 @@ import { useEventStream } from '@/hooks/useEventStream'
 import { GUJARAT_CENTER } from '@/lib/basemap'
 import { createMap } from '@/lib/maps'
 import type { Place } from '@/lib/places'
+import { mapPalette, useTheme, type MapPalette } from '@/lib/theme'
 
-/* Map paint cannot take Tailwind classes, so the tokens it needs are repeated
-   here by value — keep them in step with styles/index.css. */
-const GROUND = '#0A0E13' // --background
-const LAND = '#0F1620' // a step above the ground, below a panel
-const BOUNDARY = '#1F2A36' // just above --border
-const TRAIL = '#5CC8FF' // --primary, the trail
-const CRITICAL = '#FF5C55' // --priority-critical
-const PLACE = '#C9D3DD' // a place with cameras: light, but below --foreground
+/* Map paint cannot take Tailwind classes or CSS variables, so the colours come
+   from lib/theme's palette for the current theme and are repainted when it
+   changes. HTML markers use the CSS variables directly and follow by
+   themselves. */
+
+function trailGradient(palette: MapPalette, alpha: number): maplibregl.ExpressionSpecification {
+  const [r, g, b] = palette.trailRgb
+  return ['interpolate', ['linear'], ['line-progress'], 0, `rgba(${r}, ${g}, ${b}, 0)`, 1, `rgba(${r}, ${g}, ${b}, ${alpha})`]
+}
+
+/** Repaint every layer this map owns that exists yet. */
+function paintMap(map: maplibregl.Map, palette: MapPalette): void {
+  const set = (layer: string, property: string, value: unknown) => {
+    if (map.getLayer(layer)) map.setPaintProperty(layer, property, value)
+  }
+  set('background', 'background-color', palette.ground)
+  set('districts-fill', 'fill-color', palette.land)
+  set('districts-line', 'line-color', palette.boundary)
+  set('trail-glow', 'line-gradient', trailGradient(palette, 0.35))
+  set('trail-line', 'line-gradient', trailGradient(palette, 0.95))
+  set('trail-doubt', 'line-color', palette.critical)
+  set('trail-heads', 'circle-color', palette.trail)
+  set('trail-heads', 'circle-stroke-color', palette.ground)
+}
 
 export interface Trail {
   plate: string
@@ -105,6 +122,10 @@ export default function CommandMap({
   const [ready, setReady] = useState(false)
   const [unavailable, setUnavailable] = useState(false)
   const { subscribe } = useEventStream()
+  const { resolved } = useTheme()
+  const palette = mapPalette(resolved)
+  const paletteRef = useRef(palette)
+  paletteRef.current = palette
 
   onSelectRef.current = onSelect
   placesRef.current = places
@@ -117,7 +138,13 @@ export default function CommandMap({
       style: {
         version: 8,
         sources: {},
-        layers: [{ id: 'background', type: 'background', paint: { 'background-color': GROUND } }],
+        layers: [
+          {
+            id: 'background',
+            type: 'background',
+            paint: { 'background-color': paletteRef.current.ground },
+          },
+        ],
       },
       center: GUJARAT_CENTER,
       zoom: 6.2,
@@ -164,7 +191,12 @@ export default function CommandMap({
       map.addSource('districts', { type: 'geojson', data: districts })
       const before = map.getLayer('trail-glow') ? 'trail-glow' : undefined
       map.addLayer(
-        { id: 'districts-fill', type: 'fill', source: 'districts', paint: { 'fill-color': LAND } },
+        {
+          id: 'districts-fill',
+          type: 'fill',
+          source: 'districts',
+          paint: { 'fill-color': paletteRef.current.land },
+        },
         before,
       )
       map.addLayer(
@@ -172,7 +204,7 @@ export default function CommandMap({
           id: 'districts-line',
           type: 'line',
           source: 'districts',
-          paint: { 'line-color': BOUNDARY, 'line-width': 0.8 },
+          paint: { 'line-color': paletteRef.current.boundary, 'line-width': 0.8 },
         },
         before,
       )
@@ -217,15 +249,7 @@ export default function CommandMap({
     // first sighting, full at the last — which is the whole idea of a trail.
     map.addSource('trails', { type: 'geojson', data: lines, lineMetrics: true })
     map.addSource('trail-heads', { type: 'geojson', data: heads })
-    const gradient = (alpha: number): maplibregl.ExpressionSpecification => [
-      'interpolate',
-      ['linear'],
-      ['line-progress'],
-      0,
-      'rgba(92, 200, 255, 0)',
-      1,
-      `rgba(92, 200, 255, ${alpha})`,
-    ]
+    const gradient = (alpha: number) => trailGradient(paletteRef.current, alpha)
     map.addLayer({
       id: 'trail-glow',
       type: 'line',
@@ -250,7 +274,7 @@ export default function CommandMap({
       source: 'trails',
       filter: ['==', ['get', 'plausible'], false],
       paint: {
-        'line-color': CRITICAL,
+        'line-color': paletteRef.current.critical,
         'line-width': 1.6,
         'line-opacity': 0.8,
         'line-dasharray': [2, 2.5],
@@ -262,8 +286,8 @@ export default function CommandMap({
       source: 'trail-heads',
       paint: {
         'circle-radius': 3.5,
-        'circle-color': TRAIL,
-        'circle-stroke-color': GROUND,
+        'circle-color': paletteRef.current.trail,
+        'circle-stroke-color': paletteRef.current.ground,
         'circle-stroke-width': 1.5,
       },
     })
@@ -335,6 +359,13 @@ export default function CommandMap({
     layoutLabels(map, places, markers.current)
   }, [ready, places])
 
+  // The theme changed: repaint what MapLibre draws. Markers follow by CSS.
+  useEffect(() => {
+    const map = mapRef.current
+    if (!ready || !map) return
+    paintMap(map, palette)
+  }, [ready, palette])
+
   // Rings: reading, alarm, selected. Cheap enough to run on every change.
   useEffect(() => {
     for (const place of places) {
@@ -343,7 +374,7 @@ export default function CommandMap({
       const isAlarmed = place.cameras.some((c) => alarmed.has(c.id))
       const isReading = place.cameras.some((c) => reading.has(c.camera_code))
       parts.ring.style.display = isAlarmed || isReading ? 'block' : 'none'
-      parts.ring.style.borderColor = isAlarmed ? CRITICAL : TRAIL
+      parts.ring.style.borderColor = isAlarmed ? 'hsl(var(--priority-critical))' : 'hsl(var(--primary))'
       parts.halo.style.display = place.key === selectedKey ? 'block' : 'none'
       parts.label.classList.toggle('text-foreground', place.key === selectedKey)
       parts.label.classList.toggle('text-muted-foreground', place.key !== selectedKey)
@@ -408,7 +439,7 @@ function buildMarker(place: Place, size: number, onClick: () => void): MarkerPar
 
   const dot = document.createElement('span')
   dot.className = 'absolute inset-0 rounded-full shadow-[0_0_0_2px_hsl(var(--background))]'
-  dot.style.background = PLACE
+  dot.style.background = 'hsl(var(--place))'
 
   const ring = document.createElement('span')
   ring.className = 'pointer-events-none absolute left-1/2 top-1/2 rounded-full border-[1.5px]'
@@ -427,7 +458,7 @@ function buildMarker(place: Place, size: number, onClick: () => void): MarkerPar
 
   const label = document.createElement('span')
   label.className =
-    'pointer-events-none absolute whitespace-nowrap text-[12px] leading-none text-muted-foreground [text-shadow:0_1px_2px_#0A0E13,0_0_6px_#0A0E13]'
+    'pointer-events-none absolute whitespace-nowrap text-[12px] leading-none text-muted-foreground [text-shadow:0_1px_2px_hsl(var(--background)),0_0_6px_hsl(var(--background))]'
   if (place.cameras.length >= 4) label.classList.add('font-medium', 'text-[13px]')
 
   root.append(halo, ring, dot, label)

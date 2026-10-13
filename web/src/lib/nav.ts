@@ -1,16 +1,17 @@
 /**
  * The workspaces, and the screens inside each.
  *
- * Eleven screens in one flat list said nothing about which belong together.
- * Six workspaces say what each is for — what is happening now (Command, Live),
- * what already happened (Investigate), what needs someone (Alarms), the
- * estate itself (Network), the roads in aggregate (Insights) — and a seventh,
- * Admin, that most roles never see.
+ * Named for the job a constable or control-room operator came to do, in plain
+ * words: see the network (Overview), watch cameras (Live), look a vehicle up
+ * (Search), handle what needs a person (Alarms), look after the cameras
+ * (Cameras). Traffic figures and administration are secondary and share one
+ * last tab, More. Every route keeps its path — only the labels and grouping
+ * changed — so deep links and the browser flows still land.
  *
- * A screen appears only to a role that can use it. An auditor shown "Vehicle
- * search" only to be refused on arrival learns that this system's errors are
- * noise, which is an expensive thing to teach a control room. A workspace
- * with no usable screen is not shown at all.
+ * A screen appears only to a role that can use it. An auditor shown "Search"
+ * only to be refused on arrival learns that this system's errors are noise,
+ * which is an expensive thing to teach a control room. A workspace with no
+ * usable screen is not shown at all.
  */
 
 import type { IconName } from '@/components/ui'
@@ -37,27 +38,27 @@ export interface Workspace {
 export const WORKSPACES: Workspace[] = [
   {
     key: 'command',
-    label: 'Command',
+    label: 'Overview',
     icon: 'dashboard',
-    hint: 'The state of the network, now',
-    pages: [{ to: '/dashboard', label: 'Command', needs: PERMISSIONS.cameraRead }],
+    hint: 'Map, open alarms and plates being read',
+    pages: [{ to: '/dashboard', label: 'Overview', needs: PERMISSIONS.cameraRead }],
   },
   {
     key: 'live',
     label: 'Live',
     icon: 'video',
-    hint: 'Watch a camera and its plate reads',
-    pages: [{ to: '/anpr', label: 'Live ANPR', needs: PERMISSIONS.streamView }],
+    hint: 'Watch a camera and the plates it reads',
+    pages: [{ to: '/anpr', label: 'Live cameras', needs: PERMISSIONS.streamView }],
   },
   {
     key: 'investigate',
-    label: 'Investigate',
+    label: 'Search',
     icon: 'search',
-    hint: "A vehicle's journey, its sightings and its registration",
+    hint: 'Find a vehicle by plate and see where it has been',
     pages: [
       {
         to: '/vehicles',
-        label: 'Vehicles',
+        label: 'Search vehicle',
         needs: PERMISSIONS.searchExecute,
         also: ['/reports/vehicle'],
       },
@@ -69,7 +70,7 @@ export const WORKSPACES: Workspace[] = [
     key: 'alarms',
     label: 'Alarms',
     icon: 'alert',
-    hint: 'What needs a person, most severe first',
+    hint: 'Watched vehicles seen, and cameras that stopped',
     pages: [
       { to: '/alerts', label: 'Alarms', needs: PERMISSIONS.alertRead },
       { to: '/watchlist', label: 'Watchlist', needs: PERMISSIONS.watchlistRead },
@@ -80,28 +81,22 @@ export const WORKSPACES: Workspace[] = [
   },
   {
     key: 'network',
-    label: 'Network',
-    icon: 'map',
-    hint: 'Cameras, where they are, and their health',
+    label: 'Cameras',
+    icon: 'camera',
+    hint: 'Where the cameras are, their health, adding one',
     pages: [
       { to: '/map', label: 'Map', needs: PERMISSIONS.cameraRead },
-      { to: '/cameras', label: 'Cameras', needs: PERMISSIONS.cameraRead },
-      { to: '/health', label: 'Fleet health', needs: PERMISSIONS.cameraRead },
+      { to: '/cameras', label: 'All cameras', needs: PERMISSIONS.cameraRead },
+      { to: '/health', label: 'Health', needs: PERMISSIONS.cameraRead },
     ],
   },
   {
-    key: 'insights',
-    label: 'Insights',
+    key: 'more',
+    label: 'More',
     icon: 'chart',
-    hint: 'Traffic: flow, speed, congestion',
-    pages: [{ to: '/traffic', label: 'Traffic', needs: PERMISSIONS.analyticsRead }],
-  },
-  {
-    key: 'admin',
-    label: 'Admin',
-    icon: 'shield',
-    hint: 'Accounts and the audit trail',
+    hint: 'Traffic figures, accounts and the audit trail',
     pages: [
+      { to: '/traffic', label: 'Traffic', needs: PERMISSIONS.analyticsRead },
       { to: '/users', label: 'Accounts', needs: PERMISSIONS.userRead },
       { to: '/audit', label: 'Audit trail', needs: PERMISSIONS.auditRead },
     ],

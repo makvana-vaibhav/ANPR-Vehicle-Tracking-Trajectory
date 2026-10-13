@@ -26,9 +26,10 @@
 /*
   Contrail command centre — theme tokens.
 
-  Dark is the default and the only theme: this renders on control-room displays
-  that stay on for eight-hour shifts. Values are raw HSL triples so Tailwind can
-  compose them with opacity modifiers (bg-status-online/20).
+  Dark is the base (control-room displays that stay on for eight-hour shifts);
+  a light set follows below for bright rooms — see lib/theme.ts. Values are raw
+  HSL triples so Tailwind can compose them with opacity modifiers
+  (bg-status-online/20).
 
   The rule the palette serves: grey when normal, colour means a person is
   needed. One accent — the trail — marks selection, links and what is being
@@ -137,6 +138,73 @@
     /* The "everything else" band. Neutral on purpose — it is an absence of
        identity, not a fifth identity. */
     --chart-other: 215 16% 47%;
+  }
+
+  /* ── Light ───────────────────────────────────────────────────────────
+     The same roles, for a bright room. Set by lib/theme.ts (and index.html
+     before first paint) as data-theme="light" on <html>.
+
+     Every text colour clears 4.5:1 on --card (white) and on --background:
+     foreground ~15:1, muted ~7:1, faint ~4.8:1, the trail ~5:1. Severity
+     colours are darker than their dark-theme selves so they read as text on
+     white; a filled severity badge takes white ink. The plate stays a plate. */
+  :root[data-theme='light'] {
+    --background: 210 22% 96%;
+    --foreground: 215 30% 12%;
+
+    --card: 0 0% 100%;
+    --card-foreground: 215 30% 12%;
+
+    --popover: 0 0% 100%;
+    --popover-foreground: 215 30% 12%;
+
+    --primary: 201 92% 36%;
+    --primary-foreground: 0 0% 100%;
+
+    --secondary: 213 22% 91%;
+    --secondary-foreground: 215 30% 12%;
+
+    --muted: 213 22% 93%;
+    --muted-foreground: 215 16% 32%;
+    --faint: 215 11% 44%;
+
+    --accent: 201 92% 36%;
+    --accent-foreground: 0 0% 100%;
+
+    --destructive: 0 70% 45%;
+    --destructive-foreground: 0 0% 100%;
+
+    --border: 213 20% 86%;
+    --input: 213 18% 76%;
+    --ring: 201 92% 36%;
+
+    --plate: 0 0% 100%;
+    --plate-ink: 216 18% 5%;
+    --plate-strip: 224 75% 42%;
+
+    --status-online: 201 92% 36%;
+    --status-offline: 0 70% 45%;
+    --status-degraded: 28 92% 36%;
+    --status-unknown: 215 11% 44%;
+
+    --priority-critical: 0 70% 45%;
+    --priority-high: 28 92% 36%;
+    --priority-medium: 221 72% 47%;
+    --priority-low: 215 16% 38%;
+    --priority-critical-ink: 0 0% 100%;
+    --priority-high-ink: 0 0% 100%;
+    --priority-medium-ink: 0 0% 100%;
+
+    --chrome: 0 0% 100%;
+    --place: 214 20% 30%;
+
+    /* Same hues as the dark set, a step darker so each mark clears 3:1 on
+       white. */
+    --chart-1: 213 77% 46%;
+    --chart-2: 17 78% 46%;
+    --chart-3: 159 75% 29%;
+    --chart-4: 36 100% 33%;
+    --chart-other: 215 14% 58%;
   }
 
   * {
@@ -317,6 +385,9 @@
 }
 .maplibregl-map .maplibregl-ctrl-group button .maplibregl-ctrl-icon {
   filter: invert(0.85);
+}
+:root[data-theme='light'] .maplibregl-map .maplibregl-ctrl-group button .maplibregl-ctrl-icon {
+  filter: none;
 }
 .maplibregl-map .maplibregl-ctrl-scale {
   @apply border-border bg-card/80 text-[10px] text-muted-foreground;

@@ -30,7 +30,7 @@ describe('workspaces', () => {
     expect(new Set(paths).size).toBe(paths.length)
   })
 
-  it('lead with Command', () => {
+  it('lead with the Overview', () => {
     expect(WORKSPACES[0]?.key).toBe('command')
     expect(landingFor(everything)).toBe('/dashboard')
   })

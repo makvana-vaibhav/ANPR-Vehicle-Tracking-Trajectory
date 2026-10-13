@@ -10,15 +10,26 @@ function capitalise(text: string): string {
   return text.charAt(0).toUpperCase() + text.slice(1)
 }
 
-export type AlarmKind = 'watchlist' | 'journey' | 'camera' | 'other'
+export type AlarmKind = 'watchlist' | 'journey' | 'camera' | 'person' | 'other'
+
+/**
+ * A persons-watchlist (face) match. Kept in its own lane: the default alarm
+ * queue, the Overview and the tab badge are about vehicles and cameras, and a
+ * face match is reached through Alarms → Persons. Nothing about the match or
+ * its safeguards changes — only where it is listed.
+ */
+export function isPersonAlarm(alertType: string): boolean {
+  return alertType === 'person_match'
+}
 
 /** The filter chip an alarm type counts under. */
 export function alarmKind(alertType: string): AlarmKind {
   switch (alertType) {
     case 'watchlist_hit':
     case 'possible_match':
-    case 'person_match':
       return 'watchlist'
+    case 'person_match':
+      return 'person'
     case 'anomaly':
     case 'speed':
     case 'convoy':

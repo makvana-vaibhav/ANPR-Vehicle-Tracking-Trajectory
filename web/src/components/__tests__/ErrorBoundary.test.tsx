@@ -35,7 +35,7 @@ describe('ErrorBoundary', () => {
     expect(screen.getByText('This screen stopped working')).toBeTruthy()
     expect(screen.getByText('the screen broke')).toBeTruthy()
     expect(screen.getByRole('button', { name: 'Try again' })).toBeTruthy()
-    expect(screen.getByRole('button', { name: 'Go to Command' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Go to Overview' })).toBeTruthy()
   })
 
   it('renders its children when nothing is wrong', () => {

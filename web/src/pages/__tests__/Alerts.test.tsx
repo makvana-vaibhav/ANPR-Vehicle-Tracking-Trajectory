@@ -20,7 +20,9 @@ import Alerts, {
   alarmKind,
   alarmTitle,
   collapseReasons,
+  filterByKind,
   groupQueue,
+  parseKind,
   parseScope,
   reconcileSelection,
   splitNotes,
@@ -613,9 +615,34 @@ describe('a possible person match', () => {
     vi.restoreAllMocks()
   })
 
-  it('is called a possible person match and counts with the watchlist alarms', () => {
+  it('is called a possible person match and has a lane of its own', () => {
     expect(alarmTitle({ alert_type: 'person_match', camera_id: 'cam-1' })).toBe('Possible person match')
-    expect(alarmKind('person_match')).toBe('watchlist')
+    expect(alarmKind('person_match')).toBe('person')
+  })
+
+  it('is left out of the default queue and shown under Persons', async () => {
+    vi.spyOn(api, 'getAlerts').mockResolvedValue(page([HIT, MATCH]))
+    renderAt('/alerts')
+    await waitFor(() => expect(within(queue()).getAllByText('Watched vehicle read').length).toBe(1))
+    expect(within(queue()).queryByText('Possible person match')).toBeNull()
+    fireEvent.click(within(queue()).getByRole('radio', { name: /Persons/ }))
+    await waitFor(() => expect(within(queue()).getAllByText('Possible person match').length).toBe(1))
+    expect(within(queue()).queryByText('Watched vehicle read')).toBeNull()
+  })
+
+  it('opens the persons lane from ?kind=persons', async () => {
+    vi.spyOn(api, 'getAlerts').mockResolvedValue(page([HIT, MATCH]))
+    renderAt('/alerts?kind=persons')
+    await waitFor(() => expect(within(queue()).getAllByText('Possible person match').length).toBe(1))
+    expect(within(queue()).queryByText('Watched vehicle read')).toBeNull()
+  })
+
+  it('filters by kind with face matches only in their own lane', () => {
+    const all = [HIT, MATCH, CAMERA_DOWN]
+    expect(filterByKind(all, 'all').map((a) => a.id)).toEqual(['alarm-hit', 'alarm-camera'])
+    expect(filterByKind(all, 'person').map((a) => a.id)).toEqual(['alarm-person'])
+    expect(parseKind('persons')).toBe('person')
+    expect(parseKind(null)).toBe('all')
   })
 
   it('shows the enrolled face and the captured face side by side, with the rule above them', async () => {

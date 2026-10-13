@@ -68,7 +68,7 @@ import {
 import { useAuth } from '@/hooks/useAuth'
 import { useEventStream } from '@/hooks/useEventStream'
 import * as api from '@/lib/api'
-import { alarmKind, alarmTitle, type AlarmKind } from '@/lib/alarms'
+import { alarmKind, alarmTitle, isPersonAlarm, type AlarmKind } from '@/lib/alarms'
 import { PERMISSIONS } from '@/lib/permissions'
 import { spacedPlate } from '@/lib/plates'
 import type {
@@ -178,7 +178,22 @@ const KIND_FILTERS: { value: KindFilter; label: string; noun: string }[] = [
   { value: 'journey', label: 'Journeys', noun: 'journey' },
   { value: 'camera', label: 'Cameras', noun: 'camera' },
   { value: 'other', label: 'Other', noun: 'other' },
+  // Face matches: a lane of their own, never mixed into "All" — the default
+  // queue is vehicles and cameras. Reached here, or by `?kind=persons`.
+  { value: 'person', label: 'Persons', noun: 'person' },
 ]
+
+/** `?kind=persons` opens the persons lane; anything else, the default. */
+export function parseKind(value: string | null): KindFilter {
+  return value === 'persons' ? 'person' : 'all'
+}
+
+/** The alarms a kind filter shows. "All" is every alarm except face matches. */
+export function filterByKind<T extends Pick<Alert, 'alert_type'>>(alerts: readonly T[], kind: KindFilter): T[] {
+  return kind === 'all'
+    ? alerts.filter((a) => !isPersonAlarm(a.alert_type))
+    : alerts.filter((a) => alarmKind(a.alert_type) === kind)
+}
 
 /** The next step, in a sentence, for the pane's "What to do". */
 function guidanceFor(alert: Alert): string {
@@ -465,7 +480,7 @@ export default function Alerts() {
   // Null until the first answer, so "not loaded yet" is never read as "the
   // entry does not exist".
   const [entries, setEntries] = useState<Map<string, WatchlistEntry> | null>(null)
-  const [kind, setKind] = useState<KindFilter>('all')
+  const [kind, setKind] = useState<KindFilter>(() => parseKind(searchParams.get('kind')))
   const [pages, setPages] = useState(1)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -630,15 +645,29 @@ export default function Alerts() {
   )
 
   const counts = useMemo(() => {
-    const tally: Record<KindFilter, number> = { all: alerts.length, watchlist: 0, journey: 0, camera: 0, other: 0 }
-    for (const alert of alerts) tally[alarmKind(alert.alert_type)] += 1
+    const tally: Record<KindFilter, number> = { all: 0, watchlist: 0, journey: 0, camera: 0, person: 0, other: 0 }
+    for (const alert of alerts) {
+      const k = alarmKind(alert.alert_type)
+      tally[k] += 1
+      if (k !== 'person') tally.all += 1
+    }
     return tally
   }, [alerts])
 
-  const filtered = useMemo(
-    () => (kind === 'all' ? alerts : alerts.filter((a) => alarmKind(a.alert_type) === kind)),
-    [alerts, kind],
-  )
+  const filtered = useMemo(() => filterByKind(alerts, kind), [alerts, kind])
+
+  // A link straight to a face match (from the Persons screen, or a shared
+  // address) opens the persons lane rather than "not in this list". Once per
+  // link, so the operator can still switch lanes afterwards.
+  const laneForRef = useRef<string | null>(null)
+  useEffect(() => {
+    if (!requestedId || laneForRef.current === requestedId) return
+    const asked = alerts.find((a) => a.id === requestedId)
+    if (!asked) return
+    laneForRef.current = requestedId
+    if (isPersonAlarm(asked.alert_type) && kind !== 'person') setKind('person')
+    else if (!isPersonAlarm(asked.alert_type) && kind === 'person') setKind('all')
+  }, [requestedId, alerts, kind])
   const groups = useMemo(() => groupQueue(filtered), [filtered])
   const ordered = useMemo(() => groups.flatMap((g) => g.alerts), [groups])
   const visibleIds = useMemo(() => ordered.map((a) => a.id), [ordered])
@@ -885,7 +914,9 @@ export default function Alerts() {
         <div className="flex flex-wrap items-center gap-x-3 gap-y-2 px-4 pb-3 pt-4">
           <h1 className="text-base font-semibold leading-tight">Alarms</h1>
           <span className="text-xs text-faint">
-            {loading ? '…' : `${total} ${scopeCaption}`} · most severe first
+            {loading
+              ? '…'
+              : `${kind === 'all' ? Math.max(0, total - counts.person) : counts[kind]} ${scopeCaption}`}
           </span>
           <InfoHint label="How the queue is ordered">
             Most severe first; within a severity, a watchlist hit — a known
@@ -916,7 +947,12 @@ export default function Alerts() {
           aria-label="Kind of alarm"
           className="flex flex-wrap gap-1.5 border-b border-border px-4 pb-3"
         >
-          {KIND_FILTERS.filter((k) => k.value !== 'other' || counts.other > 0).map((k) => {
+          {KIND_FILTERS.filter(
+            (k) =>
+              (k.value !== 'other' && k.value !== 'journey' && k.value !== 'person') ||
+              counts[k.value] > 0 ||
+              kind === k.value,
+          ).map((k) => {
             const active = kind === k.value
             return (
               <button
@@ -925,12 +961,15 @@ export default function Alerts() {
                 role="radio"
                 aria-checked={active}
                 onClick={() => setKind(k.value)}
-                className={`inline-flex h-7 items-center gap-1.5 rounded-md border px-2.5 text-xs transition ${
+                className={`inline-flex h-8 items-center gap-1.5 rounded-md border px-3 text-[13px] transition ${
+                  k.value === 'person' ? 'ml-auto' : ''
+                } ${
                   active
                     ? 'border-input bg-secondary text-foreground'
                     : 'border-border text-muted-foreground hover:border-input hover:text-foreground'
                 }`}
               >
+                {k.value === 'person' && <Icon name="users" size={14} />}
                 {k.label}
                 <span className={`font-mono text-[11px] ${active ? 'text-muted-foreground' : 'text-faint'}`}>
                   {loading ? '–' : counts[k.value]}

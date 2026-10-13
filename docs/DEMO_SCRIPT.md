@@ -21,17 +21,17 @@ mid-session: [PANIC.md](PANIC.md), and keep talking.
 
 ## 0. The screens
 
-Seven workspaces across the top bar; a role sees only the ones it can use.
+Six workspaces across the top bar, in plain words; a role sees only the ones it can use.
+The sun/moon button beside the account menu switches light and dark (the account menu also offers *System*, the default).
 
 | Workspace | Screen | What it is for on the day |
 |---|---|---|
-| **Command** | `/dashboard` | The network at a glance: map of towns, alarms docked beside it, plates arriving along the bottom ("Reading now") |
+| **Overview** | `/dashboard` | The network at a glance: a plate search box, "N of M cameras online" and "N reading plates", the map of towns, vehicle and camera alarms docked beside it, plates arriving along the bottom ("Reading now") |
 | **Live** | `/anpr` | One camera on the stage with its plate boxes; the rest in a rail |
-| **Investigate** | `/vehicles`, `/registries` | A plate in, its timestamped route out, candidate misreads, pursuit; CSV, printable report, plate-read export; VAHAN/SARTHI/eGujCop/AFIS lookups (reference data) |
-| **Alarms** | `/alerts`, `/watchlist`, `/persons` | The alarm queue (watchlist and person matches first), the vehicle watchlist, and the persons watchlist (four-eyes enrolment) |
-| **Network** | `/map`, `/cameras`, `/health` | GIS map, the camera registry and onboarding, fleet health |
-| **Insights** | `/traffic` | Counts, flow, congestion, forecast |
-| **Admin** | `/users`, `/audit` | Accounts and the audit trail |
+| **Search** | `/vehicles`, `/registries` | A plate in, its timestamped route out, candidate misreads, pursuit; CSV, printable report, plate-read export; VAHAN/SARTHI/eGujCop/AFIS lookups (reference data) |
+| **Alarms** | `/alerts`, `/watchlist`, `/persons` | The alarm queue (vehicles and cameras; face matches in their own **Persons** lane at the right of the filter row, or `/alerts?kind=persons`), the vehicle watchlist, and the persons watchlist (four-eyes enrolment) |
+| **Cameras** | `/map`, `/cameras`, `/health` | GIS map, the camera registry and onboarding (*All cameras*), fleet health (*Health*) |
+| **More** | `/traffic`, `/users`, `/audit` | Traffic (counts, flow, congestion, forecast), accounts, and the audit trail |
 
 **⌘K** (Ctrl K, or `/`) opens search from any screen: type a plate to open its
 journey, a camera code or place (`cam10`, `Paldi`) to open it, or a screen name.
@@ -82,10 +82,10 @@ In the browser at **http://localhost:8080** (use `localhost`, not `127.0.0.1` �
 accepts the page's own origin). Every demo account signs in with **`admin@123`**, already filled in:
 
 - [ ] Feed pill says **Live**
-- [ ] **Command** — the "Reading now" strip is moving and the recorded clip (CAM-DEMO-01) ripples
+- [ ] **Overview** — the "Reading now" strip is moving and the recorded clip (CAM-DEMO-01) ripples
 - [ ] **Alarms** — no test alarm left open (nothing with case `FIR/E2E/…` or a demo case from a rehearsal)
 - [ ] **Watchlist** — the ten `DEMO/…` entries are watched (§6); the plate you mean to add live is **not** already on it
-- [ ] **Network → Cameras** — 32 cameras: 30 from the organisers' grid, 2 recorded clips (CAM-DEMO-01 plates, CAM-DEMO-02 persons)
+- [ ] **Cameras → All cameras** — 32 cameras: 30 from the organisers' grid, 2 recorded clips (CAM-DEMO-01 plates, CAM-DEMO-02 persons)
 - [ ] **Alarms → Persons** — `DEMO/PERSONS/001` matched now; `DEMO/PERSONS/002` waiting for a second approver (keep it for the four-eyes moment, §2.4b)
 - [ ] Top bar shows **no** Pursuit pill (none left running from a rehearsal)
 - [ ] One browser tab only. A second tab on a grid camera spends the grid's watch quota twice
@@ -97,14 +97,15 @@ accepts the page's own origin). Every demo account signs in with **`admin@123`**
 About **13 minutes** for the full path. The short path (8 min) is steps 2.1,
 2.3, 2.4 and 2.5.
 
-### 2.1 Command — the network now (60 s)
+### 2.1 Overview — the network now (60 s)
 
 **Say:** departments keep their own cameras and recorders; we federate them.
 Only events cross the network; video is pulled only while someone watches.
 
-1. **Command.** Read the tiles aloud — each says what it counts. "Reading plates"
-   is cameras that read a plate in the last ten minutes, not cameras configured
-   to.
+1. **Overview.** Read the two figures aloud — each says what it counts. "N reading
+   plates" is cameras that read a plate in the last ten minutes, not cameras
+   configured to; "N of M cameras online" says how many are only last known
+   while the grid refuses us.
 2. Point at the map: towns, a ring where plates were read in the last ten
    minutes, a ripple per plate read live, contrails for vehicles seen at two or
    more cameras.
@@ -119,7 +120,7 @@ organisers' 30 and two recorded clips.** Say so; do not round up. The registry
 holds all 26 departments the brief lists; most grid cameras arrive with no
 department, and the screen says so rather than guessing one.
 
-1. **Network → Cameras.** The registry: each camera's department, integration,
+1. **Cameras → All cameras.** The registry: each camera's department, integration,
    transport and position. "Connected systems" names the two VMS we federate
    (the organisers' hosted grid; the simulated recorder carrying the clip).
    "Available adapters" lists the integrations that exist as code: RTSP,
@@ -132,9 +133,10 @@ department, and the screen says so rather than guessing one.
    cameras would be created and one is rejected *with its reason* (coordinates
    in London). That is the feature. Do not press **Import** unless you mean to
    add three cameras with no stream.
-4. **Network → Map.** Filter by department, integration, status. Five grid
+4. **Cameras → Map.** Filter by department, integration, status. Five grid
    cameras have no position — the catalogue names a place we could not find —
-   and they are listed apart (Command's legend: "5 cameras without a position"),
+   and they are listed apart on the Map ("without a position"; also
+   `/cameras?filter=unplaced`),
    never dropped on the map at a guess.
 5. **If the organisers add cameras today:** re-sync the catalogue (reads the
    catalogue and checks the RTSP port; it does not open a stream):
@@ -164,7 +166,7 @@ department, and the screen says so rather than guessing one.
 
 ### 2.3 Track the vehicle number given on the day (4 min) — the scored task
 
-1. **⌘K**, type the number exactly as given, Enter. Investigate opens on it.
+1. **⌘K**, type the number exactly as given, Enter. Search opens on it (or type it into the Overview's search box).
 2. Set the window: **24 h**, or **7 d** if nothing shows. The grid replays its
    footage on a loop, so history covers what we analysed since the stack came up.
 3. **If it was read:** every sighting in order — time (IST), camera, place,
@@ -248,7 +250,8 @@ there are a few pixels), and every match waits for a person to confirm it.
 2. **Four-eyes:** `DEMO/PERSONS/002` was enrolled by `supervisor` and is waiting.
    Approve it as `admin` (a different account). Show that the enroller cannot
    approve their own entry.
-3. **Alarms.** A *Possible person match* shows the enrolled reference and the
+3. **Alarms → the *Persons* filter** (right of the filter row; face matches are kept
+   out of the vehicle queue and the Overview). A *Possible person match* shows the enrolled reference and the
    captured face side by side, the similarity against the 0.45 threshold, the
    frames that agreed, and **A person must confirm this match before anyone
    acts.**
@@ -257,7 +260,7 @@ there are a few pixels), and every match waits for a person to confirm it.
 
 ### 2.5 Export the report of detected plates (1.5 min)
 
-1. **Investigate → Export plate reads (CSV)** — every plate read in the chosen
+1. **Search → Export plate reads (CSV)** — every plate read in the chosen
    window, on every camera, with timestamps. This is the submission's "report of
    detected plates with timestamps".
 2. For one vehicle: **CSV** (every visit in order and the leg to it) and
@@ -267,10 +270,10 @@ there are a few pixels), and every match waits for a person to confirm it.
 
 ### 2.6 GIS (1 min)
 
-**Network → Map**: cameras clustered where several stand at one place, filters,
+**Cameras → Map**: cameras clustered where several stand at one place, filters,
 the camera popup. Basemap **Satellite** when online, **Offline** with no network
 at all — district outlines are committed GeoJSON, which is the "works on a
-plane" claim. Command's map needs no tiles in the first place.
+plane" claim. The Overview map needs no tiles in the first place.
 
 ### 2.7 End-to-end performance and architecture (1.5 min)
 
@@ -293,9 +296,9 @@ stage; read that rather than the table if it is better or worse. Details:
 
 ### 2.8 Who looked at what (optional, 1 min)
 
-**Admin → Audit trail**: every plate search, stream open, watchlist change and
+**More → Audit trail**: every plate search, stream open, watchlist change and
 sign-in, filterable. Reading the trail is itself recorded — one row per view.
-Sign in as `auditor`: Live and Investigate are not offered, and typing
+Sign in as `auditor`: Live and Search are not offered, and typing
 `/vehicles` refuses cleanly, naming the missing permission.
 
 ---

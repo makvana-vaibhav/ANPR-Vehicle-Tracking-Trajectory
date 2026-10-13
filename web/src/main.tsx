@@ -4,7 +4,10 @@ import { BrowserRouter } from 'react-router-dom'
 
 import App from '@/App'
 import { AuthProvider } from '@/hooks/useAuth'
+import { initTheme } from '@/lib/theme'
 import '@/styles/index.css'
+
+initTheme()
 
 const container = document.getElementById('root')
 

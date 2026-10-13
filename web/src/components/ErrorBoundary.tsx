@@ -40,7 +40,7 @@ export default class ErrorBoundary extends Component<{ children: ReactNode }, St
           <p className="text-[15px] font-semibold">This screen stopped working</p>
           <p className="mt-1.5 text-xs leading-relaxed text-muted-foreground">
             Nothing was lost, and the rest of Contrail is unaffected. Try the screen again, or go
-            to Command and come back.
+            to the Overview and come back.
           </p>
           <p className="mt-3 break-words rounded-md border border-border bg-background px-3 py-2 font-mono text-[11px] text-faint">
             {error.message.slice(0, 300)}
@@ -50,7 +50,7 @@ export default class ErrorBoundary extends Component<{ children: ReactNode }, St
               Try again
             </Button>
             <Button size="sm" variant="outline" onClick={() => window.location.assign('/dashboard')}>
-              Go to Command
+              Go to Overview
             </Button>
           </div>
         </div>
